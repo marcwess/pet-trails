@@ -12,7 +12,7 @@
     "dev": "npm run build -w shared && concurrently -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
     "start": "npm run start -w server",
     "build": "npm run build -w shared && npm run build -w client && npm run build -w server",
-    "test": "npm run build -w shared && npm run test -w shared && npm run test -w server",
+    "test": "npm run build -w shared && npm run test -w shared && npm run test -w server && tsx --test client/test/connect.test.ts",
     "typecheck": "npm run build -w shared && tsc -p server --noEmit && tsc -p client --noEmit"
   },
   "devDependencies": {

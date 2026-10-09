@@ -2,6 +2,14 @@ import type { DeltaMsg, WelcomeMsg } from '@pet-trails/shared';
 
 export type NetMode = 'connecting' | 'online' | 'offline';
 
+/** Empty config, or ws:// from an https page, must not open a socket. */
+export function offlineSocketReason(protocol: string, url: string): 'empty' | 'mixed' | null {
+  const trimmed = url.trim();
+  if (!trimmed) return 'empty';
+  if (protocol === 'https:' && /^ws:\/\//i.test(trimmed)) return 'mixed';
+  return null;
+}
+
 export class NetClient {
   mode: NetMode = 'connecting';
   ping = 0;
@@ -19,67 +27,62 @@ export class NetClient {
   constructor(private readonly url: string) {}
 
   start(): void {
-    const deadline = performance.now() + 3000;
-    let delay = 280;
-    const attempt = () => {
-      if (this.mode !== 'connecting') return;
-      if (performance.now() >= deadline) {
-        this.setMode('offline');
-        return;
-      }
-      let ws: WebSocket;
+    if (this.mode !== 'connecting') return;
+    const protocol = typeof location === 'undefined' ? 'http:' : location.protocol;
+    if (offlineSocketReason(protocol, this.url)) {
+      this.setMode('offline');
+      return;
+    }
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(this.url);
+    } catch {
+      this.setMode('offline');
+      return;
+    }
+    ws.binaryType = 'arraybuffer';
+    let opened = false;
+    let failed = false;
+    let hard = 0;
+    const fail = () => {
+      if (opened || failed || this.mode !== 'connecting') return;
+      failed = true;
+      window.clearTimeout(hard);
       try {
-        ws = new WebSocket(this.url);
+        ws.close();
       } catch {
-        const wait = delay;
-        delay = Math.min(1200, delay * 2);
-        window.setTimeout(attempt, wait);
-        return;
+        /* already closed */
       }
-      ws.binaryType = 'arraybuffer';
-      let opened = false;
-      let settled = false;
-      const next = () => {
-        if (settled || opened || this.mode !== 'connecting') return;
-        settled = true;
-        window.clearTimeout(giveUp);
-        const wait = delay;
-        delay = Math.min(1200, delay * 2);
-        window.setTimeout(() => {
-          if (this.mode === 'connecting') attempt();
-        }, wait);
-      };
-      const giveUp = window.setTimeout(() => {
-        if (opened || settled) return;
+      this.setMode('offline');
+    };
+    // A blocked mixed-content socket may never emit error or close. Don't wait on it.
+    hard = window.setTimeout(fail, 3000);
+    ws.onopen = () => {
+      if (failed || this.mode !== 'connecting') {
         try {
           ws.close();
         } catch {
           /* already closed */
         }
-      }, Math.min(700, Math.max(80, deadline - performance.now())));
-      ws.onopen = () => {
-        opened = true;
-        settled = true;
-        window.clearTimeout(giveUp);
-        this.ws = ws;
-        this.setMode('online');
-        this.pingTimer = window.setInterval(() => this.sendPing(), 1000);
-      };
-      ws.onerror = () => {
-        /* onclose follows and is the only retry path */
-      };
-      ws.onclose = () => {
-        if (!opened) {
-          next();
-          return;
-        }
-        window.clearInterval(this.pingTimer);
-        if (this.ws === ws) this.ws = null;
-        if (this.mode === 'online') this.setMode('offline');
-      };
-      ws.onmessage = (ev) => this.onMessage(ev.data);
+        return;
+      }
+      opened = true;
+      window.clearTimeout(hard);
+      this.ws = ws;
+      this.setMode('online');
+      this.pingTimer = window.setInterval(() => this.sendPing(), 1000);
     };
-    attempt();
+    ws.onerror = () => fail();
+    ws.onclose = () => {
+      if (!opened) {
+        fail();
+        return;
+      }
+      window.clearInterval(this.pingTimer);
+      if (this.ws === ws) this.ws = null;
+      if (this.mode === 'online') this.setMode('offline');
+    };
+    ws.onmessage = (ev) => this.onMessage(ev.data);
   }
 
   whenSettled(): Promise<NetMode> {

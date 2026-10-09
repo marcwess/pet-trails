@@ -12,3 +12,14 @@ export function mulberry32(seed: number): () => number {
 export function rngInt(rng: () => number, maxExclusive: number): number {
   return Math.floor(rng() * maxExclusive);
 }
+
+/** Fresh entropy for a profile or an offline map. Not a clock and not shared across devices. */
+export function randomSeed(): number {
+  const buf = new Uint32Array(1);
+  const cryptoObj = globalThis.crypto;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    cryptoObj.getRandomValues(buf);
+    return buf[0]!;
+  }
+  return (Math.random() * 0x100000000) >>> 0;
+}

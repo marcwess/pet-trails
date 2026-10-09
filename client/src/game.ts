@@ -8,6 +8,7 @@ import {
   SPECIES_LABEL,
   Sim,
   applyXp,
+  randomSeed,
   integrateBody,
   lerpAngle,
   type DeltaMsg,
@@ -213,7 +214,7 @@ export class Game {
   }
 
   private startOffline(): void {
-    const sim = new Sim({}, (Date.now() ^ 0x51f1e) >>> 0);
+    const sim = new Sim({}, randomSeed());
     const player = sim.addHuman('You', this.profile.pet.species);
     if (!player) return;
     this.offline = sim;
