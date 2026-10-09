@@ -42,7 +42,8 @@ export async function loadPetGeometries(
     merged.computeBoundingBox();
     const bb = merged.boundingBox!;
     const height = Math.max(0.001, bb.max.y - bb.min.y);
-    const scale = 1.22 / height;
+    // The body stays inside about 1.5 cells so the ground ring around it is land.
+    const scale = 0.88 / height;
     merged.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
     merged.scale(scale, scale, scale);
     merged.computeVertexNormals();

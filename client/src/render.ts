@@ -448,6 +448,7 @@ export class Renderer {
       alpha: false,
       powerPreference: 'high-performance',
       stencil: false,
+      preserveDrawingBuffer: new URLSearchParams(location.search).has('cap'),
     });
     this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = SRGBColorSpace;
@@ -554,7 +555,7 @@ export class Renderer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
 
-    this.parts = new InstancedMesh(new BoxGeometry(0.42, 0.42, 0.42), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
+    this.parts = new InstancedMesh(new BoxGeometry(0.2, 0.2, 0.2), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
     this.parts.frustumCulled = false;
     this.parts.renderOrder = 5;
@@ -654,9 +655,9 @@ export class Renderer {
       const i = this.partCount++;
       const ang = (k / 40) * Math.PI * 2 + (k % 3) * 0.17;
       const sp = 2.6 + (k % 5) * 0.7;
-      const spread = 0.28 + (k % 6) * 0.16;
+      const spread = 0.55 + (k % 8) * 0.2;
       this.px[i] = wx + Math.cos(ang) * spread;
-      this.py[i] = 0.35 + (k % 5) * 0.16;
+      this.py[i] = 0.4 + (k % 6) * 0.22;
       this.pz[i] = wz + Math.sin(ang) * spread;
       this.vx[i] = Math.cos(ang) * sp;
       this.vy[i] = 2.6 + (k % 4) * 0.55;
@@ -1296,7 +1297,7 @@ export class Renderer {
       this.pr[w] = nr;
       this.pg[w] = ng;
       this.pb[w] = nb;
-      this.place(this.parts, w, nx, ny, nz, life * 9 + i, life * 5, 0.95 + life * 1.15);
+      this.place(this.parts, w, nx, ny, nz, life * 9 + i, life * 5, 0.75 + life * 0.4);
       this.parts.instanceColor?.setXYZ(w, nr, ng, nb);
       w++;
     }
