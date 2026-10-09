@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { CONFIG } from '../src/config.ts';
 import { walkCells } from '../src/motion.ts';
 import { Sim } from '../src/sim.ts';
 
@@ -201,6 +202,35 @@ test('a fresh spawn shrugs off a head-on until invulnerability ends', () => {
   assert.equal(b.alive, false);
   assert.equal(a.deathReason, 'headon');
   assert.equal(b.deathReason, 'headon');
+});
+
+test('a live-rate figure-eight claims both lobes and meets the spawn', () => {
+  const sim = new Sim({ ...CONFIG, pickupTarget: 0, targetPopulation: 1 }, 4);
+  const p = sim.addHuman('Ada', 0);
+  assert.ok(p);
+  const start = p.land;
+  const drive = (x: number, y: number, ticks: number) => {
+    for (let i = 0; i < ticks; i++) {
+      sim.setInput(p.id, x, y, sim.tick + 1);
+      sim.step();
+      assert.equal(p.alive, true, `died ${p.deathReason} at ${p.x.toFixed(1)},${p.y.toFixed(1)}`);
+    }
+  };
+  drive(1, 0, 40);
+  drive(0, -1, 28);
+  drive(-1, 0, 36);
+  drive(0, 1, 28);
+  drive(0, 1, 28);
+  drive(1, 0, 36);
+  drive(0, -1, 28);
+  drive(-1, 0, 50);
+  assert.ok(p.land > start + 120, `land grew only ${p.land - start}, both lobes should join the spawn`);
+  assert.equal(sim.ownerAt(40, 10), p.id, 'lower lobe');
+  assert.equal(sim.ownerAt(40, 35), p.id, 'upper lobe');
+  // The strip between the spawn edge and the new lobe used to stay background.
+  assert.equal(sim.ownerAt(26.9, 16), p.id, 'seam between spawn and the new land');
+  assert.equal(sim.ownerAt(5, 5), 0, 'open map stays unclaimed');
+  assert.ok(sim.auditLand());
 });
 
 test('diagonal steps paint both corner cells so the trail stays sealed', () => {

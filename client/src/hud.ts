@@ -269,22 +269,49 @@ export class Hud {
     el.classList.add('show');
   }
 
+  private hudRects: DOMRect[] = [];
+  private rectTick = 0;
+
   setLabels(items: Array<{ sx: number; sy: number; text: string; on: boolean; name?: boolean; color?: string }>): void {
+    if ((this.rectTick++ & 15) === 0) {
+      const you = document.getElementById('you');
+      this.hudRects = [this.lb.getBoundingClientRect()];
+      if (you) this.hudRects.push(you.getBoundingClientRect());
+    }
     for (let i = 0; i < this.labels.length; i++) {
       const el = this.labels[i]!;
       const item = items[i];
       if (!item || !item.on) {
-        el.style.display = 'none';
+        if (el.style.display !== 'none') el.style.display = 'none';
         continue;
       }
-      el.className = item.name ? 'tag' : 'plus';
-      el.style.display = 'block';
-      el.style.left = `${item.sx}px`;
-      el.style.top = `${item.sy}px`;
-      el.style.color = item.name ? (item.color ?? '#1c1408') : '';
-      el.textContent = item.text;
+      const cls = item.name ? 'tag' : 'plus';
+      if (el.className !== cls) el.className = cls;
+      if (el.style.display !== 'block') el.style.display = 'block';
+      el.style.transform = `translate3d(${item.sx}px, ${item.sy}px, 0) translate(-50%, -50%)`;
+      const color = item.name ? (item.color ?? '#1c1408') : '';
+      if (el.style.color !== color) el.style.color = color;
+      if (el.textContent !== item.text) el.textContent = item.text;
+      const fade = hudFade(this.hudRects, item.sx, item.sy);
+      const opacity = fade < 0.98 ? fade.toFixed(2) : '';
+      if (el.style.opacity !== opacity) el.style.opacity = opacity;
     }
   }
+}
+
+function hudFade(rects: DOMRect[], x: number, y: number): number {
+  let fade = 1;
+  const pad = 14;
+  for (const rect of rects) {
+    if (rect.width < 2 || rect.height < 2) continue;
+    if (x < rect.left - pad || x > rect.right + pad || y < rect.top - pad || y > rect.bottom + pad) continue;
+    const dx = Math.min(x - (rect.left - pad), rect.right + pad - x);
+    const dy = Math.min(y - (rect.top - pad), rect.bottom + pad - y);
+    const edge = Math.min(dx, dy);
+    const t = edge >= pad ? 0 : 1 - edge / pad;
+    if (t < fade) fade = t;
+  }
+  return fade;
 }
 
 function must(id: string): HTMLElement {

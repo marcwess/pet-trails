@@ -453,7 +453,7 @@ export class Sim {
     if (inside) {
       if (p.outside && p.trailLen > 0) {
         const hit = this.boundaryPoint(p.id, ax, ay, bx, by, true);
-        this.pushTrail(p, hit[0], hit[1], 0.04);
+        this.pushTrail(p, hit[0], hit[1], 0.04, true);
         if (p.trailLen >= 3) this.finishClaim(p);
         else p.trailLen = 0;
         if (!p.alive) return false;
@@ -464,7 +464,7 @@ export class Sim {
 
     if (!p.outside) {
       const hit = this.boundaryPoint(p.id, ax, ay, bx, by, false);
-      this.pushTrail(p, hit[0], hit[1], 0.02);
+      this.pushTrail(p, hit[0], hit[1], 0.02, true);
       p.outside = true;
     }
     this.pushTrail(p, bx, by, 0.28);
@@ -488,11 +488,19 @@ export class Sim {
     return [ax + (bx - ax) * m, ay + (by - ay) * m];
   }
 
-  private pushTrail(p: Player, x: number, y: number, min: number): void {
+  private pushTrail(p: Player, x: number, y: number, min: number, force = false): void {
     if (p.trailLen > 0) {
       const dx = x - p.trailX[p.trailLen - 1]!;
       const dy = y - p.trailY[p.trailLen - 1]!;
-      if (dx * dx + dy * dy < min * min) return;
+      if (dx * dx + dy * dy < min * min) {
+        // The boundary sample is the point the loop closes on. Keep it even
+        // when the previous sample is already within the spacing.
+        if (force) {
+          p.trailX[p.trailLen - 1] = x;
+          p.trailY[p.trailLen - 1] = y;
+        }
+        return;
+      }
     }
     if (p.trailLen >= p.trailX.length) return;
     p.trailX[p.trailLen] = x;

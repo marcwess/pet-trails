@@ -15,7 +15,7 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #b7c3d0;
+  background: #7d8b9c;
   touch-action: none;
   overscroll-behavior: none;
   user-select: none;
@@ -183,6 +183,12 @@ canvas {
   paint-order: stroke fill;
 }
 
+#hud {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
 .lb {
   position: absolute;
   top: calc(28px + env(safe-area-inset-top));
@@ -290,7 +296,7 @@ canvas {
 .kill-banner {
   position: absolute;
   left: 50%;
-  top: 22%;
+  top: 35%;
   z-index: 6;
   transform: translate(-50%, -40%) scale(0.4);
   text-align: center;
@@ -480,14 +486,31 @@ canvas {
   100% { opacity: 0; transform: translate(-50%, -56px) scale(1); }
 }
 
+#vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 52%, rgba(36, 48, 64, 0.42) 100%);
+  z-index: 1;
+}
+
+#labels {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
 .plus, .tag {
   position: absolute;
+  left: 0;
+  top: 0;
   font-weight: 700;
   font-size: 13px;
-  transform: translate(-50%, -50%);
   display: none;
   pointer-events: none;
   white-space: nowrap;
+  will-change: transform;
 }
 
 .plus {

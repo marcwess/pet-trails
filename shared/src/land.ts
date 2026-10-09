@@ -478,10 +478,12 @@ function chainCrosses(chain: Pair[]): boolean {
 }
 
 /**
- * Peel each self-crossing into its own simple face, then union every face.
- * A figure-eight therefore claims both lobes instead of the smaller one.
+ * Peel each proper self-crossing into its own simple face. The remainder is the
+ * last face, which is the one that contains the boundary arc when the trail was
+ * closed against the land. Callers drop the exterior face and union the rest,
+ * so a figure-eight keeps both lobes and the neck that joins them to the land.
  */
-function unionOfFaces(open: Pair[]): MultiPolygon | null {
+function splitFaces(open: Pair[]): MultiPolygon[] {
   let chain: Pair[] = [];
   for (const p of open) {
     const last = chain[chain.length - 1];
@@ -510,7 +512,7 @@ function unionOfFaces(open: Pair[]): MultiPolygon | null {
     for (let k = hit.i + 1; k <= hit.j; k++) loop.push(chain[k]!);
     loop.push(hit.q);
     const ring = closeRing(loop);
-    if (ring && Math.abs(signedArea(ring)) >= 0.4) faces.push([[orient(ring, true)]]);
+    if (ring && Math.abs(signedArea(ring)) >= 0.35) faces.push([[orient(ring, true)]]);
     const next: Pair[] = [];
     for (let k = 0; k <= hit.i; k++) next.push(chain[k]!);
     next.push(hit.q);
@@ -523,21 +525,104 @@ function unionOfFaces(open: Pair[]): MultiPolygon | null {
     }
   }
   const rest = closeRing(chain);
-  if (rest && Math.abs(signedArea(rest)) >= 0.4) faces.push([[orient(rest, true)]]);
-  if (faces.length === 0) return null;
+  if (rest && Math.abs(signedArea(rest)) >= 0.35) faces.push([[orient(rest, true)]]);
+  return faces;
+}
+
+function unionMany(parts: MultiPolygon[]): MultiPolygon {
   let acc: MultiPolygon = [];
-  for (const face of faces) {
+  for (const face of parts) {
+    if (face.length === 0) continue;
     if (acc.length === 0) {
       acc = cloneMulti(face);
       continue;
     }
-    try {
-      acc = pc.union(acc, face);
-    } catch {
-      acc = acc.concat(cloneMulti(face));
-    }
+    const merged = safeUnion(acc, face);
+    acc = merged.length > 0 ? merged : acc.concat(cloneMulti(face));
   }
-  return acc.length > 0 ? acc : null;
+  return acc;
+}
+
+/** Keep the kink at a crossing. Straight runs collapse; a live-rate curve does not. */
+function decimateTrail(pts: Pair[]): Pair[] {
+  if (pts.length < 3) return pts.slice();
+  const out: Pair[] = [pts[0]!];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i]!;
+    const last = out[out.length - 1]!;
+    const ax = p[0] - last[0];
+    const ay = p[1] - last[1];
+    const la2 = ax * ax + ay * ay;
+    if (la2 < 0.04) continue;
+    const next = pts[i + 1]!;
+    const bx = next[0] - p[0];
+    const by = next[1] - p[1];
+    const la = Math.sqrt(la2);
+    const lb = Math.hypot(bx, by);
+    if (la > 1e-6 && lb > 1e-6) {
+      const dot = (ax / la) * (bx / lb) + (ay / la) * (by / lb);
+      if (dot > 0.9992 && la < 0.9) continue;
+    }
+    out.push([p[0], p[1]]);
+  }
+  const end = pts[pts.length - 1]!;
+  const last = out[out.length - 1]!;
+  if (Math.hypot(end[0] - last[0], end[1] - last[1]) < 1e-4) out[out.length - 1] = [end[0], end[1]];
+  else out.push([end[0], end[1]]);
+  return out.length >= 3 ? out : pts.map((p) => [p[0], p[1]] as Pair);
+}
+
+function offsetRing(ring: Ring, dist: number): Ring | null {
+  const n = ring.length > 1 && samePt(ring[0]!, ring[ring.length - 1]!) ? ring.length - 1 : ring.length;
+  if (n < 3 || Math.abs(dist) < 1e-6) return closeRing(ring.slice(0, n));
+  const ccw = signedArea(ring) > 0;
+  const out: Pair[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = ring[(i - 1 + n) % n]!;
+    const cur = ring[i]!;
+    const next = ring[(i + 1) % n]!;
+    let ax = cur[0] - prev[0];
+    let ay = cur[1] - prev[1];
+    let bx = next[0] - cur[0];
+    let by = next[1] - cur[1];
+    const la = Math.hypot(ax, ay) || 1;
+    const lb = Math.hypot(bx, by) || 1;
+    ax /= la;
+    ay /= la;
+    bx /= lb;
+    by /= lb;
+    const sign = ccw ? 1 : -1;
+    const rx = ay * sign;
+    const ry = -ax * sign;
+    const sx = by * sign;
+    const sy = -bx * sign;
+    let mx = rx + sx;
+    let my = ry + sy;
+    const ml = Math.hypot(mx, my);
+    if (ml < 1e-5) {
+      out.push([cur[0] + rx * dist, cur[1] + ry * dist]);
+      continue;
+    }
+    mx /= ml;
+    my /= ml;
+    const denom = mx * rx + my * ry;
+    const scale = denom > 0.3 ? Math.min(2.2, 1 / denom) : 1;
+    out.push([cur[0] + mx * dist * scale, cur[1] + my * dist * scale]);
+  }
+  return closeRing(out);
+}
+
+function offsetMulti(mp: MultiPolygon, dist: number): MultiPolygon {
+  const out: MultiPolygon = [];
+  for (const poly of mp) {
+    const rings: Ring[] = [];
+    for (let r = 0; r < poly.length; r++) {
+      const ring = offsetRing(poly[r]!, r === 0 ? dist : -dist);
+      if (ring && Math.abs(signedArea(ring)) > 0.15) rings.push(orient(ring, r === 0));
+    }
+    if (rings.length > 0) out.push(rings);
+  }
+  return out;
 }
 
 function pointInRect(x: number, y: number, x0: number, y0: number, x1: number, y1: number): boolean {
@@ -785,80 +870,103 @@ export class LandBook {
       raw.push(p);
     }
     if (raw.length < 3) return null;
-    const simplified = douglasPeucker(raw, 0.08);
-    const trail = simplified.length >= 3 ? simplified : raw;
+    // Douglas-Peucker at the old epsilon erased the shallow crossing of a
+    // live-rate curve, so the loop fell through to a single notch. Keep bends.
+    const trail = decimateTrail(raw);
     const own = this.multi[id]!;
-    const start = nearestSnap(own, trail[0]![0], trail[0]![1], 2);
-    const end = nearestSnap(own, trail[trail.length - 1]![0], trail[trail.length - 1]![1], 2);
+    const start = nearestSnap(own, trail[0]![0], trail[0]![1], 4);
+    const end = nearestSnap(own, trail[trail.length - 1]![0], trail[trail.length - 1]![1], 4);
     const box = ringBBox(trail);
-    const candidates: MultiPolygon[] = [];
+    const chains: Pair[][] = [];
     if (start && end && start.poly === end.poly) {
       const ring = own[start.poly]![0]!;
+      const arcs: Pair[][] = [];
       for (const dir of [1, -1] as const) {
         const arc = walkArc(ring, end.snap, start.snap, dir);
         const pts: Pair[] = [[start.snap.x, start.snap.y]];
         for (let i = 1; i < trail.length - 1; i++) pts.push(trail[i]!);
         pts.push([end.snap.x, end.snap.y]);
         for (let i = 1; i < arc.length; i++) pts.push(arc[i]!);
-        const closed = closeRing(pts);
-        if (!closed) continue;
-        const poly = orient(closed, true);
-        if (Math.abs(signedArea(poly)) < 0.4) continue;
-        candidates.push([[poly]]);
+        arcs.push(pts);
       }
+      arcs.sort((a, b) => a.length - b.length);
+      for (const pts of arcs) chains.push(pts);
     }
-    const straight = closeRing(trail);
-    if (straight && Math.abs(signedArea(straight)) >= 0.4) candidates.push([[orient(straight, true)]]);
-    let best: MultiPolygon | null = null;
-    let bestArea = Infinity;
-    let crossed: MultiPolygon | null = null;
-    let crossedArea = -1;
-    for (const cand of candidates) {
-      const ring = cand[0]?.[0];
-      if (!ring) continue;
-      const open = ring.slice(0, -1);
-      if (chainCrosses(open)) {
-        const faces = unionOfFaces(open);
-        if (!faces) continue;
-        const clipped = this.clip(sanitize(faces, 0.02));
-        if (clipped.length === 0) continue;
-        const added = own.length === 0 ? clipped : safeDiff(clipped, own);
-        if (farCorner(added, box, this.mapW, this.mapH)) continue;
-        const area = multiArea(added);
-        if (area < 0.5) continue;
-        if (area > crossedArea) {
-          crossedArea = area;
-          crossed = clipped;
+    chains.push(trail.slice());
+
+    let bestCross: MultiPolygon | null = null;
+    let bestCrossArea = -1;
+    let bestSimple: MultiPolygon | null = null;
+    let bestSimpleArea = Infinity;
+    for (const pts of chains) {
+      const closed = closeRing(pts);
+      if (!closed || Math.abs(signedArea(closed)) < 0.4) continue;
+      const open = closed.slice(0, -1);
+      const crossed = chainCrosses(open);
+      let region: MultiPolygon | null = null;
+      if (crossed) {
+        const kept: MultiPolygon[] = [];
+        for (const face of splitFaces(open)) {
+          if (this.exteriorFace(face, box)) continue;
+          kept.push(face);
         }
-        continue;
+        if (kept.length === 0) continue;
+        region = unionMany(kept);
+      } else {
+        region = [[orient(closed, true)]];
       }
-      const clipped = this.clip(cand);
+      if (!region || region.length === 0) continue;
+      const clipped = this.clip(sanitize(region, 0.02));
       if (clipped.length === 0) continue;
       const added = own.length === 0 ? clipped : safeDiff(clipped, own);
+      if (farCorner(added, box, this.mapW, this.mapH)) continue;
       const area = multiArea(added);
       if (area < 0.5) continue;
-      if (farCorner(added, box, this.mapW, this.mapH)) continue;
-      if (area < bestArea) {
-        bestArea = area;
-        best = clipped;
-      }
-    }
-    if (crossed) return crossed;
-    if (!best) {
-      for (const cand of candidates) {
-        const ring = cand[0]?.[0];
-        if (ring && chainCrosses(ring.slice(0, -1))) continue;
-        const clipped = this.clip(cand);
-        const added = own.length === 0 ? clipped : safeDiff(clipped, own);
-        const area = multiArea(added);
-        if (area < 0.5) continue;
-        if (area < bestArea) {
-          bestArea = area;
-          best = clipped;
+      if (crossed) {
+        if (area > bestCrossArea) {
+          bestCrossArea = area;
+          bestCross = clipped;
         }
+      } else if (area < bestSimpleArea) {
+        bestSimpleArea = area;
+        bestSimple = clipped;
       }
     }
-    return best;
+    const chosen = bestCross ?? bestSimple;
+    if (!chosen) return null;
+    return this.weldToLand(own, chosen, box);
+  }
+
+  /** A face that contains a map corner, or is larger than the trail, is the outside of the bowtie. */
+  private exteriorFace(
+    face: MultiPolygon,
+    box: { minX: number; minY: number; maxX: number; maxY: number },
+  ): boolean {
+    if (face.length === 0) return true;
+    if (farCorner(face, box, this.mapW, this.mapH)) return true;
+    const area = multiArea(face);
+    const bw = Math.max(1, box.maxX - box.minX);
+    const bh = Math.max(1, box.maxY - box.minY);
+    return area > bw * bh + Math.max(bw, bh) * 3 + 6;
+  }
+
+  /**
+   * Fill a thin background crack between the new loop and the land it closed
+   * against. Lobes that only met the spawn at a vertex left a visible strip.
+   */
+  private weldToLand(
+    own: MultiPolygon,
+    region: MultiPolygon,
+    box: { minX: number; minY: number; maxX: number; maxY: number },
+  ): MultiPolygon {
+    if (own.length === 0 || region.length === 0) return region;
+    const band = safeInter(offsetMulti(own, 1.6), offsetMulti(region, 1.6));
+    if (band.length === 0) return region;
+    const welded = this.clip(safeUnion(region, band));
+    const added = safeDiff(welded, own);
+    if (farCorner(added, box, this.mapW, this.mapH)) return region;
+    if (multiArea(added) < 0.5) return region;
+    return welded.length > 0 ? welded : region;
   }
 }
 
