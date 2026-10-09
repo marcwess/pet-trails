@@ -35,6 +35,8 @@ export class Sim {
   private readonly pickups: Pickup[];
   private pickupSeq = 1;
   private nameSeq = 0;
+  private readonly usedNames = new Set<string>();
+  private readonly freeNames: string[] = [];
   private readonly aliveBuf: Player[] = [];
   private botView: BotView;
 
@@ -80,8 +82,7 @@ export class Sim {
     const p = this.alloc();
     if (!p) return null;
     p.bot = true;
-    p.name = BOT_NAMES[this.nameSeq % BOT_NAMES.length]! + (this.nameSeq >= BOT_NAMES.length ? ` ${1 + ((this.nameSeq / BOT_NAMES.length) | 0)}` : '');
-    this.nameSeq++;
+    p.name = this.takeBotName();
     p.pet = rngInt(this.rng, SPECIES.length);
     p.botStyle = p.id % 2;
     p.botTurnSign = this.rng() < 0.5 ? -1 : 1;
@@ -94,11 +95,37 @@ export class Sim {
     const p = this.players[id];
     if (!p || !p.active) return;
     if (p.alive) this.grid.clearPlayer(id);
+    if (p.bot) this.releaseBotName(p.name);
     p.alive = false;
     p.active = false;
     p.trailLen = 0;
     p.land = 0;
     this.events.push({ e: 'leave', id });
+  }
+
+  private takeBotName(): string {
+    while (this.freeNames.length > 0) {
+      const reused = this.freeNames.pop()!;
+      if (!this.usedNames.has(reused)) {
+        this.usedNames.add(reused);
+        return reused;
+      }
+    }
+    for (let i = 0; i < BOT_NAMES.length; i++) {
+      const name = BOT_NAMES[(this.nameSeq + i) % BOT_NAMES.length]!;
+      if (this.usedNames.has(name)) continue;
+      this.nameSeq = (this.nameSeq + i + 1) % BOT_NAMES.length;
+      this.usedNames.add(name);
+      return name;
+    }
+    const fallback = BOT_NAMES[this.nameSeq % BOT_NAMES.length]!;
+    this.nameSeq++;
+    return fallback;
+  }
+
+  private releaseBotName(name: string): void {
+    if (!name || !this.usedNames.delete(name)) return;
+    this.freeNames.push(name);
   }
 
   respawn(id: number): void {
@@ -354,28 +381,32 @@ export class Sim {
       }
     }
 
-    if (bot && !human && this.botsNear(cx0, cy0, 40) < 4) {
-      const slot = this.botsNear(cx0, cy0, 40);
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const ang = (slot / 4) * Math.PI * 2 + 0.5 + attempt * 0.35;
-        const dist = 24 + attempt * 1.5;
+    const minCenter = size + 14;
+    if (bot && !human && this.botsNear(cx0, cy0, 90) < 4) {
+      const slot = this.botsNear(cx0, cy0, 90);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const ang = (slot / 4) * Math.PI * 2 + 0.4 + attempt * 0.45;
+        const dist = 48 + attempt * 6;
         const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
         const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
         if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
-        if (this.areaClear(x, y, size)) return { x, y };
+        if (!this.areaClear(x, y, size)) continue;
+        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
+        return { x, y };
       }
     }
 
     const anchor = bot ? human : this.livingAnchor(false);
-    const wantNear = bot ? !!human && this.botsNear(human!.x, human!.y, 32) < 4 : !!anchor;
+    const wantNear = bot ? !!human && this.botsNear(human!.x, human!.y, 70) < 5 : !!anchor;
     if (wantNear && anchor) {
-      for (let attempt = 0; attempt < 36; attempt++) {
+      for (let attempt = 0; attempt < 40; attempt++) {
         const ang = this.rng() * Math.PI * 2;
-        const dist = 20 + this.rng() * 10;
+        const dist = 36 + this.rng() * 18;
         const x = Math.round(anchor.x + Math.cos(ang) * dist - size / 2);
         const y = Math.round(anchor.y + Math.sin(ang) * dist - size / 2);
         if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
         if (!this.areaClear(x, y, size)) continue;
+        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
         return { x, y };
       }
     }
@@ -383,11 +414,13 @@ export class Sim {
     if (bot && !human) {
       for (let attempt = 0; attempt < 28; attempt++) {
         const ang = this.rng() * Math.PI * 2;
-        const dist = 50 + this.rng() * 24;
+        const dist = 62 + this.rng() * 28;
         const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
         const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
         if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
-        if (this.areaClear(x, y, size)) return { x, y };
+        if (!this.areaClear(x, y, size)) continue;
+        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
+        return { x, y };
       }
     }
 
@@ -401,7 +434,7 @@ export class Sim {
       let crowded = false;
       for (const o of this.roster) {
         if (!o.active || !o.alive) continue;
-        if (Math.hypot(o.x - px, o.y - py) < 28) {
+        if (Math.hypot(o.x - px, o.y - py) < (bot ? size + 14 : 28)) {
           crowded = true;
           break;
         }

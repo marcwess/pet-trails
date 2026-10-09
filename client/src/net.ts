@@ -20,10 +20,10 @@ export class NetClient {
 
   start(): void {
     const deadline = performance.now() + 3000;
+    let delay = 280;
     const attempt = () => {
       if (this.mode !== 'connecting') return;
-      const left = deadline - performance.now();
-      if (left <= 0) {
+      if (performance.now() >= deadline) {
         this.setMode('offline');
         return;
       }
@@ -31,45 +31,50 @@ export class NetClient {
       try {
         ws = new WebSocket(this.url);
       } catch {
-        window.setTimeout(attempt, 200);
+        const wait = delay;
+        delay = Math.min(1200, delay * 2);
+        window.setTimeout(attempt, wait);
         return;
       }
       ws.binaryType = 'arraybuffer';
       let opened = false;
-      let finished = false;
-      const retry = () => {
-        if (finished || opened || this.mode !== 'connecting') return;
-        finished = true;
+      let settled = false;
+      const next = () => {
+        if (settled || opened || this.mode !== 'connecting') return;
+        settled = true;
         window.clearTimeout(giveUp);
-        window.setTimeout(attempt, 160);
+        const wait = delay;
+        delay = Math.min(1200, delay * 2);
+        window.setTimeout(() => {
+          if (this.mode === 'connecting') attempt();
+        }, wait);
       };
       const giveUp = window.setTimeout(() => {
-        if (opened) return;
+        if (opened || settled) return;
         try {
           ws.close();
         } catch {
           /* already closed */
         }
-        retry();
-      }, Math.min(800, Math.max(40, left)));
+      }, Math.min(700, Math.max(80, deadline - performance.now())));
       ws.onopen = () => {
         opened = true;
-        finished = true;
+        settled = true;
         window.clearTimeout(giveUp);
         this.ws = ws;
         this.setMode('online');
         this.pingTimer = window.setInterval(() => this.sendPing(), 1000);
       };
       ws.onerror = () => {
-        if (!opened) retry();
+        /* onclose follows and is the only retry path */
       };
       ws.onclose = () => {
         if (!opened) {
-          retry();
+          next();
           return;
         }
         window.clearInterval(this.pingTimer);
-        this.ws = null;
+        if (this.ws === ws) this.ws = null;
         if (this.mode === 'online') this.setMode('offline');
       };
       ws.onmessage = (ev) => this.onMessage(ev.data);

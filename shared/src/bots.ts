@@ -1,5 +1,6 @@
 import type { GameConfig } from './config.js';
 import type { Grid } from './grid.js';
+import { angleDelta } from './motion.js';
 import type { Player } from './player.js';
 
 export interface BotView {
@@ -98,8 +99,7 @@ function avoid(p: Player, view: BotView): boolean {
     const i = grid.idx(cx, cy);
     if (grid.trail[i] === p.id && grid.owner[i] !== p.id) {
       const s = p.botTurnSign || 1;
-      p.desiredX = -dy * s;
-      p.desiredY = dx * s;
+      steer(p, Math.atan2(dy, dx) + s * 0.85);
       return true;
     }
   }
@@ -118,6 +118,28 @@ export function updateBot(p: Player, view: BotView): void {
 
   if (p.outside && (trailThreatened(p, view) || biggerNeighbor(p, view))) {
     goHome(p, view);
+    return;
+  }
+
+  if (p.botPhase === 2) {
+    if (!p.outside) {
+      p.botPhase = 0;
+      return;
+    }
+    // Desired stays a small step ahead of heading, so the shared turn-rate
+    // limit draws a wide arc instead of a square corner.
+    steer(p, p.heading + p.botTurnSign * 0.09);
+    if (Math.abs(angleDelta(p.botDir, p.heading)) >= 1.05) {
+      p.botTurns++;
+      steer(p, p.heading);
+      p.botMoved = 0;
+      p.botLeg = legLength(p, view);
+      if (p.botTurns >= 3) {
+        goHome(p, view);
+        return;
+      }
+      p.botPhase = 1;
+    }
     return;
   }
 
@@ -172,14 +194,9 @@ export function updateBot(p: Player, view: BotView): void {
   }
 
   if (p.botPhase === 1 && p.outside && p.botMoved >= p.botLeg) {
-    p.botTurns++;
-    if (p.botTurns >= 3) {
-      goHome(p, view);
-      return;
-    }
-    steer(p, p.heading + p.botTurnSign * (Math.PI / 2));
+    p.botPhase = 2;
+    p.botDir = p.heading;
     p.botMoved = 0;
-    p.botLeg = legLength(p, view);
     return;
   }
 

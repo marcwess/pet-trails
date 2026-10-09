@@ -3,6 +3,7 @@ import {
   FLAG_ALIVE,
   FLAG_BOT,
   FLAG_OUTSIDE,
+  PALETTE,
   SPECIES,
   SPECIES_LABEL,
   Sim,
@@ -82,6 +83,7 @@ export class Game {
   private steerUntil = 0;
   private hitLeft = 0;
   private boardAcc = 0;
+  private shownKills = 0;
   private died = false;
   private readonly board: BoardRow[] = [];
   private readonly order: number[] = [];
@@ -158,6 +160,7 @@ export class Game {
       sampleTrails: (limit = 240) => this.sampleTrails(limit, false),
       sampleOwnTrail: (limit = 80) => this.sampleTrails(limit, true),
       entities: () => this.entityList(),
+      landCheck: () => this.landCheck(),
     };
   }
 
@@ -176,7 +179,9 @@ export class Game {
 
   private async play(): Promise<void> {
     this.died = false;
+    this.shownKills = 0;
     this.hud.showDeath(null);
+    this.hud.setYou('0.0%', 0);
     const mode = await this.net.whenSettled();
     this.hud.showTitle(false);
     this.hud.showHud(true);
@@ -308,13 +313,20 @@ export class Game {
       ent.name = p.bot ? p.name : 'You';
       ent.pet = p.pet;
       ent.bot = p.bot;
+      const prevAlive = ent.alive;
       if (!ent.alive && p.alive) {
         this.renderer.clearPath(p.id);
         ent.blinkUntil = performance.now() + 2000;
       }
       ent.alive = p.alive;
       ent.land = p.land;
-      ent.kills = p.kills;
+      if (p.id === this.selfId) {
+        if (!prevAlive && p.alive) this.shownKills = p.kills;
+        else if (p.kills > this.shownKills) this.shownKills = p.kills;
+        ent.kills = Math.max(p.kills, this.shownKills);
+      } else {
+        ent.kills = p.kills;
+      }
       ent.coins = p.coins;
       ent.xp = p.xp;
       ent.outside = p.outside;
@@ -419,12 +431,23 @@ export class Game {
     ent.pet = snap.p;
     ent.bot = (snap.f & FLAG_BOT) !== 0;
     const alive = (snap.f & FLAG_ALIVE) !== 0;
+    const prevAlive = ent.alive;
     if (ent.alive && !alive) this.renderer.clearPath(ent.id);
     if (!ent.alive && alive) ent.blinkUntil = performance.now() + 2000;
     ent.alive = alive;
     ent.outside = (snap.f & FLAG_OUTSIDE) !== 0;
     ent.land = snap.l;
-    ent.kills = snap.k;
+    if (snap.i === this.selfId) {
+      if (!prevAlive && alive) this.shownKills = snap.k;
+      else if (snap.k > this.shownKills) this.shownKills = snap.k;
+      ent.kills = Math.max(snap.k, this.shownKills);
+      if (this.phase === 'playing') {
+        const pct = (ent.land / (CONFIG.gridW * CONFIG.gridH)) * 100;
+        this.hud.setYou(`${pct.toFixed(1)}%`, ent.kills);
+      }
+    } else {
+      ent.kills = snap.k;
+    }
     ent.coins = snap.c;
     ent.xp = snap.xp;
     if (snap.tn > ent.trainLen) ent.hop = 0.42;
@@ -476,6 +499,13 @@ export class Game {
         if (mine) this.hitLeft = 0.06;
         if (ev.killer === this.selfId) {
           const victim = this.ents[ev.victim];
+          const me = this.ents[this.selfId];
+          if (me) {
+            this.shownKills = Math.max(this.shownKills + 1, me.kills + 1);
+            me.kills = this.shownKills;
+            const pct = (me.land / (CONFIG.gridW * CONFIG.gridH)) * 100;
+            this.hud.setYou(`${pct.toFixed(1)}%`, me.kills);
+          }
           this.hud.toast(`Caught ${victim?.name || 'a pet'}!`);
           buzz(14);
         }
@@ -504,6 +534,9 @@ export class Game {
     this.died = true;
     this.phase = 'dead';
     this.api.phase = 'dead';
+    const me = this.ents[this.selfId];
+    if (me) me.alive = false;
+    this.updateBoard();
     const levels = applyXp(this.profile.pet, Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
@@ -569,13 +602,21 @@ export class Game {
     }
     this.order.sort((a, b) => this.ents[b]!.land - this.ents[a]!.land);
     const total = CONFIG.gridW * CONFIG.gridH;
-    let selfInTop = false;
-    const top = Math.min(5, this.order.length);
-    for (let i = 0; i < top; i++) if (this.order[i] === this.selfId) selfInTop = true;
+    const topIds: number[] = [];
+    const listed = new Set<number>();
+    for (const id of this.order) {
+      if (listed.has(id) || topIds.length >= 5) continue;
+      listed.add(id);
+      topIds.push(id);
+    }
+    const me = this.ents[this.selfId];
+    if (me && me.used && !listed.has(this.selfId) && topIds.length < 6) {
+      listed.add(this.selfId);
+      topIds.push(this.selfId);
+    }
     for (let i = 0; i < 6; i++) {
       const row = this.board[i]!;
-      let id = i < 5 ? this.order[i] : undefined;
-      if (i === 5) id = !selfInTop ? this.selfId : undefined;
+      const id = topIds[i];
       const ent = id ? this.ents[id] : undefined;
       if (!ent || !ent.used) {
         row.show = false;
@@ -588,11 +629,21 @@ export class Game {
       row.color = cssColor(ent.id);
     }
     this.hud.setBoard(this.board);
-    const me = this.ents[this.selfId];
     if (me && me.used) {
       const pct = (me.land / total) * 100;
-      this.hud.setYou(`${pct.toFixed(1)}%`, me.kills);
+      this.hud.setYou(`${pct.toFixed(1)}%`, Math.max(me.kills, this.shownKills));
     }
+  }
+
+  private landCheck(): {
+    id: number;
+    cells: ReturnType<Territory['ownerBounds']>;
+    pixels: Renderer['landMeasure'];
+  } {
+    const id = this.selfId;
+    const c = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
+    this.renderer.queueColorMeasure(c[0], c[1], c[2]);
+    return { id, cells: this.territory.ownerBounds(id), pixels: this.renderer.landMeasure };
   }
 
   private playerView() {
@@ -767,6 +818,19 @@ declare global {
       sampleTrails: (limit?: number) => Array<{ x: number; y: number; owner: number }>;
       sampleOwnTrail: (limit?: number) => Array<{ x: number; y: number; owner: number }>;
       entities: () => Array<{ id: number; x: number; y: number; land: number; alive: boolean; bot: boolean; train: number; name: string; outside: boolean }>;
+      landCheck: () => {
+        id: number;
+        cells: { x0: number; y0: number; x1: number; y1: number; w: number; h: number; cells: number } | null;
+        pixels: {
+          pixels: number;
+          boxW: number;
+          boxH: number;
+          minX: number;
+          minY: number;
+          maxX: number;
+          maxY: number;
+        } | null;
+      };
     };
   }
 }

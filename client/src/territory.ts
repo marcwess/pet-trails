@@ -6,8 +6,8 @@ const MAX_OWNERS = 24;
 const LOOP_N = 480;
 const MAX_E = 16384;
 const MAX_P = 16384;
-/** Signed-distance band, in cells, around the smoothed contour. Narrow so the offset shadow sits outside it. */
-const FEATHER = 0.42;
+/** How far, in cells, the smoothed contour is allowed to repaint. Wide enough to cut a 1-cell stair. */
+const BAND = 1.2;
 /** Previous ramp texels kept per owner so the next claim can erase them without scanning the map. */
 const TOUCH_N = 32768;
 
@@ -15,9 +15,9 @@ const TOUCH_N = 32768;
  * Territory is a single DataTexture. After the initial upload, only dirty
  * pixel rows go to the GPU via texSubImage2D.
  *
- * Cells are painted solid. A finished claim (not every frame) corner-cuts that
- * owner's contour and snaps it to the trail centerline, then writes a narrow
- * coverage ramp. The ground shader turns that ramp into a 1.5px edge.
+ * Cells are painted solid. A finished claim (not every frame) snaps that
+ * owner's contour onto the trail and relaxes the stairs, then rewrites the
+ * edge band. One opaque map plane alpha-tests that texture.
  */
 export class Territory {
   readonly gridW: number;
@@ -29,12 +29,26 @@ export class Territory {
   readonly texture: DataTexture;
   snapshotUploads = 0;
 
-  /** Cell bounds of each owner that currently has land. */
-  visitBoxes(fn: (x0: number, y0: number, x1: number, y1: number) => void): void {
-    for (let id = 1; id < MAX_OWNERS; id++) {
-      if (!this.bbOn[id]) continue;
-      fn(this.bbMinX[id]!, this.bbMinY[id]!, this.bbMaxX[id]!, this.bbMaxY[id]!);
+  /** Gameplay cells owned by `id`, not the mesh. A spawn square is about 18×18. */
+  ownerBounds(id: number): { x0: number; y0: number; x1: number; y1: number; w: number; h: number; cells: number } | null {
+    let x0 = this.gridW;
+    let y0 = this.gridH;
+    let x1 = -1;
+    let y1 = -1;
+    let cells = 0;
+    const n = this.gridW * this.gridH;
+    for (let i = 0; i < n; i++) {
+      if (this.owner[i] !== id) continue;
+      const x = i % this.gridW;
+      const y = (i / this.gridW) | 0;
+      cells++;
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
     }
+    if (cells === 0) return null;
+    return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1, cells };
   }
 
   private readonly data: Uint8Array<ArrayBuffer>;
@@ -56,6 +70,12 @@ export class Territory {
   private rowCount = 0;
   private now = 0;
   private ready = false;
+  /** 1 → 0 over the claim bounce. The renderer reads this. */
+  claimPulse = 0;
+  claimX0 = 0;
+  claimY0 = 0;
+  claimX1 = 0;
+  claimY1 = 0;
 
   private readonly dirtyIds = new Int32Array(MAX_OWNERS);
   private readonly dirtyOn = new Uint8Array(MAX_OWNERS);
@@ -167,6 +187,7 @@ export class Territory {
   }
 
   applyRuns(runs: ArrayLike<number>, animate: boolean, ox: number, oy: number): void {
+    let boxReset = false;
     for (let k = 0; k + 3 < runs.length; ) {
       const start = runs[k++]!;
       const o = runs[k++]!;
@@ -198,7 +219,22 @@ export class Territory {
         if (animate && o !== 0) {
           const dx = cx + 0.5 - ox;
           const dy = cy + 0.5 - oy;
-          delay = Math.min(0.35, Math.hypot(dx, dy) * 0.011);
+          const t = Math.min(1, Math.hypot(dx, dy) / 34);
+          const ease = 1 - (1 - t) * (1 - t);
+          delay = 0.6 * ease;
+          if (!boxReset) {
+            this.claimX0 = cx;
+            this.claimY0 = cy;
+            this.claimX1 = cx;
+            this.claimY1 = cy;
+            boxReset = true;
+          } else {
+            if (cx < this.claimX0) this.claimX0 = cx;
+            if (cy < this.claimY0) this.claimY0 = cy;
+            if (cx > this.claimX1) this.claimX1 = cx;
+            if (cy > this.claimY1) this.claimY1 = cy;
+          }
+          this.claimPulse = 1;
         }
         this.revealAt[idx] = this.now + delay;
         if (!this.queued[idx]) {
@@ -231,6 +267,7 @@ export class Territory {
     this.qN = w;
     this.cool(dt);
     this.flushEdges();
+    if (this.claimPulse > 0) this.claimPulse = Math.max(0, this.claimPulse - dt / 0.55);
   }
 
   private touchHot(i: number): void {
@@ -486,12 +523,6 @@ export class Territory {
       this.touchLen[owner] = 0;
       return;
     }
-    this.sid++;
-    if (this.sid === 65535) {
-      this.sdStamp.fill(0);
-      this.sid = 1;
-    }
-    this.touchN = 0;
     this.writeLoops(owner, this.loopN[owner]! >= 2);
     this.saveTouches(owner);
   }
@@ -549,8 +580,18 @@ export class Territory {
     }
   }
 
-  /** Walk every boundary loop, smooth it, and splat a coverage ramp. */
+  /**
+   * Walk every boundary loop. Spawn squares stay on the cell grid. A claim
+   * with a stored trail is snapped onto that curve and relaxed so the stair
+   * corners move onto the path, then the whole band is re-rasterized.
+   */
   private writeLoops(owner: number, useLoop: boolean): void {
+    this.sid++;
+    if (this.sid === 65535) {
+      this.sdStamp.fill(0);
+      this.sid = 1;
+    }
+    this.touchN = 0;
     const stride = this.gridH + 1;
     for (let e = 0; e < this.edgeCount; e++) this.eSeen[e] = 0;
     for (let start = 0; start < this.edgeCount; start++) {
@@ -559,12 +600,92 @@ export class Territory {
       if (count < 4) continue;
       if (useLoop) count = this.snapLoop(owner, count);
       if (count < 4) continue;
-      count = this.decimate(count, 1600);
-      // Squares stay on the cell grid. A captured trail is corner-cut twice so the claim reads as a curve.
-      count = this.smooth(count, useLoop ? 2 : 0);
-      this.splat(count);
+      if (count > 1400) count = this.decimate(count, 1400);
+      count = this.relax(count, useLoop ? 12 : 0);
+      this.accumulate(count);
     }
-    this.commitRamp(owner);
+    this.commitRaster(owner);
+  }
+
+  /** Pull corners toward their neighbors without adding points, so a staircase becomes a curve. */
+  private relax(n: number, times: number): number {
+    const keep = 0.5;
+    const share = (1 - keep) / 2;
+    for (let t = 0; t < times; t++) {
+      for (let i = 0; i < n; i++) {
+        const p = (i - 1 + n) % n;
+        const q = (i + 1) % n;
+        this.bx[i] = this.ax[i]! * keep + (this.ax[p]! + this.ax[q]!) * share;
+        this.by[i] = this.ay[i]! * keep + (this.ay[p]! + this.ay[q]!) * share;
+      }
+      for (let i = 0; i < n; i++) {
+        this.ax[i] = this.bx[i]!;
+        this.ay[i] = this.by[i]!;
+      }
+    }
+    return n;
+  }
+
+  /** Nearest-edge distance. Positive is inside a counter-clockwise loop. */
+  private signedDist(x: number, y: number, n: number): number {
+    let best = 1e9;
+    let sign = 1;
+    for (let i = 0; i < n; i++) {
+      const ax = this.ax[i]!;
+      const ay = this.ay[i]!;
+      const bx = this.ax[(i + 1) % n]!;
+      const by = this.ay[(i + 1) % n]!;
+      const vx = bx - ax;
+      const vy = by - ay;
+      const len2 = vx * vx + vy * vy;
+      let t = 0;
+      if (len2 > 1e-8) t = Math.max(0, Math.min(1, ((x - ax) * vx + (y - ay) * vy) / len2));
+      const cx = ax + vx * t;
+      const cy = ay + vy * t;
+      const dist = Math.hypot(x - cx, y - cy);
+      if (dist < best) {
+        best = dist;
+        const cross = vx * (y - ay) - vy * (x - ax);
+        sign = cross >= 0 ? 1 : -1;
+      }
+    }
+    return sign * best;
+  }
+
+  private accumulate(n: number): void {
+    if (n < 4) return;
+    let minX = 1e9;
+    let maxX = -1e9;
+    let minY = 1e9;
+    let maxY = -1e9;
+    for (let i = 0; i < n; i++) {
+      const x = this.ax[i]!;
+      const y = this.ay[i]!;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    const t0 = this.texOf(minX - BAND, maxY + BAND);
+    const t1 = this.texOf(maxX + BAND, minY - BAND);
+    const x0 = Math.max(0, Math.floor(Math.min(t0.tx, t1.tx)));
+    const x1 = Math.min(this.texW - 1, Math.ceil(Math.max(t0.tx, t1.tx)));
+    const y0 = Math.max(0, Math.floor(Math.min(t0.ty, t1.ty)));
+    const y1 = Math.min(this.texH - 1, Math.ceil(Math.max(t0.ty, t1.ty)));
+    for (let ty = y0; ty <= y1; ty++) {
+      for (let tx = x0; tx <= x1; tx++) {
+        const sim = this.simOf(tx, ty);
+        const signed = this.signedDist(sim.x, sim.y, n);
+        if (Math.abs(signed) > BAND) continue;
+        const idx = ty * this.texW + tx;
+        const prev = this.sdStamp[idx] === this.sid ? Math.abs(this.sd[idx]!) : Infinity;
+        if (Math.abs(signed) < prev) {
+          if (this.sdStamp[idx] !== this.sid && this.touchN < this.touch.length) this.touch[this.touchN++] = idx;
+          this.sdStamp[idx] = this.sid;
+          this.sd[idx] = signed;
+        }
+      }
+    }
   }
 
   private edgeCount = 0;
@@ -643,7 +764,7 @@ export class Territory {
     for (let i = 0; i < n; i++) {
       let x = this.ax[i]!;
       let y = this.ay[i]!;
-      let best = 1.25;
+      let best = 2.05;
       let bx = x;
       let by = y;
       for (let s = 0; s < ln - 1; s++) {
@@ -665,7 +786,7 @@ export class Territory {
           by = cy;
         }
       }
-      if (best < 1.25) {
+      if (best < 2.05) {
         x = bx;
         y = by;
       }
@@ -702,98 +823,12 @@ export class Territory {
     return count;
   }
 
-  private smooth(n: number, times: number): number {
-    let count = n;
-    let srcX = this.ax;
-    let srcY = this.ay;
-    let dstX = this.bx;
-    let dstY = this.by;
-    for (let t = 0; t < times; t++) {
-      let w = 0;
-      for (let i = 0; i < count && w + 2 < MAX_P; i++) {
-        const j = (i + 1) % count;
-        const px = srcX[i]!;
-        const py = srcY[i]!;
-        const qx = srcX[j]!;
-        const qy = srcY[j]!;
-        dstX[w] = px * 0.75 + qx * 0.25;
-        dstY[w] = py * 0.75 + qy * 0.25;
-        w++;
-        dstX[w] = px * 0.25 + qx * 0.75;
-        dstY[w] = py * 0.25 + qy * 0.75;
-        w++;
-      }
-      count = w;
-      const tx = srcX;
-      srcX = dstX;
-      dstX = tx;
-      const ty = srcY;
-      srcY = dstY;
-      dstY = ty;
-    }
-    if (srcX !== this.ax) {
-      for (let i = 0; i < count; i++) {
-        this.ax[i] = srcX[i]!;
-        this.ay[i] = srcY[i]!;
-      }
-    }
-    return count;
-  }
-
-  private splat(n: number): void {
-    const feather = FEATHER;
-    for (let i = 0; i < n; i++) {
-      const ax = this.ax[i]!;
-      const ay = this.ay[i]!;
-      const bx = this.ax[(i + 1) % n]!;
-      const by = this.ay[(i + 1) % n]!;
-      const minX = Math.min(ax, bx) - feather;
-      const maxX = Math.max(ax, bx) + feather;
-      const minY = Math.min(ay, by) - feather;
-      const maxY = Math.max(ay, by) + feather;
-      const t0 = this.texOf(minX, maxY);
-      const t1 = this.texOf(maxX, minY);
-      let x0 = Math.max(0, Math.floor(Math.min(t0.tx, t1.tx)));
-      let x1 = Math.min(this.texW - 1, Math.ceil(Math.max(t0.tx, t1.tx)));
-      let y0 = Math.max(0, Math.floor(Math.min(t0.ty, t1.ty)));
-      let y1 = Math.min(this.texH - 1, Math.ceil(Math.max(t0.ty, t1.ty)));
-      const vx = bx - ax;
-      const vy = by - ay;
-      const len2 = vx * vx + vy * vy;
-      for (let ty = y0; ty <= y1; ty++) {
-        for (let tx = x0; tx <= x1; tx++) {
-          const sim = this.simOf(tx, ty);
-          let t = 0;
-          if (len2 > 1e-8) t = Math.max(0, Math.min(1, ((sim.x - ax) * vx + (sim.y - ay) * vy) / len2));
-          const cx = ax + vx * t;
-          const cy = ay + vy * t;
-          const dx = sim.x - cx;
-          const dy = sim.y - cy;
-          const dist = Math.hypot(dx, dy);
-          if (dist > feather) continue;
-          const cross = vx * (sim.y - ay) - vy * (sim.x - ax);
-          const signed = (cross >= 0 ? 1 : -1) * dist;
-          const idx = ty * this.texW + tx;
-          const prev = this.sdStamp[idx] === this.sid ? Math.abs(this.sd[idx]!) : Infinity;
-          if (dist < prev) {
-            if (this.sdStamp[idx] !== this.sid) {
-              if (this.touchN < this.touch.length) this.touch[this.touchN++] = idx;
-            }
-            this.sdStamp[idx] = this.sid;
-            this.sd[idx] = signed;
-          }
-        }
-      }
-    }
-  }
-
-  private commitRamp(owner: number): void {
-    const feather = FEATHER;
+  private commitRaster(owner: number): void {
+    const rim = 0.22;
     for (let k = 0; k < this.touchN; k++) {
       const idx = this.touch[k]!;
       if (this.sdStamp[idx] !== this.sid) continue;
       const signed = this.sd[idx]!;
-      const coverage = Math.max(0, Math.min(1, 0.5 + signed / (feather * 2)));
       const tx = idx % this.texW;
       const ty = (idx / this.texW) | 0;
       const sim = this.simOf(tx, ty);
@@ -801,17 +836,18 @@ export class Territory {
       const cy = Math.floor(sim.y);
       const cell = this.shownOwner(cx, cy);
       if (cell > 0 && cell !== owner) continue;
-      if (signed < 0 && cell !== owner && cell !== 0 && cell !== -1) continue;
       const rgb = this.rgb(owner, cx, cy);
-      const fade = cell === owner ? rgb.fade : coverage > 0 ? 1 : 0;
-      // Opaque darker band just inside the contour (~3px). The coverage ramp
-      // outside it is what the shader anti-aliases, so this color stays visible.
+      const fade = cell === owner ? rgb.fade : signed > -0.05 ? 1 : 0;
       let shade = 1;
-      let alpha = Math.round(coverage * fade * 255);
-      if (signed > 0.08 && signed < 0.55) {
-        const t = 1 - Math.abs(signed - 0.2) / 0.36;
-        shade = 1 - 0.4 * Math.max(0, Math.min(1, t));
+      let alpha = 0;
+      if (signed >= 0) {
         alpha = Math.round(255 * fade);
+        if (signed < rim) {
+          const t = 1 - signed / rim;
+          shade = 1 - 0.42 * t;
+        }
+      } else if (signed > -0.18) {
+        alpha = Math.round(255 * Math.max(0, (signed + 0.18) / 0.18) * fade);
       }
       const p = idx * 4;
       this.data[p] = Math.round(rgb.r * shade);
@@ -823,30 +859,31 @@ export class Territory {
     this.bakeShadow();
   }
 
-  /**
-   * One-texel stamp just outside the fill, toward +x / -z. It clears the coverage
-   * ramp (FEATHER is under one cell) so a single texture sample can tell shadow
-   * from the bright anti-aliased edge.
-   */
+  /** One texel outside the fill, toward +x / +texture-y, so the shadow stays on the edge. */
   private bakeShadow(): void {
     const n = this.touchN;
-    const ox = 4;
-    const oy = 2;
     for (let k = 0; k < n; k++) {
       const idx = this.touch[k]!;
       if (this.data[idx * 4 + 3]! < 200) continue;
-      const tx = (idx % this.texW) + ox;
-      const ty = ((idx / this.texW) | 0) + oy;
+      const tx = (idx % this.texW) + 1;
+      const ty = ((idx / this.texW) | 0) + 1;
       if (tx < 0 || ty < 0 || tx >= this.texW || ty >= this.texH) continue;
       const sidx = ty * this.texW + tx;
-      if (this.data[sidx * 4 + 3]! > 24) continue;
+      if (this.data[sidx * 4 + 3]! > 90) continue;
+      const sim = this.simOf(tx, ty);
+      const cell = this.shownOwner(Math.floor(sim.x), Math.floor(sim.y));
+      if (cell > 0) continue;
       const p = sidx * 4;
-      this.data[p] = 28;
-      this.data[p + 1] = 52;
-      this.data[p + 2] = 44;
-      this.data[p + 3] = 110;
+      this.data[p] = 18;
+      this.data[p + 1] = 42;
+      this.data[p + 2] = 36;
+      this.data[p + 3] = 230;
       this.markSpan(ty, tx, tx);
-      if (this.touchN < this.touch.length) this.touch[this.touchN++] = sidx;
+      if (this.sdStamp[sidx] !== this.sid && this.touchN < this.touch.length) {
+        this.touch[this.touchN++] = sidx;
+        this.sdStamp[sidx] = this.sid;
+        this.sd[sidx] = -0.3;
+      }
     }
   }
 

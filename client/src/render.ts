@@ -27,7 +27,6 @@ import {
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
-  Vector2,
   Vector3,
   WebGLRenderer,
   type BufferGeometry,
@@ -385,8 +384,26 @@ export class Renderer {
   private readonly platform: Mesh;
   private readonly ground: Mesh;
   private readonly gridLines: LineSegments;
-  private readonly landMeshes: Mesh[] = [];
-  private readonly landMat: ShaderMaterial;
+  private readonly land: Mesh;
+  private readonly flashRing: Mesh;
+  private readonly claimRing: Mesh;
+  private readonly popLife = new Float32Array(24);
+  private killFlash = 0;
+  private killX = 0;
+  private killZ = 0;
+  private measurePending = false;
+  private measureR = 0;
+  private measureG = 0;
+  private measureB = 0;
+  landMeasure: {
+    pixels: number;
+    boxW: number;
+    boxH: number;
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } | null = null;
   private readonly mat = new Matrix4();
   private readonly pos = new Vector3();
   private readonly quat = new Quaternion();
@@ -454,17 +471,21 @@ export class Renderer {
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
     this.scene.add(this.gridLines);
-    this.landMat = this.makeLandMaterial(gw, gh);
-    const patchGeo = new PlaneGeometry(1, 1);
-    patchGeo.rotateX(-Math.PI / 2);
-    for (let i = 0; i < 24; i++) {
-      const patch = new Mesh(patchGeo, this.landMat);
-      patch.frustumCulled = false;
-      patch.visible = false;
-      patch.renderOrder = 1;
-      this.landMeshes.push(patch);
-      this.scene.add(patch);
-    }
+    const landGeo = this.mapPlane(gw, gh);
+    this.land = new Mesh(
+      landGeo,
+      new MeshBasicMaterial({
+        map: territory.texture,
+        alphaTest: 0.4,
+        transparent: false,
+        depthWrite: true,
+        toneMapped: false,
+      }),
+    );
+    this.land.frustumCulled = false;
+    this.land.position.y = 0.02;
+    this.land.renderOrder = 1;
+    this.scene.add(this.land);
     this.addFence(gw, gh);
 
     const platformGeo = new CircleGeometry(7.2, 40);
@@ -506,7 +527,7 @@ export class Renderer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
 
-    this.parts = new InstancedMesh(new BoxGeometry(0.16, 0.16, 0.16), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
+    this.parts = new InstancedMesh(new BoxGeometry(0.36, 0.36, 0.36), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
     this.parts.frustumCulled = false;
     this.parts.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -521,6 +542,36 @@ export class Renderer {
     );
     this.ring.visible = false;
     this.scene.add(this.ring);
+
+    const flashGeo = new RingGeometry(0.7, 0.95, 36);
+    flashGeo.rotateX(-Math.PI / 2);
+    const flashMat = new MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.flashRing = new Mesh(flashGeo, flashMat);
+    this.flashRing.visible = false;
+    this.flashRing.renderOrder = 3;
+    this.scene.add(this.flashRing);
+
+    const claimGeo = new RingGeometry(0.86, 1.02, 48);
+    claimGeo.rotateX(-Math.PI / 2);
+    this.claimRing = new Mesh(
+      claimGeo,
+      new MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    this.claimRing.visible = false;
+    this.claimRing.renderOrder = 2;
+    this.scene.add(this.claimRing);
 
     for (let i = 0; i < 16; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false });
     this.applySize();
@@ -569,23 +620,41 @@ export class Renderer {
     const c = PALETTE[(Math.max(1, playerId) - 1) % PALETTE.length]!;
     const wx = x * WORLD;
     const wz = z * WORLD;
-    for (let k = 0; k < 28; k++) {
+    for (let k = 0; k < 40; k++) {
       if (this.partCount >= PART_CAP) break;
       const i = this.partCount++;
-      const ang = (k / 28) * Math.PI * 2 + (k % 3) * 0.2;
-      const sp = 1.1 + (k % 5) * 0.28;
+      const ang = (k / 40) * Math.PI * 2 + (k % 3) * 0.17;
+      const sp = 2.4 + (k % 5) * 0.55;
       this.px[i] = wx;
-      this.py[i] = 0.4;
+      this.py[i] = 0.55;
       this.pz[i] = wz;
       this.vx[i] = Math.cos(ang) * sp;
-      this.vy[i] = 1.8 + (k % 4) * 0.35;
+      this.vy[i] = 2.6 + (k % 4) * 0.55;
       this.vz[i] = Math.sin(ang) * sp;
-      this.life[i] = 0.55;
+      this.life[i] = 0.7;
       this.pr[i] = c[0] / 255;
       this.pg[i] = c[1] / 255;
       this.pb[i] = c[2] / 255;
     }
+    if (playerId > 0 && playerId < this.popLife.length) this.popLife[playerId] = 0.25;
+    this.killFlash = 0.3;
+    this.killX = wx;
+    this.killZ = wz;
+    const mat = this.flashRing.material as MeshBasicMaterial;
+    mat.color.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+    mat.opacity = 0.95;
+    this.flashRing.position.set(wx, 0.08, wz);
+    this.flashRing.scale.set(0.6, 1, 0.6);
+    this.flashRing.visible = true;
     if (withShake) this.shake = Math.min(1.2, this.shake + 0.85);
+  }
+
+  /** Ask the next frame to measure how many pixels match this owner color. */
+  queueColorMeasure(r: number, g: number, b: number): void {
+    this.measureR = r;
+    this.measureG = g;
+    this.measureB = b;
+    this.measurePending = true;
   }
 
   private makeGrid(gw: number, gh: number): LineSegments {
@@ -596,16 +665,16 @@ export class Renderer {
       const x = (i / n) * gw;
       const z = (i / n) * gh;
       positions[o++] = x;
-      positions[o++] = 0.015;
+      positions[o++] = 0.05;
       positions[o++] = 0;
       positions[o++] = x;
-      positions[o++] = 0.015;
+      positions[o++] = 0.05;
       positions[o++] = gh;
       positions[o++] = 0;
-      positions[o++] = 0.015;
+      positions[o++] = 0.05;
       positions[o++] = z;
       positions[o++] = gw;
-      positions[o++] = 0.015;
+      positions[o++] = 0.05;
       positions[o++] = z;
     }
     const geo = new BufGeo();
@@ -615,67 +684,18 @@ export class Renderer {
     return lines;
   }
 
-  private makeLandMaterial(gw: number, gh: number): ShaderMaterial {
-    const mat = new ShaderMaterial({
-      uniforms: {
-        mapTex: { value: this.territory.texture },
-        uMap: { value: new Vector2(gw, gh) },
-      },
-      transparent: true,
-      depthWrite: false,
-      toneMapped: false,
-      vertexShader: `
-        varying vec3 vWorld;
-        void main() {
-          vec4 wpos = modelMatrix * vec4(position, 1.0);
-          vWorld = wpos.xyz;
-          gl_Position = projectionMatrix * viewMatrix * wpos;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D mapTex;
-        uniform vec2 uMap;
-        varying vec3 vWorld;
-        void main() {
-          vec2 uv = vec2(vWorld.x / uMap.x, 1.0 - vWorld.z / uMap.y);
-          if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
-          vec4 t = texture2D(mapTex, uv);
-          float a = t.a;
-          float w = max(fwidth(a), 0.002);
-          float distPx = (a - 0.5) / w;
-          float m = smoothstep(-0.65, 0.85, distPx);
-          float rim = smoothstep(0.35, 1.15, distPx) * (1.0 - smoothstep(2.0, 3.1, distPx));
-          vec3 fill = t.rgb * mix(1.0, 0.62, rim);
-          float luma = dot(t.rgb, vec3(0.30, 0.50, 0.20));
-          float dark = 1.0 - smoothstep(0.22, 0.42, luma);
-          float sh = smoothstep(0.14, 0.26, a) * (1.0 - smoothstep(0.42, 0.52, a)) * dark * (1.0 - m);
-          float outA = max(m, sh * 0.72);
-          if (outA < 0.04) discard;
-          vec3 rgb = mix(vec3(0.09, 0.14, 0.12), fill, clamp(m / outA, 0.0, 1.0));
-          gl_FragColor = vec4(rgb, outA);
-          #include <premultiplied_alpha_fragment>
-          #include <colorspace_fragment>
-        }
-      `,
-    });
-    return mat;
-  }
-
-  private syncLand(): void {
-    let n = 0;
-    this.territory.visitBoxes((x0, y0, x1, y1) => {
-      const mesh = this.landMeshes[n++];
-      if (!mesh) return;
-      const pad = 2.2;
-      const wx0 = (x0 - pad) * WORLD;
-      const wx1 = (x1 + 1 + pad) * WORLD;
-      const wz0 = (y0 - pad) * WORLD;
-      const wz1 = (y1 + 1 + pad) * WORLD;
-      mesh.scale.set(Math.max(0.2, wx1 - wx0), Math.max(0.2, wz1 - wz0), 1);
-      mesh.position.set((wx0 + wx1) / 2, 0.03, (wz0 + wz1) / 2);
-      mesh.visible = true;
-    });
-    for (let i = n; i < this.landMeshes.length; i++) this.landMeshes[i]!.visible = false;
+  /** Full-map plane. UVs match the territory shader's world mapping: v = 1 at world z = 0. */
+  private mapPlane(gw: number, gh: number): BufGeo {
+    const geo = new PlaneGeometry(gw, gh);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(gw / 2, 0, gh / 2);
+    const pos = geo.getAttribute('position');
+    const uv = geo.getAttribute('uv');
+    for (let i = 0; i < pos.count; i++) {
+      uv.setXY(i, pos.getX(i) / gw, 1 - pos.getZ(i) / gh);
+    }
+    uv.needsUpdate = true;
+    return geo;
   }
 
   private addFence(gw: number, gh: number): void {
@@ -784,12 +804,15 @@ export class Renderer {
   ): void {
     this.time += dt;
     this.territory.update(dt);
-    this.syncLand();
+    this.syncClaimRing();
     this.perf.beginFrame();
     this.territory.upload(this.renderer);
 
     if (phase === 'dead') {
+      this.stepParticles(dt);
+      this.stepPops(dt);
       this.renderer.render(this.scene, this.camera);
+      this.finishMeasure();
       this.perf.endFrame(performance.now(), this.renderer.info.render.calls, petCount);
       return;
     }
@@ -802,7 +825,9 @@ export class Renderer {
     if (phase === 'title') {
       this.ground.visible = false;
       this.gridLines.visible = false;
-      for (const patch of this.landMeshes) patch.visible = false;
+      this.land.visible = false;
+      this.claimRing.visible = false;
+      this.flashRing.visible = false;
       this.platform.visible = true;
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbons) ribbon.clear();
@@ -831,6 +856,7 @@ export class Renderer {
       this.selfScreen = false;
     } else {
       this.ground.visible = false;
+      this.land.visible = true;
       this.gridLines.visible = true;
       this.platform.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
@@ -844,6 +870,16 @@ export class Renderer {
         if (!pet.alive) {
           this.paths[pet.id]?.clear();
           ribbon?.clear();
+          const pop = this.popLife[pet.id] ?? 0;
+          if (pop > 0) {
+            const u = 1 - pop / 0.25;
+            const grow = u < 0.28 ? 1 + (u / 0.28) * 0.55 : 1.55 * (1 - (u - 0.28) / 0.72);
+            const mesh = this.pets[pet.pet];
+            if (mesh && mesh.count < PET_CAP && grow > 0.04) {
+              this.placePet(mesh, mesh.count, pet.x * WORLD, 0, pet.z * WORLD, pet.h, 0, grow, 1);
+              mesh.count++;
+            }
+          }
           continue;
         }
         const wx = pet.x * WORLD;
@@ -856,7 +892,7 @@ export class Renderer {
           this.placePet(mesh, mesh.count, wx, bob, wz, pet.h, roll, pet.self ? 1.05 : 1, 1);
           mesh.count++;
         }
-        if (shadowN < SHADOW_CAP) this.place(this.shadows, shadowN++, wx, 0.02, wz, 0, 0, pet.self ? 1.05 : 0.9);
+        if (shadowN < SHADOW_CAP) this.place(this.shadows, shadowN++, wx, 0.06, wz, 0, 0, pet.self ? 1.05 : 0.9);
         const path = this.paths[pet.id];
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
@@ -900,7 +936,7 @@ export class Renderer {
           );
           follower.count++;
           if (shadowN < SHADOW_CAP) {
-            this.place(this.shadows, shadowN++, this.sample.x * WORLD, 0.02, this.sample.z * WORLD, 0, 0, 0.72);
+            this.place(this.shadows, shadowN++, this.sample.x * WORLD, 0.06, this.sample.z * WORLD, 0, 0, 0.72);
           }
           if (t === shown - 1 && pet.trainExtra > 0 && labelN < this.labels.length) {
             const label = this.labels[labelN++]!;
@@ -983,8 +1019,96 @@ export class Renderer {
     }
 
     this.stepParticles(dt);
+    this.stepPops(dt);
     this.renderer.render(this.scene, this.camera);
+    this.finishMeasure();
     this.perf.endFrame(performance.now(), this.renderer.info.render.calls, phase === 'play' ? petCount : SPECIES.length);
+  }
+
+  private syncClaimRing(): void {
+    const pulse = this.territory.claimPulse;
+    if (pulse <= 0.02) {
+      this.claimRing.visible = false;
+      return;
+    }
+    const t = 1 - pulse;
+    const ease = 1 - (1 - t) * (1 - t);
+    const x0 = this.territory.claimX0;
+    const y0 = this.territory.claimY0;
+    const x1 = this.territory.claimX1;
+    const y1 = this.territory.claimY1;
+    const cx = ((x0 + x1 + 1) / 2) * WORLD;
+    const cz = ((y0 + y1 + 1) / 2) * WORLD;
+    const rad = Math.max(1.4, Math.hypot((x1 - x0 + 1) * WORLD, (y1 - y0 + 1) * WORLD) * 0.55);
+    const s = rad * (0.82 + 0.34 * ease);
+    this.claimRing.position.set(cx, 0.07, cz);
+    this.claimRing.scale.set(s, 1, s);
+    const mat = this.claimRing.material as MeshBasicMaterial;
+    mat.opacity = Math.max(0, 0.85 * (1 - ease));
+    this.claimRing.visible = true;
+  }
+
+  private stepPops(dt: number): void {
+    for (let i = 0; i < this.popLife.length; i++) {
+      if (this.popLife[i]! > 0) this.popLife[i] = Math.max(0, this.popLife[i]! - dt);
+    }
+    if (this.killFlash > 0) {
+      this.killFlash = Math.max(0, this.killFlash - dt);
+      const u = 1 - this.killFlash / 0.3;
+      const s = 0.7 + u * 3.4;
+      this.flashRing.position.set(this.killX, 0.08, this.killZ);
+      this.flashRing.scale.set(s, 1, s);
+      (this.flashRing.material as MeshBasicMaterial).opacity = Math.max(0, 0.95 * (1 - u));
+      this.flashRing.visible = this.killFlash > 0.01;
+    }
+  }
+
+  private finishMeasure(): void {
+    if (!this.measurePending) return;
+    this.measurePending = false;
+    this.landMeasure = this.readColorBox(this.measureR, this.measureG, this.measureB);
+  }
+
+  private readColorBox(r: number, g: number, b: number): {
+    pixels: number;
+    boxW: number;
+    boxH: number;
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } {
+    const gl = this.renderer.getContext();
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+    const buf = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    let minX = w;
+    let minY = h;
+    let maxX = -1;
+    let maxY = -1;
+    let pixels = 0;
+    const tol = 78;
+    for (let y = 0; y < h; y += 2) {
+      for (let x = 0; x < w; x += 2) {
+        const p = (y * w + x) * 4;
+        if (Math.abs(buf[p]! - r) > tol || Math.abs(buf[p + 1]! - g) > tol || Math.abs(buf[p + 2]! - b) > tol) continue;
+        pixels++;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return {
+      pixels: pixels * 4,
+      boxW: maxX < 0 ? 0 : maxX - minX + 2,
+      boxH: maxY < 0 ? 0 : maxY - minY + 2,
+      minX,
+      minY: maxY < 0 ? 0 : h - 1 - maxY,
+      maxX,
+      maxY: maxY < 0 ? 0 : h - 1 - minY,
+    };
   }
 
   project(x: number, y: number, z: number): { x: number; y: number; ok: boolean } {
@@ -1036,7 +1160,7 @@ export class Renderer {
       this.pr[w] = nr;
       this.pg[w] = ng;
       this.pb[w] = nb;
-      this.place(this.parts, w, nx, ny, nz, life * 6, 0, 0.4 + life * 1.4);
+      this.place(this.parts, w, nx, ny, nz, life * 8, life * 4, 0.85 + life * 2.1);
       this.parts.instanceColor?.setXYZ(w, nr, ng, nb);
       w++;
     }
