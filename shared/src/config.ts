@@ -35,7 +35,9 @@ export interface GameConfig {
   levelCap: number;
   /** Coins for one Mystery Box. A decent run is a couple of kills plus a scatter of coins, so this is about one box per 3–5 of those. */
   boxPrice: number;
-  /** Base ability numbers. Rarity multiplies effect size and duration, and divides cooldowns. */
+  /** Extra ability strength per level above 1. Duration and effect size use it; cooldowns divide by it. */
+  levelGain: number;
+  /** Base ability numbers. Rarity and level multiply effect size and duration, and divide cooldowns. */
   abilities: {
     dashSpeed: number;
     dashSec: number;
@@ -107,6 +109,7 @@ export const CONFIG: GameConfig = {
   botRespawnSec: 1.15,
   levelCap: 20,
   boxPrice: 100,
+  levelGain: 0.02,
   abilities: {
     dashSpeed: 1.85,
     dashSec: 0.45,

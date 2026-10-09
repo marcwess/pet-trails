@@ -3,7 +3,7 @@ import { parseKit } from './abilities.js';
 import type { DeathReason } from './player.js';
 
 export type ClientMsg =
-  | { t: 'hello'; name?: string; pet?: number; kit?: Kit | null }
+  | { t: 'hello'; name?: string; pet?: number; kit?: Kit | null; level?: number }
   | { t: 'input'; seq: number; x: number; y: number }
   | { t: 'play' }
   | { t: 'ability' }
@@ -42,6 +42,8 @@ export interface EntSnap {
   cd: number;
   /** Bits: 1 dash, 2 shield, 4 slowed. */
   st: number;
+  /** Pet level, 1–20. Recolor and trail cosmetics are derived from it. */
+  lv: number;
 }
 
 export interface DeltaMsg {
@@ -126,14 +128,16 @@ export function parseClientMsg(data: string): ClientMsg | null {
   if (!msg || typeof msg !== 'object') return null;
   const t = (msg as { t?: unknown }).t;
   if (t === 'hello') {
-    const m = msg as { name?: unknown; pet?: unknown; rarity?: unknown; actives?: unknown; kit?: unknown };
+    const m = msg as { name?: unknown; pet?: unknown; rarity?: unknown; actives?: unknown; kit?: unknown; level?: unknown };
     const pet = typeof m.pet === 'number' && Number.isFinite(m.pet) ? m.pet | 0 : undefined;
     const kit = readHelloKit(m);
+    const level = typeof m.level === 'number' && Number.isFinite(m.level) ? m.level | 0 : undefined;
     return {
       t: 'hello',
       name: sanitizeName(m.name),
       ...(pet !== undefined ? { pet } : {}),
       ...(kit !== undefined ? { kit } : {}),
+      ...(level !== undefined ? { level } : {}),
     };
   }
   if (t === 'input') {

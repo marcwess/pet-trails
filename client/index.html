@@ -27,6 +27,12 @@
             <button id="open-boxes" class="btn secondary" type="button">Boxes</button>
           </div>
           <p id="petline" class="petline">Loading pets…</p>
+          <div id="petcard" class="petcard">
+            <div id="petcard-name">Your pet</div>
+            <div id="petcard-boost">Abilities +0%</div>
+            <div class="bar"><i id="petcard-fill"></i></div>
+            <div id="petcard-unlocks" class="chips"></div>
+          </div>
         </div>
       </section>
       <div id="hud" hidden>
@@ -50,6 +56,10 @@
       <div id="kill-banner" class="kill-banner"><b>KILL</b><span id="kill-name"></span></div>
       <div id="dim" hidden></div>
       <section id="death" class="sheet" hidden>
+        <div id="levelup" class="levelup" hidden>
+          <b>Level up!</b>
+          <span id="levelup-detail"></span>
+        </div>
         <div id="death-icon" class="death-icon">✂</div>
         <p id="death-kicker" class="eyebrow">Run over</p>
         <h2 id="death-title">Your trail was cut!</h2>

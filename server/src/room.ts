@@ -21,6 +21,7 @@ interface Conn {
   pet: number;
   /** `null` means the client sent a kit the tables reject. */
   kit: Kit | null;
+  level: number;
   wantPlay: boolean;
 }
 
@@ -36,7 +37,7 @@ export class Room {
   }
 
   addSocket(ws: WebSocket): void {
-    const conn: Conn = { ws, id: null, name: 'You', pet: -1, kit: null, wantPlay: false };
+    const conn: Conn = { ws, id: null, name: 'You', pet: -1, kit: null, level: 1, wantPlay: false };
     this.conns.push(conn);
     ws.on('message', (data, isBinary) => {
       if (isBinary) return;
@@ -62,6 +63,7 @@ export class Room {
       conn.name = msg.name ?? 'You';
       if (msg.pet !== undefined) conn.pet = msg.pet;
       if (msg.kit !== undefined) conn.kit = msg.kit;
+      if (msg.level !== undefined) conn.level = msg.level;
       if (conn.wantPlay) this.spawn(conn);
       return;
     }
@@ -89,7 +91,7 @@ export class Room {
     const pet = conn.pet >= 0 && conn.pet < SPECIES.length ? conn.pet : Math.floor(Math.random() * SPECIES.length);
     conn.pet = pet;
     if (conn.id === null) {
-      const p = this.sim.addHuman(conn.name, pet, conn.kit);
+      const p = this.sim.addHuman(conn.name, pet, conn.kit, conn.level);
       if (!p) {
         this.send(conn, { t: 'full' });
         return;
@@ -104,6 +106,7 @@ export class Room {
     if (existing) {
       existing.pet = pet;
       if (conn.kit) this.sim.setKit(conn.id, conn.kit);
+      existing.level = Math.max(1, Math.min(this.sim.cfg.levelCap, conn.level | 0));
     }
     // The client already has the map. Send only this owner's new square.
     this.sim.land.beginTick();
@@ -164,6 +167,7 @@ export class Room {
           (this.sim.tick < p.dashUntil ? 1 : 0) |
           (this.sim.tick < p.shieldUntil ? 2 : 0) |
           (this.sim.tick < p.slowUntil ? 4 : 0),
+        lv: p.level,
       });
     }
     const delta: DeltaMsg = {

@@ -13,6 +13,7 @@ export interface DeathView {
   title: string;
   icon: string;
   rows: Array<{ k: string; v: string; icon?: string; up?: boolean; bar?: number }>;
+  celebrate?: string;
 }
 
 const REASONS: Record<DeathReason, { title: string; icon: string }> = {
@@ -44,6 +45,12 @@ export class Hud {
   private readonly deathVals: HTMLSpanElement[] = [];
   private readonly deathBars: HTMLElement[] = [];
   private readonly petline = must('petline');
+  private readonly petCardName = must('petcard-name');
+  private readonly petCardFill = must('petcard-fill');
+  private readonly petCardUnlocks = must('petcard-unlocks');
+  private readonly petCardBoost = must('petcard-boost');
+  private readonly levelUp = must('levelup');
+  private readonly levelUpDetail = must('levelup-detail');
   private readonly playBtn = must('play') as HTMLButtonElement;
   private readonly againBtn = must('again') as HTMLButtonElement;
   private readonly steer = must('steer');
@@ -165,6 +172,27 @@ export class Hud {
     this.petline.textContent = text;
   }
 
+  setPetCard(card: { name: string; level: number; xp: number; boost: number; unlocks: string[] }): void {
+    // The card already names the pet and level, so the loading line steps aside.
+    this.petline.hidden = true;
+    this.petCardName.textContent = `${card.name}`;
+    this.petCardFill.style.width = `${Math.round(Math.max(0, Math.min(1, card.xp)) * 100)}%`;
+    this.petCardBoost.textContent = card.boost > 0 ? `Abilities +${card.boost}%` : 'Abilities +0%';
+    this.petCardUnlocks.replaceChildren();
+    if (card.unlocks.length === 0) {
+      const chip = document.createElement('span');
+      chip.textContent = 'Next: Sparkle at 3';
+      chip.className = 'next';
+      this.petCardUnlocks.appendChild(chip);
+      return;
+    }
+    for (const name of card.unlocks) {
+      const chip = document.createElement('span');
+      chip.textContent = name;
+      this.petCardUnlocks.appendChild(chip);
+    }
+  }
+
   setPlayEnabled(on: boolean): void {
     this.playBtn.disabled = !on;
   }
@@ -206,8 +234,11 @@ export class Hud {
     if (!view) {
       this.death.hidden = true;
       this.dim.hidden = true;
+      this.levelUp.hidden = true;
       return;
     }
+    this.levelUp.hidden = !view.celebrate;
+    this.levelUpDetail.textContent = view.celebrate ?? '';
     this.death.hidden = false;
     this.dim.hidden = false;
     this.death.style.animation = 'none';

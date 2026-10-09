@@ -14,6 +14,11 @@ import {
   cooldownOf,
   equippedPet,
   kitOf,
+  gainedUnlocks,
+  levelPower,
+  recolorId,
+  trailId,
+  unlockNames,
   mapBlob,
   randomSeed,
   ringArea,
@@ -52,6 +57,7 @@ interface Ent {
   kills: number;
   coins: number;
   xp: number;
+  level: number;
   train: Uint8Array;
   trainShown: number;
   trainLen: number;
@@ -162,6 +168,8 @@ export class Game {
         dash: false,
         shield: false,
         slow: false,
+        recolor: 0,
+        trail: 0,
       });
     }
     for (let i = 0; i < 72; i++) this.drawPickups.push({ x: 0, z: 0, kind: 0 });
@@ -245,6 +253,7 @@ export class Game {
         t: 'hello',
         name: this.displayName,
         pet: pet.species,
+        level: pet.level,
         rarity: kit.rarity,
         actives: kit.actives,
         passives: kit.passives,
@@ -254,6 +263,8 @@ export class Game {
       this.net.send({ t: 'play' });
       this.phase = 'playing';
     } else if (this.offline) {
+      const again = this.offline.players[this.selfId];
+      if (again) again.level = Math.max(1, Math.min(CONFIG.levelCap, this.equipped().level | 0));
       this.offline.land.beginTick();
       this.offline.respawn(this.selfId);
       this.consume(this.offline.consumeEvents());
@@ -278,7 +289,7 @@ export class Game {
           : {},
       randomSeed(),
     );
-    const player = sim.addHuman(this.displayName, this.equipped().species, kitOf(this.equipped()));
+    const player = sim.addHuman(this.displayName, this.equipped().species, kitOf(this.equipped()), this.equipped().level);
     if (!player) return;
     this.offline = sim;
     this.selfId = player.id;
@@ -324,6 +335,8 @@ export class Game {
     }
     this.hud.showAbility(this.phase === 'playing');
     if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
+    this.renderer.heroRecolor = this.previewSpecies === null ? recolorId(this.equipped().level) : 0;
+    if (this.phase === 'title') this.hud.setPetCard(this.cardView());
     const petCount = this.fillDraw();
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
     const hero = this.previewSpecies ?? this.equipped().species;
@@ -427,6 +440,7 @@ export class Game {
         (sim.tick < p.dashUntil ? 1 : 0) | (sim.tick < p.shieldUntil ? 2 : 0) | (sim.tick < p.slowUntil ? 4 : 0);
       ent.cdLeft = Math.max(0, (p.cdUntil - sim.tick) / sim.cfg.tickHz);
       ent.cdAt = performance.now();
+      ent.level = p.level;
       if (p.trainLen > ent.trainLen) ent.hop = 0.72;
       ent.trainShown = Math.min(CONFIG.maxTrainVisible, p.trainLen);
       ent.trainLen = p.trainLen;
@@ -552,6 +566,7 @@ export class Game {
     ent.status = snap.st;
     ent.cdLeft = snap.cd;
     ent.cdAt = performance.now();
+    ent.level = snap.lv;
     if (snap.tn > ent.trainLen) ent.hop = 0.72;
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
@@ -641,6 +656,7 @@ export class Game {
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     if (me) me.alive = false;
     this.updateBoard();
+    const before = this.equipped().level;
     const levels = applyXp(this.equipped(), Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
@@ -656,8 +672,10 @@ export class Game {
       { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
     ];
     if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.equipped().level}`, icon: '▲', up: true });
+    const unlocked = levels > 0 ? gainedUnlocks(before, this.equipped().level) : [];
+    const celebrate = levels > 0 ? `Level ${this.equipped().level}${unlocked.length ? ' · ' + unlocked.join(' · ') : ''}` : '';
     this.hud.hideSteer();
-    this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows });
+    this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows, celebrate });
     buzz(20);
   }
 
@@ -683,6 +701,8 @@ export class Game {
       draw.dash = (ent.status & 1) !== 0;
       draw.shield = (ent.status & 2) !== 0;
       draw.slow = (ent.status & 4) !== 0;
+      draw.recolor = recolorId(ent.level);
+      draw.trail = trailId(ent.level);
       if (!ent.alive) {
         draw.x = ent.x;
         draw.z = ent.z;
@@ -809,6 +829,8 @@ export class Game {
         kills: p?.kills ?? 0,
         train: p?.trainLen ?? 0,
         outside: p?.outside ?? false,
+        xp: p?.xp ?? 0,
+        level: p?.level ?? 1,
       };
     }
     return {
@@ -821,6 +843,8 @@ export class Game {
       kills: self?.kills ?? 0,
       train: self?.trainLen ?? 0,
       outside: self?.outside ?? false,
+      xp: self?.xp ?? 0,
+      level: self?.level ?? 1,
     };
   }
 
@@ -869,6 +893,19 @@ export class Game {
     return out;
   }
 
+  private cardView() {
+    const pet = this.equipped();
+    const need = xpForLevel(pet.level);
+    const boost = Math.round((levelPower(pet.level) - 1) * 100);
+    return {
+      name: this.petLabel(),
+      level: pet.level,
+      xp: pet.level >= CONFIG.levelCap ? 1 : need > 0 ? pet.xp / need : 0,
+      boost,
+      unlocks: unlockNames(pet.level),
+    };
+  }
+
   petLabel(): string {
     const pet = this.equipped();
     const species = SPECIES[pet.species] ?? 'cat';
@@ -885,6 +922,8 @@ export class Game {
       pet.passives[pet.equippedPassive],
       (status & 1) !== 0,
       (status & 4) !== 0 ? CONFIG.abilities.frostSlow : null,
+      CONFIG,
+      pet.level,
     );
   }
 
@@ -920,10 +959,10 @@ export class Game {
   private abilityTotal(): number {
     if (this.offline) {
       const p = this.offline.players[this.selfId];
-      if (p) return cooldownOf(cooldownBase(p.activeId, this.offline.cfg), p.rarity, this.offline.cfg);
+      if (p) return cooldownOf(cooldownBase(p.activeId, this.offline.cfg), p.rarity, this.offline.cfg, p.level);
     }
     const pet = this.equipped();
-    return cooldownOf(cooldownBase(pet.actives[pet.equippedActive]), pet.rarity);
+    return cooldownOf(cooldownBase(pet.actives[pet.equippedActive]), pet.rarity, CONFIG, pet.level);
   }
 
   private abilityLeft(): number {
@@ -950,6 +989,7 @@ function makeEnt(id: number): Ent {
     kills: 0,
     coins: 0,
     xp: 0,
+    level: 1,
     train: new Uint8Array(CONFIG.maxTrainVisible),
     trainShown: 0,
     trainLen: 0,

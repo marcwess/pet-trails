@@ -19,6 +19,8 @@ interface Pickup {
 
 const PICKUP_POOL = 72;
 const TRAIL_CAP = 8192;
+/** Spread so a room shows every recolor and trail without a profile. */
+const BOT_LEVELS = [1, 5, 8, 10, 12, 15, 18, 20];
 
 /**
  * Authoritative paper.io-style simulation. Territory is a multi-polygon per
@@ -71,13 +73,14 @@ export class Sim {
     };
   }
 
-  addHuman(name: string, pet: number, kit?: Kit | null): Player | null {
+  addHuman(name: string, pet: number, kit?: Kit | null, level = 1): Player | null {
     const p = this.alloc();
     if (!p) return null;
     p.bot = false;
     p.name = name || 'You';
     p.pet = this.clampPet(pet);
     this.setKit(p.id, kit ?? DEFAULT_KIT);
+    p.level = this.clampLevel(level);
     this.spawn(p);
     this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: false });
     return p;
@@ -89,6 +92,7 @@ export class Sim {
     p.bot = true;
     p.name = this.takeBotName();
     p.pet = rngInt(this.rng, SPECIES.length);
+    p.level = BOT_LEVELS[p.id % BOT_LEVELS.length]!;
     p.botStyle = p.id % 2;
     this.setKit(p.id, rollBotKit(this.rng));
     p.botTurnSign = this.rng() < 0.5 ? -1 : 1;
@@ -163,22 +167,22 @@ export class Sim {
     if (this.tick < p.cdUntil) return false;
     const kind = p.activeId;
     const a = this.cfg.abilities;
-    const scale = rarityScale(p.rarity, this.cfg);
+    const scale = rarityScale(p.rarity, this.cfg, p.level);
     const fromX = p.x;
     const fromY = p.y;
     let radius = 0;
     if (kind === 'dash') {
-      p.dashUntil = this.tick + Math.max(1, Math.round(effectOf(a.dashSec, p.rarity, this.cfg) * this.cfg.tickHz));
+      p.dashUntil = this.tick + Math.max(1, Math.round(effectOf(a.dashSec, p.rarity, this.cfg, p.level) * this.cfg.tickHz));
     } else if (kind === 'shield') {
-      p.shieldUntil = this.tick + Math.max(1, Math.round(effectOf(a.shieldSec, p.rarity, this.cfg) * this.cfg.tickHz));
+      p.shieldUntil = this.tick + Math.max(1, Math.round(effectOf(a.shieldSec, p.rarity, this.cfg, p.level) * this.cfg.tickHz));
     } else if (kind === 'paint') {
-      radius = effectOf(a.paintRadius, p.rarity, this.cfg);
+      radius = effectOf(a.paintRadius, p.rarity, this.cfg, p.level);
       this.land.unionPolygon(p.id, [circleRing(p.x, p.y, radius, 48)]);
       p.land = this.land.areaOf(p.id);
     } else if (kind === 'frost') {
-      radius = effectOf(a.frostRadius, p.rarity, this.cfg);
+      radius = effectOf(a.frostRadius, p.rarity, this.cfg, p.level);
       const mul = Math.max(0.12, a.frostSlow / scale);
-      const until = this.tick + Math.max(1, Math.round(effectOf(a.frostSec, p.rarity, this.cfg) * this.cfg.tickHz));
+      const until = this.tick + Math.max(1, Math.round(effectOf(a.frostSec, p.rarity, this.cfg, p.level) * this.cfg.tickHz));
       const r2 = radius * radius;
       for (const o of this.roster) {
         if (!o.active || !o.alive || o.id === p.id) continue;
@@ -201,7 +205,7 @@ export class Sim {
     } else {
       return false;
     }
-    const cd = cooldownOf(cooldownBase(kind, this.cfg), p.rarity, this.cfg);
+    const cd = cooldownOf(cooldownBase(kind, this.cfg), p.rarity, this.cfg, p.level);
     p.cdUntil = this.tick + Math.max(1, Math.round(cd * this.cfg.tickHz));
     this.events.push({ e: 'ability', id: p.id, kind, x: p.x, y: p.y, r: radius, fx: fromX, fy: fromY });
     return true;
@@ -381,6 +385,11 @@ export class Sim {
     return null;
   }
 
+  private clampLevel(level: number): number {
+    if (!Number.isFinite(level)) return 1;
+    return Math.max(1, Math.min(this.cfg.levelCap, level | 0));
+  }
+
   private clampPet(pet: number): number {
     if (!Number.isFinite(pet) || pet < 0 || pet >= SPECIES.length) return rngInt(this.rng, SPECIES.length);
     return pet | 0;
@@ -390,7 +399,7 @@ export class Sim {
     if (p.alive) this.land.clear(p.id);
     p.resetRun();
     let size = this.cfg.spawnSize;
-    if (p.passiveId === 'headstart') size += effectOf(this.cfg.abilities.headStartExtra, p.rarity, this.cfg);
+    if (p.passiveId === 'headstart') size += effectOf(this.cfg.abilities.headStartExtra, p.rarity, this.cfg, p.level);
     const radius = spawnRadius(size);
     const spot = this.findSpawn(p.bot, radius);
     this.land.unionPolygon(p.id, [circleRing(spot.x, spot.y, radius, 48)]);
@@ -738,7 +747,7 @@ export class Sim {
       for (const p of this.roster) {
         if (!p.active || !p.alive) continue;
         let radius = this.cfg.pickupRadius;
-        if (p.passiveId === 'magnet') radius += effectOf(this.cfg.abilities.magnetRadius, p.rarity, this.cfg);
+        if (p.passiveId === 'magnet') radius += effectOf(this.cfg.abilities.magnetRadius, p.rarity, this.cfg, p.level);
         const dx = p.x - item.x;
         const dy = p.y - item.y;
         if (dx * dx + dy * dy > radius * radius) continue;
@@ -750,7 +759,7 @@ export class Sim {
           coins = this.cfg.lootCoins;
           xp = this.cfg.lootXp;
         }
-        if (p.passiveId === 'lucky' && coins > 0 && this.rng() < effectOf(this.cfg.abilities.luckyLoot, p.rarity, this.cfg)) {
+        if (p.passiveId === 'lucky' && coins > 0 && this.rng() < effectOf(this.cfg.abilities.luckyLoot, p.rarity, this.cfg, p.level)) {
           coins += this.cfg.lootCoins;
         }
         coins = this.coinBonus(p, coins);
@@ -824,12 +833,12 @@ export class Sim {
 
   private coinBonus(p: Player, base: number): number {
     if (base === 0 || p.passiveId !== 'lucky') return base;
-    return base * (1 + effectOf(this.cfg.abilities.luckyCoins, p.rarity, this.cfg));
+    return base * (1 + effectOf(this.cfg.abilities.luckyCoins, p.rarity, this.cfg, p.level));
   }
 
   private xpBonus(p: Player, base: number): number {
     if (base === 0 || p.passiveId !== 'scholar') return base;
-    return base * (1 + effectOf(this.cfg.abilities.scholarXp, p.rarity, this.cfg));
+    return base * (1 + effectOf(this.cfg.abilities.scholarXp, p.rarity, this.cfg, p.level));
   }
 
   private respawnBots(): void {

@@ -21,6 +21,7 @@ import {
   MeshLambertMaterial,
   NoToneMapping,
   OctahedronGeometry,
+  PlaneGeometry,
   PerspectiveCamera,
   Quaternion,
   RingGeometry,
@@ -44,6 +45,90 @@ const WORLD = CONFIG.worldScale;
 const FLOOR_COLOR = 0xe7edf3;
 /** Dark surround. Drawn only as the ring outside the blob. */
 const OUTSIDE_COLOR = 0x62707e;
+const RECOLOR_GLSL = `
+vec3 petHsl(vec3 c) {
+  float mx = max(c.r, max(c.g, c.b));
+  float mn = min(c.r, min(c.g, c.b));
+  float l = (mx + mn) * 0.5;
+  float h = 0.0;
+  float s = 0.0;
+  if (mx != mn) {
+    float d = mx - mn;
+    s = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
+    if (mx == c.r) h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+    else h = (c.r - c.g) / d + 4.0;
+    h /= 6.0;
+  }
+  return vec3(h, s, l);
+}
+float petHue(float p, float q, float t) {
+  if (t < 0.0) t += 1.0;
+  if (t > 1.0) t -= 1.0;
+  if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+  if (t < 0.5) return q;
+  if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+  return p;
+}
+vec3 petRgb(vec3 hsl) {
+  float h = hsl.x;
+  float s = clamp(hsl.y, 0.0, 1.0);
+  float l = clamp(hsl.z, 0.0, 1.0);
+  if (s <= 0.0) return vec3(l);
+  float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+  float p = 2.0 * l - q;
+  return vec3(petHue(p, q, h + 1.0 / 3.0), petHue(p, q, h), petHue(p, q, h - 1.0 / 3.0));
+}
+vec3 petRecolor(vec3 rgb, float id) {
+  int v = int(id + 0.5);
+  if (v == 0) return rgb;
+  vec3 hsl = petHsl(rgb);
+  if (v == 1) { hsl.x = 0.75; hsl.y *= 0.28; hsl.z *= 0.42; }
+  else if (v == 2) { hsl.x = mix(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.82, hsl.z * 1.05); }
+  else if (v == 3) { hsl.x = mix(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
+  else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.2, 0.38, 0.75); }
+  return petRgb(hsl);
+}
+`;
+
+function enableRecolor(mat: MeshBasicMaterial | MeshLambertMaterial): void {
+  mat.customProgramCacheKey = () => 'pet-recolor';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float recolor;\nvarying float vRecolor;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRecolor = recolor;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying float vRecolor;\n${RECOLOR_GLSL}`)
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);');
+  };
+}
+
+function hsl(h: number, s: number, l: number): [number, number, number] {
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const hue = (t: number) => {
+    let x = t;
+    if (x < 0) x += 1;
+    if (x > 1) x -= 1;
+    if (x < 1 / 6) return p + (q - p) * 6 * x;
+    if (x < 0.5) return q;
+    if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+    return p;
+  };
+  return [hue(h + 1 / 3), hue(h), hue(h - 1 / 3)];
+}
+
+function iconTexture(draw: (ctx: CanvasRenderingContext2D, s: number) => void): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (ctx) draw(ctx, 64);
+  const tex = new CanvasTexture(canvas);
+  tex.colorSpace = SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
 const PAL_CSS = PALETTE.map((c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`);
 const RARITY_TINT = RARITY_ORDER.map((name) => RARITY_RGB[name]);
 const PET_CAP = 64;
@@ -73,6 +158,10 @@ export interface DrawPet {
   dash: boolean;
   shield: boolean;
   slow: boolean;
+  /** 0 original, then shadow, golden, frost, neon. */
+  recolor: number;
+  /** 0 none, then sparkle, hearts, rainbow, paw prints. */
+  trail: number;
 }
 
 export interface DrawPickup {
@@ -520,6 +609,11 @@ export class Renderer {
   private frostX = 0;
   private frostZ = 0;
   private frostR = 1;
+  private readonly sparkles: InstancedMesh;
+  private readonly hearts: InstancedMesh;
+  private readonly rainbows: InstancedMesh;
+  private readonly paws: InstancedMesh;
+  heroRecolor = 0;
   private readonly popLife = new Float32Array(24);
   private killFlash = 0;
   private killX = 0;
@@ -671,7 +765,11 @@ export class Renderer {
     const petMat = gfx.basic
       ? new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false })
       : material;
+    enableRecolor(petMat);
     for (let i = 0; i < geos.length; i++) {
+      const rec = new InstancedBufferAttribute(new Float32Array(PET_CAP), 1);
+      rec.setUsage(DynamicDrawUsage);
+      geos[i]!.setAttribute('recolor', rec);
       const mesh = new InstancedMesh(geos[i]!, petMat, PET_CAP);
       mesh.frustumCulled = false;
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -833,6 +931,72 @@ export class Renderer {
     this.frostRing.visible = false;
     this.frostRing.renderOrder = 3;
     this.scene.add(this.frostRing);
+
+    const decal = new PlaneGeometry(0.42, 0.42);
+    decal.rotateX(-Math.PI / 2);
+    const star = iconTexture((ctx, s) => {
+      ctx.translate(s / 2, s / 2);
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        const r = i % 2 === 0 ? s * 0.42 : s * 0.16;
+        ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      ctx.closePath();
+      ctx.fill();
+    });
+    const heart = iconTexture((ctx, s) => {
+      const path = () => {
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, s * 0.84);
+        ctx.bezierCurveTo(s * 0.02, s * 0.48, s * 0.08, s * 0.1, s * 0.5, s * 0.3);
+        ctx.bezierCurveTo(s * 0.92, s * 0.1, s * 0.98, s * 0.48, s * 0.5, s * 0.84);
+        ctx.closePath();
+      };
+      path();
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = s * 0.14;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+      path();
+      ctx.fillStyle = '#e11d48';
+      ctx.fill();
+    });
+    const dot = iconTexture((ctx, s) => {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(s / 2, s / 2, s * 0.34, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    const paw = iconTexture((ctx, s) => {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.ellipse(s * 0.5, s * 0.62, s * 0.22, s * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+      for (const [x, y] of [[0.32, 0.34], [0.5, 0.24], [0.68, 0.34]] as const) {
+        ctx.beginPath();
+        ctx.arc(s * x, s * y, s * 0.09, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+    const makeDecal = (map: CanvasTexture, cap: number) => {
+      const mesh = new InstancedMesh(
+        decal,
+        new MeshBasicMaterial({ map, transparent: true, depthWrite: false, toneMapped: false, color: 0xffffff }),
+        cap,
+      );
+      mesh.instanceColor = new InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 4;
+      mesh.count = 0;
+      this.scene.add(mesh);
+      return mesh;
+    };
+    this.sparkles = makeDecal(star, 80);
+    this.hearts = makeDecal(heart, 80);
+    this.rainbows = makeDecal(dot, 80);
+    this.paws = makeDecal(paw, 80);
 
     for (let i = 0; i < 40; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false, name: false, color: '#fff' });
     // Mirror X so the south-looking camera is north-up with east on the right.
@@ -1286,12 +1450,16 @@ export class Renderer {
       this.slows.count = 0;
       this.paintRing.visible = false;
       this.frostRing.visible = false;
+      this.sparkles.count = 0;
+      this.hearts.count = 0;
+      this.rainbows.count = 0;
+      this.paws.count = 0;
       const spin = this.time * 0.7;
       this.podium.rotation.z = spin;
       const mesh = this.pets[hero];
       if (mesh) {
         const wave = Math.sin(this.time * 3);
-        this.placePet(mesh, 0, 0, 0.22 + wave * 0.05, 0, spin, 0, 1.38, 1 + wave * 0.05);
+        this.placePet(mesh, 0, 0, 0.22 + wave * 0.05, 0, spin, 0, 1.38, 1 + wave * 0.05, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
@@ -1350,7 +1518,7 @@ export class Renderer {
         const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
         const body = (pet.self ? 1.08 : 1) * shimmer;
         if (mesh && mesh.count < PET_CAP) {
-          this.placePet(mesh, mesh.count, wx, feet + bob, wz, pet.h, roll, body, squash);
+          this.placePet(mesh, mesh.count, wx, feet + bob, wz, pet.h, roll, body, squash, pet.recolor);
           mesh.count++;
         }
         if (shadowN < SHADOW_CAP) {
@@ -1513,6 +1681,7 @@ export class Renderer {
       this.layoutPickups(this.orbs, pickups, pickupCount, 1);
       this.layoutPickups(this.loot, pickups, pickupCount, 2);
       this.syncAbility(pets, petCount, dt);
+      this.layCosmetics(pets, petCount);
     }
 
     this.stepParticles(dt);
@@ -1858,6 +2027,44 @@ export class Renderer {
     return Math.max(0, next);
   }
 
+  private layCosmetics(pets: DrawPet[], petCount: number): void {
+    const meshes = [null, this.sparkles, this.hearts, this.rainbows, this.paws];
+    const counts = [0, 0, 0, 0, 0];
+    for (let i = 0; i < petCount; i++) {
+      const pet = pets[i]!;
+      if (!pet.alive || pet.trail <= 0) continue;
+      const mesh = meshes[pet.trail];
+      if (!mesh) continue;
+      const trail = this.trails[pet.id];
+      if (!trail || trail.n < 2) continue;
+      for (let k = 2; k < trail.n && counts[pet.trail]! < 80; k += 4) {
+        const idx = (trail.head - 1 - k + PATH_N * 8) % PATH_N;
+        const n = counts[pet.trail]!;
+        const spin = pet.trail === 1 ? this.time * 2 + n : n * 0.4;
+        const scale = pet.trail === 4 ? 0.7 : pet.trail === 2 ? 2.2 : 0.85;
+        this.place(mesh, n, trail.xs[idx]! * WORLD, 0.22, trail.zs[idx]! * WORLD, spin, 0, scale);
+        if (pet.trail === 3) {
+          const hue = (this.time * 0.2 + n * 0.08) % 1;
+          const rgb = hsl(hue, 0.9, 0.55);
+          mesh.instanceColor?.setXYZ(n, rgb[0], rgb[1], rgb[2]);
+        } else if (pet.trail === 2) {
+          mesh.instanceColor?.setXYZ(n, 1, 1, 1);
+        } else if (pet.trail === 1) {
+          mesh.instanceColor?.setXYZ(n, 1, 0.92, 0.45);
+        } else {
+          mesh.instanceColor?.setXYZ(n, 0.95, 0.62, 0.42);
+        }
+        counts[pet.trail] = n + 1;
+      }
+    }
+    for (let t = 1; t <= 4; t++) {
+      const mesh = meshes[t]!;
+      mesh.count = counts[t]!;
+      mesh.instanceMatrix.needsUpdate = counts[t]! > 0;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = counts[t]! > 0;
+    }
+  }
+
   private placePet(
     mesh: InstancedMesh,
     index: number,
@@ -1868,7 +2075,13 @@ export class Renderer {
     rollAmt: number,
     scale: number,
     squash: number,
+    recolor = 0,
   ): void {
+    const rec = mesh.geometry.getAttribute('recolor') as InstancedBufferAttribute | undefined;
+    if (rec) {
+      rec.setX(index, recolor);
+      rec.needsUpdate = true;
+    }
     this.pos.set(x, y + 0.24, z);
     this.quat.setFromAxisAngle(this.up, Math.PI / 2 - heading);
     this.quat2.setFromAxisAngle(this.pitchAxis, -0.68);
@@ -1920,6 +2133,10 @@ export class Renderer {
       this.shields.visible = false;
       this.slows.visible = false;
       this.parts.visible = false;
+      this.sparkles.visible = false;
+      this.hearts.visible = false;
+      this.rainbows.visible = false;
+      this.paws.visible = false;
       this.fxCoins.visible = false;
     }
     this.renderer.render(this.scene, this.camera);

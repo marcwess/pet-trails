@@ -14,6 +14,7 @@ export type { DeathReason } from './player.js';
 export { Sim } from './sim.js';
 export type { SimEvent, SimStats } from './types.js';
 export { createStarterProfile, applyXp, xpForLevel, rollKit, createPet, openBox, buyBox, equippedPet, normalizeProfile, kitOf, rollBotKit } from './profile.js';
+export { RECOLORS, TRAILS, levelPower, abilityPower, abilityCooldown, recolorId, trailId, unlockNames, gainedUnlocks } from './cosmetics.js';
 export type { Profile, PetInstance } from './profile.js';
 export {
   parseClientMsg,
