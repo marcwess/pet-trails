@@ -195,6 +195,30 @@ canvas {
 
 .steer.hide { opacity: 0; }
 
+#stick {
+  position: fixed;
+  width: 88px;
+  height: 88px;
+  margin: -44px 0 0 -44px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 252, 245, 0.9);
+  background: rgba(36, 48, 68, 0.16);
+  pointer-events: none;
+  z-index: 3;
+}
+
+#stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  background: #fffdf8;
+  box-shadow: 0 2px 0 #e09a00;
+}
+
 .stats {
   list-style: none;
   margin: 0 0 16px;

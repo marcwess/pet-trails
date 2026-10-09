@@ -1,4 +1,4 @@
-export type DeathReason = 'trail' | 'self' | 'headon' | 'enclosed' | 'border';
+export type DeathReason = 'trail' | 'headon' | 'enclosed';
 
 export class Player {
   readonly id: number;

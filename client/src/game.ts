@@ -165,6 +165,17 @@ export class Game {
       sampleOwnTrail: (limit = 80) => this.sampleTrails(limit, true),
       entities: () => this.entityList(),
       landCheck: () => this.landCheck(),
+      steer: (x: number, y: number) => {
+        this.input.desiredX = x;
+        this.input.desiredY = y;
+      },
+      cell: (x: number, y: number) => {
+        const cx = Math.floor(x);
+        const cy = Math.floor(y);
+        if (cx < 0 || cy < 0 || cx >= CONFIG.gridW || cy >= CONFIG.gridH) return 0;
+        return this.territory.owner[cy * CONFIG.gridW + cx] ?? 0;
+      },
+      project: (x: number, y: number) => this.renderer.project(x, 0, y),
     };
   }
 
@@ -214,7 +225,8 @@ export class Game {
   }
 
   private startOffline(): void {
-    const sim = new Sim({}, randomSeed());
+    const solo = new URLSearchParams(location.search).has('solo');
+    const sim = new Sim(solo ? { targetPopulation: 1, pickupTarget: 0 } : {}, randomSeed());
     const player = sim.addHuman('You', this.profile.pet.species);
     if (!player) return;
     this.offline = sim;
@@ -247,8 +259,7 @@ export class Game {
     for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
     const self = this.ents[this.selfId];
     if (self) this.renderer.landPct = self.land / (CONFIG.gridW * CONFIG.gridH);
-    const viewH = this.predPrimed ? this.predH : (self?.h ?? 0);
-    this.input.sample(viewH);
+    this.input.sample();
     if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
     if (this.phase === 'playing') {
       if (this.offline) this.stepOffline(frame);
@@ -899,6 +910,9 @@ declare global {
         } | null;
         screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
       };
+      steer: (x: number, y: number) => void;
+      cell: (x: number, y: number) => number;
+      project: (x: number, y: number) => { x: number; y: number; ok: boolean };
     };
   }
 }

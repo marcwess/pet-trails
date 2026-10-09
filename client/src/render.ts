@@ -1187,8 +1187,10 @@ export class Renderer {
       const pz = selfZ * WORLD;
       const lx = px + fx * 1.35;
       const lz = pz + fz * 1.35;
-      const tx = lx - fx * back;
-      const tz = lz - fz * back;
+      // North-up. The look point still leads the pet, but the camera stays due
+      // south of it, so steering turns the pet and never the map.
+      const tx = lx;
+      const tz = lz - back;
       if (!this.camInit || snapCam) {
         this.camX = tx;
         this.camY = height;
@@ -1206,6 +1208,7 @@ export class Renderer {
       }
       const jx = (Math.random() - 0.5) * this.shake * 0.35;
       const jz = (Math.random() - 0.5) * this.shake * 0.35;
+      this.camera.up.set(0, 1, 0);
       this.camera.position.set(this.camX + jx, this.camY, this.camZ + jz);
       this.camera.lookAt(this.lookX, 0.35, this.lookZ);
       const shx = this.camX - this.lookX;

@@ -12,4 +12,4 @@ RUN npm ci && npm run build -w shared
 ENV PORT=8787
 EXPOSE 8787
 
-CMD ["npx", "tsx", "server/src/main.ts"]
+CMD ["node", "--import", "tsx", "server/src/main.ts"]
