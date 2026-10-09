@@ -18,7 +18,17 @@ export type SimEvent =
       rank: number;
     }
   | { e: 'claim'; id: number; n: number; x: number; y: number }
-  | { e: 'pickup'; id: number; kind: number; amount: number; x: number; y: number; xp: number };
+  | { e: 'pickup'; id: number; kind: number; amount: number; x: number; y: number; xp: number }
+  | {
+      e: 'ability';
+      id: number;
+      kind: string;
+      x: number;
+      y: number;
+      r: number;
+      fx: number;
+      fy: number;
+    };
 
 export interface SimStats {
   kills: number;

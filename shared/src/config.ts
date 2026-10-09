@@ -33,16 +33,23 @@ export interface GameConfig {
   botLegMax: number;
   botRespawnSec: number;
   levelCap: number;
-  /** Base ability numbers. M2 multiplies by rarity and level. */
+  /** Coins for one Mystery Box. A decent run is a couple of kills plus a scatter of coins, so this is about one box per 3–5 of those. */
+  boxPrice: number;
+  /** Base ability numbers. Rarity multiplies effect size and duration, and divides cooldowns. */
   abilities: {
     dashSpeed: number;
     dashSec: number;
+    dashCd: number;
     shieldSec: number;
+    shieldCd: number;
     paintRadius: number;
+    paintCd: number;
     frostRadius: number;
     frostSlow: number;
     frostSec: number;
+    frostCd: number;
     recallSafe: boolean;
+    recallCd: number;
     swiftSpeed: number;
     magnetRadius: number;
     luckyCoins: number;
@@ -99,15 +106,21 @@ export const CONFIG: GameConfig = {
   botLegMax: 34,
   botRespawnSec: 1.15,
   levelCap: 20,
+  boxPrice: 100,
   abilities: {
     dashSpeed: 1.85,
     dashSec: 0.45,
+    dashCd: 7,
     shieldSec: 2.2,
+    shieldCd: 11,
     paintRadius: 4.5,
+    paintCd: 13,
     frostRadius: 6,
     frostSlow: 0.45,
     frostSec: 2,
+    frostCd: 9,
     recallSafe: true,
+    recallCd: 15,
     swiftSpeed: 0.12,
     magnetRadius: 1.8,
     luckyCoins: 0.25,
@@ -236,6 +249,48 @@ export const ACTIVES = ['dash', 'shield', 'paint', 'frost', 'recall'] as const;
 export const PASSIVES = ['swift', 'magnet', 'lucky', 'scholar', 'headstart'] as const;
 export type ActiveId = (typeof ACTIVES)[number];
 export type PassiveId = (typeof PASSIVES)[number];
+
+export const RARITY_COLOR: Record<RarityName, string> = {
+  common: '#c5ced8',
+  uncommon: '#3dde7a',
+  rare: '#3aa0ff',
+  epic: '#c46bff',
+  legendary: '#ffb43a',
+};
+
+export const RARITY_RGB: Record<RarityName, readonly [number, number, number]> = {
+  common: [197, 206, 216],
+  uncommon: [61, 222, 122],
+  rare: [58, 160, 255],
+  epic: [196, 107, 255],
+  legendary: [255, 180, 58],
+};
+
+export const ABILITY_LABEL: Record<ActiveId | PassiveId, string> = {
+  dash: 'Dash',
+  shield: 'Shield',
+  paint: 'Paint Bomb',
+  frost: 'Frost Nova',
+  recall: 'Recall',
+  swift: 'Swift',
+  magnet: 'Magnet',
+  lucky: 'Lucky',
+  scholar: 'Scholar',
+  headstart: 'Head Start',
+};
+
+export const ABILITY_ICON: Record<ActiveId | PassiveId, string> = {
+  dash: '⚡',
+  shield: '🛡️',
+  paint: '💣',
+  frost: '❄️',
+  recall: '🏠',
+  swift: '💨',
+  magnet: '🧲',
+  lucky: '🍀',
+  scholar: '📘',
+  headstart: '🌱',
+};
 
 export function paletteIndex(playerId: number): number {
   if (playerId <= 0) return 0;

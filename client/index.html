@@ -23,8 +23,8 @@
           </label>
           <button id="play" class="btn" type="button" disabled>PLAY</button>
           <div class="soon-row">
-            <button class="btn secondary" type="button" disabled>Pets <i class="soon">soon</i></button>
-            <button class="btn secondary" type="button" disabled>Boxes <i class="soon">soon</i></button>
+            <button id="open-pets" class="btn secondary" type="button">Pets</button>
+            <button id="open-boxes" class="btn secondary" type="button">Boxes</button>
           </div>
           <p id="petline" class="petline">Loading pets…</p>
         </div>
@@ -39,6 +39,12 @@
           </div>
         </div>
         <div id="steer" class="steer">Drag up to go up</div>
+        <button id="ability" class="ability" type="button" aria-label="Ability">
+          <svg class="cd" viewBox="0 0 100 100" aria-hidden="true">
+            <circle id="ability-ring" cx="50" cy="50" r="44"></circle>
+          </svg>
+          <span id="ability-icon">⚡</span>
+        </button>
       </div>
       <div id="stick" hidden><div id="stick-knob"></div></div>
       <div id="kill-banner" class="kill-banner"><b>KILL</b><span id="kill-name"></span></div>
@@ -54,6 +60,34 @@
       <div id="popups"></div>
       <div id="labels"></div>
       <div id="perf" hidden></div>
+      <section id="pets" class="meta" hidden>
+        <div class="meta-bar">
+          <button id="pets-back" class="btn secondary slim" type="button">Back</button>
+          <h2>Pets</h2>
+        </div>
+        <div id="pet-grid" class="pet-grid"></div>
+        <div id="pet-detail" class="pet-detail" hidden>
+          <div class="turntable"></div>
+          <div id="pet-sheet" class="pet-sheet"></div>
+        </div>
+      </section>
+      <section id="boxes" class="meta" hidden>
+        <div class="meta-bar">
+          <button id="boxes-back" class="btn secondary slim" type="button">Back</button>
+          <h2>Boxes</h2>
+        </div>
+        <div class="box-panel">
+          <p id="box-coins" class="box-coins">0 coins</p>
+          <p class="box-copy">A mystery box rolls a pet, a rarity, and a fresh kit.</p>
+          <button id="box-buy" class="btn" type="button">Buy</button>
+          <button id="box-open" class="btn secondary" type="button">Open</button>
+        </div>
+      </section>
+      <div id="reveal" class="reveal" hidden>
+        <div id="reveal-flash"></div>
+        <div id="reveal-box" class="gift"></div>
+        <article id="reveal-card" class="reveal-card" hidden></article>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

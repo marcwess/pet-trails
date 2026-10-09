@@ -1,7 +1,7 @@
 import '@fontsource/fredoka/400.css';
 import '@fontsource/fredoka/600.css';
 import '@fontsource/fredoka/700.css';
-import { CONFIG, SPECIES, SPECIES_LABEL } from '@pet-trails/shared';
+import { CONFIG, SPECIES, SPECIES_LABEL, equippedPet } from '@pet-trails/shared';
 import { Game } from './game.js';
 import { Hud } from './hud.js';
 import { Input } from './input.js';
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
   const perf = new Perf(params.get('perf') === '1');
   const hud = new Hud();
   const profile = loadProfile();
-  const species = SPECIES[profile.pet.species] ?? 'cat';
+  const species = SPECIES[equippedPet(profile).species] ?? 'cat';
   hud.setPetLine(`Loading pets…`);
   hud.setPlayEnabled(false);
   const territory = new Territory(CONFIG.gridW, CONFIG.gridH);
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   ]);
   const renderer = new Renderer(territory, loaded.geos, loaded.material, perf, coin);
   renderer.warmup();
-  hud.setPetLine(`Your pet · ${SPECIES_LABEL[species]} · Lv ${profile.pet.level}`);
+  hud.setPetLine(`Your pet · ${SPECIES_LABEL[species]} · Lv ${equippedPet(profile).level}`);
   hud.setPlayEnabled(true);
   const input = new Input(() => (renderer.selfScreen ? { x: renderer.selfSX, y: renderer.selfSY } : null));
   const net = new NetClient(await serverUrl());

@@ -1,3 +1,5 @@
+import type { ActiveId, PassiveId, RarityName } from './config.js';
+
 export type DeathReason = 'trail' | 'headon' | 'enclosed';
 
 export class Player {
@@ -42,6 +44,16 @@ export class Player {
   botNextThink = 0;
   botTurnSign = 1;
   botStyle = 0;
+  rarity: RarityName = 'common';
+  activeId: ActiveId = 'dash';
+  passiveId: PassiveId = 'swift';
+  /** Tick when the active can be used again. */
+  cdUntil = 0;
+  dashUntil = 0;
+  shieldUntil = 0;
+  slowUntil = 0;
+  /** Speed multiplier while slowed. */
+  slowMul = 1;
   /** Test hook: skip movement for this player. */
   frozen = false;
 
@@ -72,5 +84,10 @@ export class Player {
     this.botMoved = 0;
     this.botTurns = 0;
     this.botNextThink = 0;
+    this.cdUntil = 0;
+    this.dashUntil = 0;
+    this.shieldUntil = 0;
+    this.slowUntil = 0;
+    this.slowMul = 1;
   }
 }

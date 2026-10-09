@@ -58,6 +58,9 @@ export class Hud {
   private readonly toasts: HTMLDivElement[] = [];
   private toastCursor = 0;
   private readonly labels: HTMLDivElement[] = [];
+  private readonly abilityBtn = must('ability') as HTMLButtonElement;
+  private readonly abilityIcon = must('ability-icon');
+  private readonly abilityRing = must('ability-ring') as unknown as SVGCircleElement;
 
   constructor() {
     for (let i = 0; i < 6; i++) {
@@ -114,6 +117,33 @@ export class Hud {
   onPlay(fn: () => void): void {
     this.playBtn.addEventListener('click', fn);
     this.againBtn.addEventListener('click', fn);
+  }
+
+  onAbility(fn: () => void): void {
+    // Fire on pointerdown: iOS WebKit drops the synthetic click while another
+    // finger is still steering, which is exactly when the button gets pressed.
+    this.abilityBtn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      fn();
+    });
+    this.abilityBtn.addEventListener('keydown', (ev) => {
+      if (ev.key !== ' ' && ev.key !== 'Enter') return;
+      ev.preventDefault();
+      fn();
+    });
+  }
+
+  showAbility(on: boolean): void {
+    this.abilityBtn.hidden = !on;
+  }
+
+  setAbility(icon: string, cd: number, total: number): void {
+    this.abilityIcon.textContent = icon;
+    const circ = 276.5;
+    const t = total > 0 ? Math.min(1, Math.max(0, cd / total)) : 0;
+    this.abilityRing.style.strokeDashoffset = String(circ * (1 - t));
+    this.abilityBtn.classList.toggle('cooling', cd > 0.05);
+    this.abilityBtn.dataset.cd = cd.toFixed(2);
   }
 
   setChip(mode: 'connecting' | 'online' | 'offline'): void {

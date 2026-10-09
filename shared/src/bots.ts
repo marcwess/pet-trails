@@ -185,6 +185,52 @@ export function updateBot(p: Player, view: BotView): void {
   }
 }
 
+/** Bots spend the equipped active when it actually helps. */
+export function botWantsAbility(p: Player, view: BotView): boolean {
+  if (!p.alive || view.tick < p.cdUntil) return false;
+  const kind = p.activeId;
+  if (kind === 'shield') return p.outside && p.trailLen > 6 && rivalNearTrail(p, view, 8);
+  if (kind === 'recall') {
+    const home = view.land.home(p.id);
+    if (!home || !p.outside || p.trailLen < 16) return false;
+    const far = Math.hypot(home.x - p.x, home.y - p.y) > 18;
+    return far && (p.trailLen > 28 || rivalNearTrail(p, view, 9));
+  }
+  if (kind === 'dash') return nearestRival(p, view) < 12;
+  if (kind === 'frost') {
+    const scale = view.cfg.rarityMult[p.rarity] ?? 1;
+    return nearestRival(p, view) < view.cfg.abilities.frostRadius * scale;
+  }
+  if (kind === 'paint') return p.outside && p.trailLen > 14;
+  return false;
+}
+
+function nearestRival(p: Player, view: BotView): number {
+  let best = Infinity;
+  for (let id = 1; id < view.players.length; id++) {
+    const e = view.players[id];
+    if (!e || !e.active || !e.alive || e.id === p.id) continue;
+    const d = Math.hypot(e.x - p.x, e.y - p.y);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function rivalNearTrail(p: Player, view: BotView, range: number): boolean {
+  if (p.trailLen < 4) return false;
+  const step = Math.max(1, (p.trailLen / 10) | 0);
+  for (let t = 0; t < p.trailLen; t += step) {
+    const x = p.trailX[t]!;
+    const y = p.trailY[t]!;
+    for (let id = 1; id < view.players.length; id++) {
+      const e = view.players[id];
+      if (!e || !e.active || !e.alive || e.id === p.id) continue;
+      if (Math.hypot(e.x - x, e.y - y) < range) return true;
+    }
+  }
+  return false;
+}
+
 function biggerNeighbor(p: Player, view: BotView): boolean {
   const r = view.cfg.botThreatRange;
   for (let id = 1; id < view.players.length; id++) {
