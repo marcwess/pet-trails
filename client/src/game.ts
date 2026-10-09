@@ -161,6 +161,7 @@ export class Game {
       entities: () => this.entityList(),
       landCheck: () => this.landCheck(),
       landVerts: () => this.territory.vertexCount(),
+      landPoly: (id?: number) => this.territory.polygon(id ?? this.selfId),
     };
   }
 
@@ -896,6 +897,7 @@ declare global {
         screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
       };
       landVerts: () => number;
+      landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
     };
   }
 }

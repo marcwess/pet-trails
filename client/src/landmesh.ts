@@ -70,7 +70,8 @@ function faceUp(pos: Float32Array, idx: Uint16Array): void {
     const a = idx[i]! * 3;
     const b = idx[i + 1]! * 3;
     const c = idx[i + 2]! * 3;
-    const cross = (pos[b]! - pos[a]!) * (pos[c + 2]! - pos[a + 2]!) - (pos[b + 2]! - pos[a + 2]!) * (pos[c]! - pos[a]!);
+    // Positive Y is (bz-az)*(cx-ax) - (bx-ax)*(cz-az). The camera looks down onto +Y.
+    const cross = (pos[b + 2]! - pos[a + 2]!) * (pos[c]! - pos[a]!) - (pos[b]! - pos[a]!) * (pos[c + 2]! - pos[a + 2]!);
     if (cross < 0) {
       const tmp = idx[i + 1]!;
       idx[i + 1] = idx[i + 2]!;
