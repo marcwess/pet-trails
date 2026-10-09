@@ -202,6 +202,7 @@ export class Sim {
     p.heading = heading;
     p.desiredX = Math.cos(heading);
     p.desiredY = Math.sin(heading);
+    p.invulnUntil = 0;
     const cx = Math.floor(x);
     const cy = Math.floor(y);
     p.outside = this.grid.owner[this.grid.idx(cx, cy)] !== id;
@@ -282,6 +283,7 @@ export class Sim {
     p.outside = false;
     p.land = this.grid.landCount[p.id] ?? 0;
     p.respawnTick = 0;
+    p.invulnUntil = this.tick + Math.round(this.cfg.tickHz * 2);
     p.botPhase = 0;
     p.botMoved = 0;
     p.botTurns = 0;
@@ -317,7 +319,39 @@ export class Sim {
     if (!bot) {
       const x = Math.round(cx0 - size / 2);
       const y = Math.round(cy0 - size / 2);
-      if (x >= margin && y >= margin && this.areaClear(x, y, size)) return { x, y };
+      const px = x + size / 2;
+      const py = y + size / 2;
+      if (
+        x >= margin &&
+        y >= margin &&
+        x + size < w - margin &&
+        y + size < h - margin &&
+        this.areaClear(x, y, size) &&
+        this.nearestLiving(px, py) >= 30
+      ) {
+        return { x, y };
+      }
+      for (let attempt = 0; attempt < 36; attempt++) {
+        const ang = this.rng() * Math.PI * 2;
+        const dist = 22 + this.rng() * 20;
+        const sx = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
+        const sy = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
+        if (sx < margin || sy < margin || sx + size >= w - margin || sy + size >= h - margin) continue;
+        if (!this.areaClear(sx, sy, size)) continue;
+        const gap = this.nearestLiving(sx + size / 2, sy + size / 2);
+        if (gap < 28 || gap > 58) continue;
+        return { x: sx, y: sy };
+      }
+      for (let attempt = 0; attempt < 24; attempt++) {
+        const ang = this.rng() * Math.PI * 2;
+        const dist = 30 + this.rng() * 36;
+        const sx = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
+        const sy = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
+        if (sx < margin || sy < margin || sx + size >= w - margin || sy + size >= h - margin) continue;
+        if (!this.areaClear(sx, sy, size)) continue;
+        if (this.nearestLiving(sx + size / 2, sy + size / 2) < 28) continue;
+        return { x: sx, y: sy };
+      }
     }
 
     if (bot && !human && this.botsNear(cx0, cy0, 40) < 4) {
@@ -367,7 +401,7 @@ export class Sim {
       let crowded = false;
       for (const o of this.roster) {
         if (!o.active || !o.alive) continue;
-        if (Math.hypot(o.x - px, o.y - py) < size * 0.7) {
+        if (Math.hypot(o.x - px, o.y - py) < 28) {
           crowded = true;
           break;
         }
@@ -378,6 +412,16 @@ export class Sim {
       x: margin + rngInt(this.rng, span),
       y: margin + rngInt(this.rng, Math.max(1, h - size - margin * 2)),
     };
+  }
+
+  private nearestLiving(x: number, y: number): number {
+    let best = Infinity;
+    for (const o of this.roster) {
+      if (!o.active || !o.alive) continue;
+      const d = Math.hypot(o.x - x, o.y - y);
+      if (d < best) best = d;
+    }
+    return best;
   }
 
   private areaClear(x0: number, y0: number, size: number): boolean {
@@ -464,6 +508,12 @@ export class Sim {
 
   private kill(victim: Player, killer: Player | null, reason: DeathReason): void {
     if (!victim.alive) return;
+    if (
+      this.tick < victim.invulnUntil &&
+      (reason === 'headon' || reason === 'trail' || reason === 'enclosed')
+    ) {
+      return;
+    }
     const total = this.cfg.gridW * this.cfg.gridH;
     const land = this.grid.landCount[victim.id] ?? 0;
     victim.lastPct = (land / total) * 100;

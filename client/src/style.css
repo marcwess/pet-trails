@@ -218,12 +218,16 @@ canvas {
 #toasts {
   position: absolute;
   left: 50%;
-  top: calc(46px + env(safe-area-inset-top));
+  top: 30%;
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   gap: 6px;
   align-items: center;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  text-align: center;
+  z-index: 4;
 }
 
 .toast {

@@ -41,6 +41,7 @@ interface Ent {
   trainLen: number;
   hop: number;
   outside: boolean;
+  blinkUntil: number;
   prevX: number;
   prevZ: number;
   prevH: number;
@@ -127,6 +128,7 @@ export class Game {
         self: false,
         outside: false,
         hop: 0,
+        blink: false,
       });
     }
     for (let i = 0; i < 72; i++) this.drawPickups.push({ x: 0, z: 0, kind: 0 });
@@ -306,7 +308,10 @@ export class Game {
       ent.name = p.bot ? p.name : 'You';
       ent.pet = p.pet;
       ent.bot = p.bot;
-      if (!ent.alive && p.alive) this.renderer.clearPath(p.id);
+      if (!ent.alive && p.alive) {
+        this.renderer.clearPath(p.id);
+        ent.blinkUntil = performance.now() + 2000;
+      }
       ent.alive = p.alive;
       ent.land = p.land;
       ent.kills = p.kills;
@@ -415,6 +420,7 @@ export class Game {
     ent.bot = (snap.f & FLAG_BOT) !== 0;
     const alive = (snap.f & FLAG_ALIVE) !== 0;
     if (ent.alive && !alive) this.renderer.clearPath(ent.id);
+    if (!ent.alive && alive) ent.blinkUntil = performance.now() + 2000;
     ent.alive = alive;
     ent.outside = (snap.f & FLAG_OUTSIDE) !== 0;
     ent.land = snap.l;
@@ -459,6 +465,7 @@ export class Game {
         ent.pet = ev.pet;
         ent.bot = ev.bot;
         ent.alive = true;
+        ent.blinkUntil = performance.now() + 2000;
         this.renderer.clearPath(ev.id);
       } else if (ev.e === 'leave') {
         const ent = this.ents[ev.id];
@@ -473,6 +480,8 @@ export class Game {
           buzz(14);
         }
       } else if (ev.e === 'claim') {
+        const loop = this.renderer.exportTrail(ev.id);
+        if (loop.n >= 2) this.territory.offerLoop(ev.id, loop.x, loop.y, loop.n);
         if (ev.id === this.selfId && ev.n > 12) {
           const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
           const at = this.renderer.project(ev.x, 1.6, ev.y);
@@ -529,6 +538,7 @@ export class Game {
       draw.trainExtra = Math.max(0, ent.trainLen - ent.trainShown);
       draw.outside = ent.outside;
       draw.hop = ent.hop;
+      draw.blink = ent.blinkUntil > performance.now();
       if (!ent.alive) {
         draw.x = ent.x;
         draw.z = ent.z;
@@ -669,6 +679,7 @@ function makeEnt(id: number): Ent {
     trainLen: 0,
     hop: 0,
     outside: false,
+    blinkUntil: 0,
     prevX: 0,
     prevZ: 0,
     prevH: 0,

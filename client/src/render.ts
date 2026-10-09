@@ -4,6 +4,7 @@ import {
   BufferAttribute,
   BufferGeometry as BufGeo,
   CircleGeometry,
+  Color,
   CylinderGeometry,
   DirectionalLight,
   DoubleSide,
@@ -36,8 +37,8 @@ const PET_CAP = 64;
 const PICK_CAP = 72;
 const PART_CAP = 140;
 const SHADOW_CAP = 180;
-const PATH_N = 280;
-const RIBBON_SEGS = 160;
+const PATH_N = 420;
+const RIBBON_SEGS = 1400;
 
 export interface DrawPet {
   id: number;
@@ -52,6 +53,7 @@ export interface DrawPet {
   self: boolean;
   outside: boolean;
   hop: number;
+  blink: boolean;
 }
 
 export interface DrawPickup {
@@ -83,11 +85,11 @@ class PathBuf {
     this.primed = false;
   }
 
-  push(x: number, z: number, h: number): void {
+  push(x: number, z: number, h: number, minStep2 = 0.35): void {
     if (this.primed) {
       const dx = x - this.lx;
       const dz = z - this.lz;
-      if (dx * dx + dz * dz < 0.35) return;
+      if (dx * dx + dz * dz < minStep2) return;
     }
     this.primed = true;
     this.lx = x;
@@ -122,24 +124,68 @@ class PathBuf {
   }
 }
 
+const RIBBON_VERT = `
+  attribute float side;
+  varying float vSide;
+  void main() {
+    vSide = side;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const RIBBON_FRAG = `
+  uniform vec3 color;
+  varying float vSide;
+  void main() {
+    float e = abs(vSide);
+    float rim = smoothstep(0.38, 0.92, e);
+    vec3 col = mix(color, color * 0.42, rim);
+    float alpha = 0.9 * (1.0 - smoothstep(0.78, 1.0, e));
+    gl_FragColor = vec4(col, alpha);
+    #include <premultiplied_alpha_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+
 class Ribbon {
   readonly mesh: Mesh;
   private readonly pos: Float32Array;
+  private readonly side: Float32Array;
+  private readonly posAttr: BufferAttribute;
+  private readonly sideAttr: BufferAttribute;
   private readonly geo: BufGeo;
+  private readonly color: Color;
+  private readonly sx = new Float32Array(PATH_N + 2);
+  private readonly sz = new Float32Array(PATH_N + 2);
 
   constructor(color: number) {
     this.pos = new Float32Array(RIBBON_SEGS * 2 * 3);
+    this.side = new Float32Array(RIBBON_SEGS * 2);
     this.geo = new BufGeo();
-    this.geo.setAttribute('position', new BufferAttribute(this.pos, 3));
+    this.posAttr = new BufferAttribute(this.pos, 3);
+    this.sideAttr = new BufferAttribute(this.side, 1);
+    this.posAttr.setUsage(DynamicDrawUsage);
+    this.sideAttr.setUsage(DynamicDrawUsage);
+    this.geo.setAttribute('position', this.posAttr);
+    this.geo.setAttribute('side', this.sideAttr);
     this.geo.setDrawRange(0, 0);
-    const mat = new MeshBasicMaterial({ color, side: DoubleSide, depthWrite: false });
+    this.color = new Color(color);
+    const mat = new ShaderMaterial({
+      uniforms: { color: { value: this.color } },
+      vertexShader: RIBBON_VERT,
+      fragmentShader: RIBBON_FRAG,
+      transparent: true,
+      depthWrite: false,
+      side: DoubleSide,
+      toneMapped: false,
+    });
     this.mesh = new Mesh(this.geo, mat);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 2;
   }
 
   setColor(r: number, g: number, b: number): void {
-    (this.mesh.material as MeshBasicMaterial).color.setRGB(r, g, b);
+    this.color.setRGB(r, g, b);
   }
 
   clear(): void {
@@ -147,48 +193,149 @@ class Ribbon {
     this.mesh.visible = false;
   }
 
-  /** Path points are in cell coordinates, oldest to newest is walked from the head. */
-  draw(path: PathBuf): void {
-    if (path.n < 2) {
+  /**
+   * Continuous triangle-strip ribbon. Points are cell coordinates, oldest first
+   * in the ring buffer. The live head is appended so the strip meets the pet,
+   * and the start is extended back onto the land it left.
+   */
+  draw(path: PathBuf, headX: number, headZ: number): void {
+    let n = 0;
+    for (let k = path.n - 1; k >= 0 && n < PATH_N; k--) {
+      const i = (path.head - 1 - k + PATH_N * 8) % PATH_N;
+      const x = path.xs[i]!;
+      const z = path.zs[i]!;
+      if (n > 0) {
+        const dx = x - this.sx[n - 1]!;
+        const dz = z - this.sz[n - 1]!;
+        if (dx * dx + dz * dz < 0.04) continue;
+        if (n >= 2) {
+          const pdx = this.sx[n - 1]! - this.sx[n - 2]!;
+          const pdz = this.sz[n - 1]! - this.sz[n - 2]!;
+          const denom = Math.hypot(dx, dz) * Math.hypot(pdx, pdz);
+          if (denom > 1e-4 && (dx * pdx + dz * pdz) / denom < -0.25) {
+            this.sx[n - 1] = x;
+            this.sz[n - 1] = z;
+            continue;
+          }
+        }
+      }
+      this.sx[n] = x;
+      this.sz[n] = z;
+      n++;
+    }
+    if (n === 0) {
+      this.sx[0] = headX;
+      this.sz[0] = headZ;
+      n = 1;
+    } else {
+      const dx = headX - this.sx[n - 1]!;
+      const dz = headZ - this.sz[n - 1]!;
+      if (dx * dx + dz * dz > 0.0004) {
+        this.sx[n] = headX;
+        this.sz[n] = headZ;
+        n++;
+      } else {
+        this.sx[n - 1] = headX;
+        this.sz[n - 1] = headZ;
+      }
+    }
+    if (n < 2) {
       this.clear();
       return;
     }
-    const half = 0.32;
+    const fdx = this.sx[1]! - this.sx[0]!;
+    const fdz = this.sz[1]! - this.sz[0]!;
+    const flen = Math.hypot(fdx, fdz);
+    if (flen > 1e-4) {
+      const back = 1.15;
+      this.sx[0] = this.sx[0]! - (fdx / flen) * back;
+      this.sz[0] = this.sz[0]! - (fdz / flen) * back;
+    }
+
+    const half = 0.42;
     let count = 0;
-    let prev = -1;
-    const start = path.n - 1;
-    for (let k = start; k >= 0 && count < RIBBON_SEGS; k--) {
-      const i = (path.head - 1 - k + PATH_N * 8) % PATH_N;
-      const x = path.xs[i]! * WORLD;
-      const z = path.zs[i]! * WORLD;
-      let tx = 1;
-      let tz = 0;
-      const nxt = k > 0 ? (path.head - 1 - (k - 1) + PATH_N * 8) % PATH_N : i;
-      const px = k > 0 ? path.xs[nxt]! * WORLD : x;
-      const pz = k > 0 ? path.zs[nxt]! * WORLD : z;
-      const dx = px - x;
-      const dz = pz - z;
-      const len = Math.hypot(dx, dz);
-      if (len > 1e-4) {
-        tx = -dz / len;
-        tz = dx / len;
-      } else if (prev >= 0) {
+    const emit = (cx: number, cz: number, nx: number, nz: number) => {
+      if (count >= RIBBON_SEGS) return;
+      const o = count * 6;
+      const s = count * 2;
+      this.pos[o] = cx + nx * half;
+      this.pos[o + 1] = 0.09;
+      this.pos[o + 2] = cz + nz * half;
+      this.pos[o + 3] = cx - nx * half;
+      this.pos[o + 4] = 0.09;
+      this.pos[o + 5] = cz - nz * half;
+      this.side[s] = 1;
+      this.side[s + 1] = -1;
+      count++;
+    };
+
+    for (let i = 0; i < n && count < RIBBON_SEGS - 8; i++) {
+      const inn = this.dir(i, n, false);
+      const out = this.dir(i, n, true);
+      const wx = this.sx[i]! * WORLD;
+      const wz = this.sz[i]! * WORLD;
+      if (!inn && out) {
+        emit(wx, wz, -out.z, out.x);
         continue;
       }
-      const o = count * 6;
-      this.pos[o] = x + tx * half;
-      this.pos[o + 1] = 0.07;
-      this.pos[o + 2] = z + tz * half;
-      this.pos[o + 3] = x - tx * half;
-      this.pos[o + 4] = 0.07;
-      this.pos[o + 5] = z - tz * half;
-      count++;
-      prev = i;
+      if (inn && !out) {
+        emit(wx, wz, -inn.z, inn.x);
+        continue;
+      }
+      if (!inn || !out) continue;
+      const n0x = -inn.z;
+      const n0z = inn.x;
+      const n1x = -out.z;
+      const n1z = out.x;
+      const dot = n0x * n1x + n0z * n1z;
+      const mx = n0x + n1x;
+      const mz = n0z + n1z;
+      const ml = Math.hypot(mx, mz);
+      const denom = ml > 1e-5 ? (mx / ml) * n0x + (mz / ml) * n0z : 0;
+      if (ml < 1e-4 || denom < 0.55 || dot < 0.2) {
+        let a0 = Math.atan2(n0z, n0x);
+        let a1 = Math.atan2(n1z, n1x);
+        let da = a1 - a0;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        const steps = Math.min(5, Math.max(1, Math.ceil(Math.abs(da) / 0.55)));
+        for (let s = 0; s <= steps; s++) {
+          const a = a0 + (da * s) / steps;
+          emit(wx, wz, Math.cos(a), Math.sin(a));
+        }
+      } else {
+        const scale = Math.min(2.15, 1 / denom);
+        emit(wx, wz, (mx / ml) * scale, (mz / ml) * scale);
+      }
     }
-    const attr = this.geo.getAttribute('position') as BufferAttribute;
-    attr.needsUpdate = true;
+
+    this.posAttr.clearUpdateRanges();
+    this.posAttr.addUpdateRange(0, count * 6);
+    this.posAttr.needsUpdate = true;
+    this.sideAttr.clearUpdateRanges();
+    this.sideAttr.addUpdateRange(0, count * 2);
+    this.sideAttr.needsUpdate = true;
     this.geo.setDrawRange(0, count * 2);
     this.mesh.visible = count > 1;
+  }
+
+  private dir(i: number, n: number, forward: boolean): { x: number; z: number } | null {
+    if (forward) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = this.sx[j]! - this.sx[i]!;
+        const dz = this.sz[j]! - this.sz[i]!;
+        const len = Math.hypot(dx, dz);
+        if (len > 0.05) return { x: dx / len, z: dz / len };
+      }
+    } else {
+      for (let j = i - 1; j >= 0; j--) {
+        const dx = this.sx[i]! - this.sx[j]!;
+        const dz = this.sz[i]! - this.sz[j]!;
+        const len = Math.hypot(dx, dz);
+        if (len > 0.05) return { x: dx / len, z: dz / len };
+      }
+    }
+    return null;
   }
 }
 
@@ -297,13 +444,15 @@ export class Renderer {
         varying vec2 vUv;
         void main() {
           vec4 t = texture2D(mapTex, vUv);
-          float m = smoothstep(0.1, 0.58, t.a);
-          float rim = smoothstep(0.78, 0.28, t.a);
-          vec3 fill = t.rgb * mix(1.0, 0.68, rim);
-          vec3 ground = vec3(0.74, 0.90, 0.79);
-          ground *= 0.97 + 0.03 * sin(vUv.x * 26.0 + vUv.y * 18.0);
-          float shadow = smoothstep(0.02, 0.28, t.a) * (1.0 - m);
-          ground *= mix(1.0, 0.74, shadow);
+          float m = smoothstep(0.22, 0.58, t.a);
+          float rim = smoothstep(0.72, 0.40, t.a);
+          vec3 fill = t.rgb * mix(1.0, 0.62, rim);
+          float gx = floor(vUv.x * 72.0);
+          float gy = floor(vUv.y * 72.0);
+          float check = mod(gx + gy, 2.0);
+          vec3 ground = mix(vec3(0.50, 0.80, 0.68), vec3(0.60, 0.88, 0.75), check);
+          float shadow = smoothstep(0.02, 0.22, t.a) * (1.0 - smoothstep(0.42, 0.62, t.a));
+          ground *= mix(1.0, 0.72, shadow);
           gl_FragColor = vec4(mix(ground, fill, m), 1.0);
           #include <colorspace_fragment>
         }
@@ -509,6 +658,23 @@ export class Renderer {
     this.ribbons[id]?.clear();
   }
 
+  private readonly trailX = new Float32Array(PATH_N);
+  private readonly trailY = new Float32Array(PATH_N);
+
+  /** Oldest-to-newest trail samples in cell coordinates. */
+  exportTrail(id: number): { x: Float32Array; y: Float32Array; n: number } {
+    const path = this.trails[id];
+    if (!path || path.n < 1) return { x: this.trailX, y: this.trailY, n: 0 };
+    let n = 0;
+    for (let k = path.n - 1; k >= 0; k--) {
+      const i = (path.head - 1 - k + PATH_N * 8) % PATH_N;
+      this.trailX[n] = path.xs[i]!;
+      this.trailY[n] = path.zs[i]!;
+      n++;
+    }
+    return { x: this.trailX, y: this.trailY, n };
+  }
+
   update(
     dt: number,
     phase: 'title' | 'play' | 'dead',
@@ -583,8 +749,9 @@ export class Renderer {
         const wz = pet.z * WORLD;
         const bob = Math.sin(this.time * 9 + pet.id) * 0.05;
         const roll = Math.sin(this.time * 9 + pet.id) * 0.05;
+        const blinkOff = pet.blink && ((this.time * 8) | 0) % 2 === 0;
         const mesh = this.pets[pet.pet];
-        if (mesh && mesh.count < PET_CAP) {
+        if (mesh && mesh.count < PET_CAP && !blinkOff) {
           this.placePet(mesh, mesh.count, wx, bob, wz, pet.h, roll, pet.self ? 1.05 : 1, 1);
           mesh.count++;
         }
@@ -593,15 +760,15 @@ export class Renderer {
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
         if (pet.outside) {
-          trail?.push(pet.x, pet.z, pet.h);
-          if (ribbon && trail && trail.n >= 2) {
+          trail?.push(pet.x, pet.z, pet.h, 0.12);
+          if (ribbon && trail && trail.n >= 1) {
             const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
             ribbon.setColor(
-              (col[0] + (255 - col[0]) * 0.42) / 255,
-              (col[1] + (255 - col[1]) * 0.42) / 255,
-              (col[2] + (255 - col[2]) * 0.42) / 255,
+              (col[0] + (255 - col[0]) * 0.38) / 255,
+              (col[1] + (255 - col[1]) * 0.38) / 255,
+              (col[2] + (255 - col[2]) * 0.38) / 255,
             );
-            ribbon.draw(trail);
+            ribbon.draw(trail, pet.x, pet.z);
           }
         } else {
           trail?.clear();
@@ -651,7 +818,7 @@ export class Renderer {
           this.holdX = pet.x;
           this.holdZ = pet.z;
           this.holdH = pet.h;
-          this.ring.visible = true;
+          this.ring.visible = !blinkOff;
           this.ring.position.set(wx, 0.03, wz);
           const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
           (this.ring.material as MeshBasicMaterial).color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);

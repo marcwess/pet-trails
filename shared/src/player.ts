@@ -24,6 +24,8 @@ export class Player {
   trainLen = 0;
   aliveMs = 0;
   respawnTick = 0;
+  /** Tick before which head-on, trail cuts, and enclosures do not kill. */
+  invulnUntil = 0;
   deathReason: DeathReason | '' = '';
   deathKiller = 0;
   lastPct = 0;
@@ -58,6 +60,7 @@ export class Player {
     this.aliveMs = 0;
     this.deathReason = '';
     this.deathKiller = 0;
+    this.invulnUntil = 0;
     this.lastPct = 0;
     this.lastRank = 1;
     this.lastTime = 0;

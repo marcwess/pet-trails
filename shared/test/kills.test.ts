@@ -118,6 +118,38 @@ test('head-on tie: both die and nobody is credited', () => {
   assert.equal(b.trainLen, 0);
 });
 
+test('a fresh spawn shrugs off a head-on until invulnerability ends', () => {
+  const sim = new Sim(
+    { gridW: 48, gridH: 48, spawnSize: 4, speed: 8, turnRate: 12, tickHz: 20, pickupTarget: 0, headRadius: 1.2, targetPopulation: 2 },
+    9,
+  );
+  const a = sim.addHuman('A', 0);
+  const b = sim.addHuman('B', 1);
+  assert.ok(a && b);
+  sim.grid.clearPlayer(a.id);
+  sim.grid.clearPlayer(b.id);
+  sim.debugGiveRect(a.id, 2, 2, 4, 4);
+  sim.debugGiveRect(b.id, 40, 40, 4, 4);
+  a.invulnUntil = sim.tick + 30;
+  b.invulnUntil = sim.tick + 30;
+  a.frozen = true;
+  b.frozen = true;
+  a.x = 20;
+  a.y = 20;
+  b.x = 20.4;
+  b.y = 20;
+  for (let i = 0; i < 6; i++) sim.step();
+  assert.equal(a.alive, true);
+  assert.equal(b.alive, true);
+  a.invulnUntil = 0;
+  b.invulnUntil = 0;
+  sim.step();
+  assert.equal(a.alive, false);
+  assert.equal(b.alive, false);
+  assert.equal(a.deathReason, 'headon');
+  assert.equal(b.deathReason, 'headon');
+});
+
 test('diagonal steps paint both corner cells so the trail stays sealed', () => {
   const seen: string[] = [];
   walkCells(0.9, 0.9, 1.3, 1.3, (x, y) => {
