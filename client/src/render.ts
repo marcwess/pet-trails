@@ -3,6 +3,7 @@ import {
   BoxGeometry,
   BufferAttribute,
   BufferGeometry as BufGeo,
+  CanvasTexture,
   CircleGeometry,
   Color,
   CylinderGeometry,
@@ -24,19 +25,23 @@ import {
   PerspectiveCamera,
   PlaneGeometry,
   Quaternion,
+  RepeatWrapping,
   RingGeometry,
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
+  TorusGeometry,
   Vector3,
   WebGLRenderer,
   type BufferGeometry,
+  type Texture,
 } from 'three';
-import { buildLand } from './landmesh.js';
+import { SLAB_H, buildLand } from './landmesh.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
 const WORLD = CONFIG.worldScale;
+const PAL_CSS = PALETTE.map((c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`);
 const PET_CAP = 64;
 const PICK_CAP = 72;
 const PART_CAP = 140;
@@ -58,6 +63,7 @@ export interface DrawPet {
   outside: boolean;
   hop: number;
   blink: boolean;
+  name: string;
 }
 
 export interface DrawPickup {
@@ -71,6 +77,8 @@ export interface ScreenLabel {
   sy: number;
   text: string;
   on: boolean;
+  name: boolean;
+  color: string;
 }
 
 class PathBuf {
@@ -142,9 +150,9 @@ const RIBBON_FRAG = `
   varying float vSide;
   void main() {
     float e = abs(vSide);
-    float rim = smoothstep(0.38, 0.92, e);
-    vec3 col = mix(color, color * 0.42, rim);
-    float alpha = 0.9 * (1.0 - smoothstep(0.78, 1.0, e));
+    float rim = smoothstep(0.55, 0.95, e);
+    vec3 col = mix(color, color * 0.78, rim);
+    float alpha = 0.72 * (1.0 - smoothstep(0.8, 1.0, e));
     gl_FragColor = vec4(col, alpha);
     #include <premultiplied_alpha_fragment>
     #include <colorspace_fragment>
@@ -275,11 +283,12 @@ class Ribbon {
       if (count >= RIBBON_SEGS) return;
       const o = count * 6;
       const s = count * 2;
+      const y = SLAB_H + 0.05;
       this.pos[o] = cx + nx * half;
-      this.pos[o + 1] = 0.14;
+      this.pos[o + 1] = y;
       this.pos[o + 2] = cz + nz * half;
       this.pos[o + 3] = cx - nx * half;
-      this.pos[o + 4] = 0.14;
+      this.pos[o + 4] = y;
       this.pos[o + 5] = cz - nz * half;
       this.side[s] = 1;
       this.side[s + 1] = -1;
@@ -362,6 +371,7 @@ interface LandSlot {
   shadow: Mesh;
   fillGeo: BufGeo;
   rimGeo: BufGeo;
+  shadowGeo: BufGeo;
 }
 
 export class Renderer {
@@ -386,12 +396,16 @@ export class Renderer {
   private readonly fenceMeshes: Mesh[] = [];
   landPct = 0;
   private readonly coins: InstancedMesh;
+  private readonly fxCoins: InstancedMesh;
   private readonly orbs: InstancedMesh;
   private readonly loot: InstancedMesh;
   private readonly parts: InstancedMesh;
   private readonly shadows: InstancedMesh;
+  private readonly bases: InstancedMesh;
   private readonly ring: Mesh;
   private readonly platform: Mesh;
+  private readonly stage: Group;
+  private readonly podium: Mesh;
   private readonly ground: Mesh;
   private readonly gridLines: LineSegments;
   private readonly land: Group;
@@ -403,6 +417,19 @@ export class Renderer {
   private killFlash = 0;
   private killX = 0;
   private killZ = 0;
+  private arcId = -1;
+  private arcLife = 0;
+  private arcSx = 0;
+  private arcSz = 0;
+  private arcTx = 0;
+  private arcTz = 0;
+  private readonly fxLife = new Float32Array(24);
+  private readonly fxX = new Float32Array(24);
+  private readonly fxY = new Float32Array(24);
+  private readonly fxZ = new Float32Array(24);
+  private readonly fxVx = new Float32Array(24);
+  private readonly fxVy = new Float32Array(24);
+  private readonly fxVz = new Float32Array(24);
   private measurePending = false;
   private measureR = 0;
   private measureG = 0;
@@ -447,7 +474,13 @@ export class Renderer {
   punch = 0;
   private readonly perf: Perf;
 
-  constructor(territory: Territory, geos: BufferGeometry[], material: MeshLambertMaterial, perf: Perf) {
+  constructor(
+    territory: Territory,
+    geos: BufferGeometry[],
+    material: MeshLambertMaterial,
+    perf: Perf,
+    coin: { geometry: BufferGeometry; map: Texture | null } | null,
+  ) {
     this.territory = territory;
     this.perf = perf;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -461,7 +494,7 @@ export class Renderer {
     this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
-    this.renderer.setClearColor(0x8cd6b6, 1);
+    this.renderer.setClearColor(0xb7c3d0, 1);
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     document.body.prepend(this.renderer.domElement);
@@ -469,9 +502,9 @@ export class Renderer {
     perf.territoryH = 0;
 
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
-    this.scene.add(new HemisphereLight(0xfff4d8, 0x7dce9a, 1.15));
-    const dir = new DirectionalLight(0xffffff, 1.15);
-    dir.position.set(30, 50, 20);
+    this.scene.add(new HemisphereLight(0xfff8ef, 0xc5d0dc, 0.95));
+    const dir = new DirectionalLight(0xfffaf4, 1.45);
+    dir.position.set(24, 48, 12);
     this.scene.add(dir);
 
     const gw = territory.gridW * WORLD;
@@ -479,7 +512,7 @@ export class Renderer {
     const groundGeo = new PlaneGeometry(gw, gh);
     groundGeo.rotateX(-Math.PI / 2);
     groundGeo.translate(gw / 2, 0, gh / 2);
-    this.ground = new Mesh(groundGeo, new MeshBasicMaterial({ color: 0x8cd6b6 }));
+    this.ground = new Mesh(groundGeo, new MeshBasicMaterial({ map: groundPattern(), color: 0xffffff }));
     this.ground.frustumCulled = false;
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
@@ -487,9 +520,9 @@ export class Renderer {
     this.land = new Group();
     this.landShadow = new Group();
     const shadowMat = new MeshBasicMaterial({
-      color: 0x1a3a28,
+      color: 0x2c3544,
       transparent: true,
-      opacity: 0.22,
+      opacity: 0.28,
       depthWrite: false,
       toneMapped: false,
     });
@@ -497,6 +530,7 @@ export class Renderer {
       const col = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
       const fillGeo = new BufGeo();
       const rimGeo = new BufGeo();
+      const shadowGeo = new BufGeo();
       const fill = new Mesh(
         fillGeo,
         new MeshBasicMaterial({
@@ -505,35 +539,46 @@ export class Renderer {
         }),
       );
       fill.frustumCulled = false;
-      fill.renderOrder = 1;
+      fill.renderOrder = 2;
       fill.visible = false;
-      const rim = new Mesh(
-        rimGeo,
-        new MeshBasicMaterial({
-          color: (Math.round(col[0] * 0.62) << 16) | (Math.round(col[1] * 0.62) << 8) | Math.round(col[2] * 0.62),
-          toneMapped: false,
-        }),
-      );
+      const wall = (Math.round(col[0] * 0.52) << 16) | (Math.round(col[1] * 0.52) << 8) | Math.round(col[2] * 0.52);
+      const rim = new Mesh(rimGeo, new MeshLambertMaterial({ color: wall }));
       rim.frustumCulled = false;
-      rim.renderOrder = 2;
+      rim.renderOrder = 1;
       rim.visible = false;
-      const shadow = new Mesh(fillGeo, shadowMat);
+      const shadow = new Mesh(shadowGeo, shadowMat);
       shadow.frustumCulled = false;
       shadow.renderOrder = 0;
       shadow.visible = false;
       this.land.add(fill, rim);
       this.landShadow.add(shadow);
-      this.slots.push({ fill, rim, shadow, fillGeo, rimGeo });
+      this.slots.push({ fill, rim, shadow, fillGeo, rimGeo, shadowGeo });
     }
     this.scene.add(this.land);
     this.scene.add(this.landShadow);
     this.addFence(gw, gh);
 
-    const platformGeo = new CircleGeometry(7.2, 40);
-    platformGeo.rotateX(-Math.PI / 2);
-    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: 0xb6ebc4 }));
-    this.platform.position.y = 0.02;
-    this.scene.add(this.platform);
+    const hero = PALETTE[0]!;
+    const heroHex = (hero[0] << 16) | (hero[1] << 8) | hero[2];
+    const platformGeo = new CylinderGeometry(1.7, 1.95, 0.42, 36);
+    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: heroHex }));
+    this.platform.position.y = 0.21;
+    const podiumRing = new Mesh(
+      new TorusGeometry(1.85, 0.07, 8, 40),
+      new MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
+    );
+    podiumRing.rotation.x = Math.PI / 2;
+    podiumRing.position.y = 0.44;
+    this.podium = podiumRing;
+    const backdrop = new Mesh(
+      new CircleGeometry(16, 48),
+      new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false }),
+    );
+    backdrop.rotation.x = -Math.PI / 2;
+    backdrop.position.y = -0.35;
+    this.stage = new Group();
+    this.stage.add(backdrop, this.platform, this.podium);
+    this.scene.add(this.stage);
 
     for (let i = 0; i < geos.length; i++) {
       const mesh = new InstancedMesh(geos[i]!, material, PET_CAP);
@@ -551,7 +596,15 @@ export class Renderer {
       this.scene.add(ribbon.mesh);
     }
 
-    this.coins = makeInstances(new CylinderGeometry(0.22, 0.22, 0.08, 10), 0xffc400, PICK_CAP);
+    const coinGeo = coin?.geometry ?? flatCoin();
+    const coinMat = new MeshBasicMaterial({
+      map: coin?.map ?? undefined,
+      color: coin?.map ? 0xffffff : 0xffc400,
+      toneMapped: false,
+    });
+    this.coins = makeInstances(coinGeo, coinMat, PICK_CAP);
+    this.fxCoins = makeInstances(coinGeo, coinMat, 24);
+    this.scene.add(this.fxCoins);
     this.orbs = makeInstances(new OctahedronGeometry(0.28, 0), 0x2ec8ff, PICK_CAP);
     this.loot = makeInstances(new BoxGeometry(0.34, 0.34, 0.34), 0xff4fa3, PICK_CAP);
     this.scene.add(this.coins, this.orbs, this.loot);
@@ -560,13 +613,27 @@ export class Renderer {
     shadowGeo.rotateX(-Math.PI / 2);
     this.shadows = new InstancedMesh(
       shadowGeo,
-      new MeshBasicMaterial({ color: 0x143024, transparent: true, opacity: 0.22, depthWrite: false }),
+      new MeshBasicMaterial({ color: 0x5c6a7a, transparent: true, opacity: 0.3, depthWrite: false }),
       SHADOW_CAP,
     );
     this.shadows.frustumCulled = false;
     this.shadows.instanceMatrix.setUsage(DynamicDrawUsage);
     this.shadows.count = 0;
     this.scene.add(this.shadows);
+
+    const baseGeo = new RingGeometry(0.24, 0.4, 22);
+    baseGeo.rotateX(-Math.PI / 2);
+    this.bases = new InstancedMesh(
+      baseGeo,
+      new MeshBasicMaterial({ color: 0xffffff, toneMapped: false, side: DoubleSide }),
+      SHADOW_CAP,
+    );
+    this.bases.instanceColor = new InstancedBufferAttribute(new Float32Array(SHADOW_CAP * 3), 3);
+    this.bases.frustumCulled = false;
+    this.bases.instanceMatrix.setUsage(DynamicDrawUsage);
+    this.bases.count = 0;
+    this.bases.renderOrder = 3;
+    this.scene.add(this.bases);
 
     this.parts = new InstancedMesh(new BoxGeometry(0.2, 0.2, 0.2), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
@@ -615,7 +682,7 @@ export class Renderer {
     this.claimRing.renderOrder = 2;
     this.scene.add(this.claimRing);
 
-    for (let i = 0; i < 16; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false });
+    for (let i = 0; i < 40; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false, name: false, color: '#fff' });
     this.applySize();
     window.addEventListener('resize', () => this.applySize());
     if (perf.enabled) (window as unknown as { __r?: Renderer }).__r = this;
@@ -659,29 +726,37 @@ export class Renderer {
     this.ring.visible = false;
   }
 
-  burst(x: number, z: number, playerId: number, withShake = true): void {
+  burst(x: number, z: number, playerId: number, withShake = true, toX?: number, toZ?: number): void {
     const c = PALETTE[(Math.max(1, playerId) - 1) % PALETTE.length]!;
     const wx = x * WORLD;
     const wz = z * WORLD;
-    for (let k = 0; k < 40; k++) {
+    for (let k = 0; k < 64; k++) {
       if (this.partCount >= PART_CAP) break;
       const i = this.partCount++;
-      const ang = (k / 40) * Math.PI * 2 + (k % 3) * 0.17;
-      const sp = 2.6 + (k % 5) * 0.7;
-      const spread = 0.55 + (k % 8) * 0.2;
+      const ang = (k / 64) * Math.PI * 2 + (k % 5) * 0.11;
+      const sp = 3.1 + (k % 6) * 0.55;
+      const spread = 0.35 + (k % 8) * 0.16;
       this.px[i] = wx + Math.cos(ang) * spread;
-      this.py[i] = 0.4 + (k % 6) * 0.22;
+      this.py[i] = 0.45 + (k % 7) * 0.18;
       this.pz[i] = wz + Math.sin(ang) * spread;
       this.vx[i] = Math.cos(ang) * sp;
-      this.vy[i] = 2.6 + (k % 4) * 0.55;
+      this.vy[i] = 3.2 + (k % 5) * 0.5;
       this.vz[i] = Math.sin(ang) * sp;
-      this.life[i] = 0.7;
+      this.life[i] = 0.95;
       this.pr[i] = c[0] / 255;
       this.pg[i] = c[1] / 255;
       this.pb[i] = c[2] / 255;
     }
-    if (playerId > 0 && playerId < this.popLife.length) this.popLife[playerId] = 0.25;
-    this.killFlash = 0.3;
+    if (playerId > 0 && playerId < this.popLife.length) this.popLife[playerId] = 0.72;
+    if (toX !== undefined && toZ !== undefined) {
+      this.arcId = playerId;
+      this.arcLife = 0.72;
+      this.arcSx = x;
+      this.arcSz = z;
+      this.arcTx = toX;
+      this.arcTz = toZ;
+    }
+    this.killFlash = 0.35;
     this.killX = wx;
     this.killZ = wz;
     const mat = this.flashRing.material as MeshBasicMaterial;
@@ -723,7 +798,7 @@ export class Renderer {
     }
     const geo = new BufGeo();
     geo.setAttribute('position', new BufferAttribute(positions, 3));
-    const lines = new LineSegments(geo, new LineBasicMaterial({ color: 0x63b894 }));
+    const lines = new LineSegments(geo, new LineBasicMaterial({ color: 0xd5dee8 }));
     lines.frustumCulled = false;
     return lines;
   }
@@ -746,12 +821,23 @@ export class Renderer {
     }
     slot.fillGeo.setAttribute('position', new BufferAttribute(built.fillPos, 3));
     slot.fillGeo.setIndex(new BufferAttribute(built.fillIdx, 1));
+    slot.fillGeo.computeBoundingSphere();
     slot.fill.visible = true;
-    slot.shadow.visible = true;
+    slot.fill.scale.y = 1;
+    if (built.shadowIdx.length >= 3) {
+      slot.shadowGeo.setAttribute('position', new BufferAttribute(built.shadowPos, 3));
+      slot.shadowGeo.setIndex(new BufferAttribute(built.shadowIdx, 1));
+      slot.shadowGeo.computeBoundingSphere();
+      slot.shadow.visible = true;
+    } else {
+      slot.shadow.visible = false;
+    }
     if (built.rimIdx.length >= 3) {
       slot.rimGeo.setAttribute('position', new BufferAttribute(built.rimPos, 3));
       slot.rimGeo.setIndex(new BufferAttribute(built.rimIdx, 1));
+      slot.rimGeo.computeBoundingSphere();
       slot.rim.visible = true;
+      slot.rim.scale.y = 1;
     } else {
       slot.rim.visible = false;
     }
@@ -773,60 +859,43 @@ export class Renderer {
   }
 
   private addFence(gw: number, gh: number): void {
-    const water = new MeshBasicMaterial({ color: 0x3e94c8 });
+    const outside = new MeshBasicMaterial({ color: 0xb7c3d0 });
     const skirt = (x: number, z: number, w: number, d: number) => {
-      const mesh = new Mesh(new PlaneGeometry(w, d), water);
+      const mesh = new Mesh(new PlaneGeometry(w, d), outside);
       mesh.rotation.x = -Math.PI / 2;
-      mesh.position.set(x, -0.05, z);
+      mesh.position.set(x, -0.02, z);
       this.scene.add(mesh);
       this.fenceMeshes.push(mesh);
     };
-    const pad = 48;
+    const pad = 80;
     skirt(-pad / 2, gh / 2, pad, gh + pad * 2);
     skirt(gw + pad / 2, gh / 2, pad, gh + pad * 2);
     skirt(gw / 2, -pad / 2, gw, pad);
     skirt(gw / 2, gh + pad / 2, gw, pad);
 
-    const mat = new MeshLambertMaterial({ color: 0xfff6ea });
-    const post = new BoxGeometry(0.34, 1.55, 0.34);
-    const rail = new BoxGeometry(1, 0.16, 0.16);
-    const posts = new InstancedMesh(post, mat, 320);
-    posts.frustumCulled = false;
-    posts.instanceMatrix.setUsage(DynamicDrawUsage);
-    let n = 0;
-    const step = 1.7;
-    const placePost = (x: number, z: number) => {
-      if (n >= 320) return;
-      this.place(posts, n++, x, 0.78, z, 0, 0, 1);
-    };
-    for (let x = 0; x <= gw; x += step) {
-      placePost(x, 0);
-      placePost(x, gh);
-    }
-    for (let z = step; z < gh; z += step) {
-      placePost(0, z);
-      placePost(gw, z);
-    }
-    posts.count = n;
-    posts.instanceMatrix.needsUpdate = true;
-    this.scene.add(posts);
-    this.fenceMeshes.push(posts);
-    const rails: Array<[number, number, number, number, number]> = [
-      [gw / 2, 0.48, 0, gw, 0],
-      [gw / 2, 1.05, 0, gw, 0],
-      [gw / 2, 0.48, gh, gw, 0],
-      [gw / 2, 1.05, gh, gw, 0],
-      [0, 0.48, gh / 2, gh, Math.PI / 2],
-      [0, 1.05, gh / 2, gh, Math.PI / 2],
-      [gw, 0.48, gh / 2, gh, Math.PI / 2],
-      [gw, 1.05, gh / 2, gh, Math.PI / 2],
+    const lip = 0.72;
+    const height = 0.5;
+    const border = new MeshLambertMaterial({ color: 0xf7f4ee });
+    const shade = new MeshBasicMaterial({
+      color: 0x8d99a8,
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+    });
+    const bars: Array<[number, number, number, number]> = [
+      [gw / 2, -lip / 2, gw + lip * 2, lip],
+      [gw / 2, gh + lip / 2, gw + lip * 2, lip],
+      [-lip / 2, gh / 2, lip, gh],
+      [gw + lip / 2, gh / 2, lip, gh],
     ];
-    for (const [x, y, z, len, rot] of rails) {
-      const geo = rail.clone();
-      geo.scale(len, 1, 1);
-      const mesh = new Mesh(geo, mat);
-      mesh.position.set(x, y, z);
-      mesh.rotation.y = rot;
+    for (const [x, z, w, d] of bars) {
+      const shadow = new Mesh(new PlaneGeometry(w + 0.35, d + 0.35), shade);
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.set(x + 0.12, 0.01, z + 0.1);
+      this.scene.add(shadow);
+      this.fenceMeshes.push(shadow);
+      const mesh = new Mesh(new BoxGeometry(w, height, d), border);
+      mesh.position.set(x, height / 2, z);
       this.scene.add(mesh);
       this.fenceMeshes.push(mesh);
     }
@@ -835,6 +904,25 @@ export class Renderer {
   punchClaim(): void {
     this.punch = 1;
     this.shake = Math.min(1, this.shake + 0.28);
+  }
+
+  /** Pooled gold coins popping out of a fresh claim. No per-call allocation. */
+  coinBurst(x: number, z: number): void {
+    const wx = x * WORLD;
+    const wz = z * WORLD;
+    let spawned = 0;
+    for (let i = 0; i < this.fxLife.length && spawned < 8; i++) {
+      if (this.fxLife[i]! > 0) continue;
+      const ang = spawned * 0.8 + 0.4;
+      this.fxLife[i] = 0.75;
+      this.fxX[i] = wx;
+      this.fxY[i] = SLAB_H + 0.35;
+      this.fxZ[i] = wz;
+      this.fxVx[i] = Math.cos(ang) * (2.4 + spawned * 0.12);
+      this.fxVy[i] = 3.6 + (spawned % 3) * 0.45;
+      this.fxVz[i] = Math.sin(ang) * (2.4 + spawned * 0.12);
+      spawned++;
+    }
   }
 
   clearPaths(): void {
@@ -917,11 +1005,13 @@ export class Renderer {
     this.time += dt;
     this.territory.update(dt);
     this.syncLand();
+    this.riseSlabs();
     this.syncClaimRing();
     this.perf.beginFrame();
 
     if (phase === 'dead') {
       this.stepParticles(dt);
+      this.stepCoins(dt);
       this.stepPops(dt);
       this.renderer.render(this.scene, this.camera);
       this.finishMeasure();
@@ -941,38 +1031,36 @@ export class Renderer {
       this.landShadow.visible = false;
       this.claimRing.visible = false;
       this.flashRing.visible = false;
-      this.platform.visible = true;
+      this.stage.visible = true;
+      this.bases.count = 0;
+      this.fxCoins.count = 0;
+      for (let i = 0; i < this.fxLife.length; i++) this.fxLife[i] = 0;
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbons) ribbon.clear();
       this.ring.visible = false;
-      const spin = this.time * 0.35;
-      for (let i = 0; i < this.pets.length; i++) {
-        const mesh = this.pets[i]!;
-        if (i === hero) {
-          const bob = Math.sin(this.time * 3) * 0.08;
-          this.place(mesh, 0, 0, bob, 0, spin, Math.sin(this.time * 6) * 0.05, 1.5);
-        } else {
-          const ang = spin * 0.35 + (i / SPECIES.length) * Math.PI * 2;
-          const bob = Math.sin(this.time * 6 + i) * 0.06;
-          this.place(mesh, 0, Math.sin(ang) * 5.3, bob, Math.cos(ang) * 5.3, -ang, Math.sin(this.time * 6 + i) * 0.08, 0.78);
-        }
+      const spin = this.time * 0.7;
+      this.podium.rotation.z = spin;
+      const mesh = this.pets[hero];
+      if (mesh) {
+        const wave = Math.sin(this.time * 3);
+        this.placePet(mesh, 0, 0, 0.22 + wave * 0.05, 0, spin, 0, 1.38, 1 + wave * 0.05);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      const ang = this.time * 0.22;
-      this.camera.position.set(Math.sin(ang) * 9.5, 5.6, Math.cos(ang) * 9.5);
-      this.camera.lookAt(0, 0.9, 0);
+      const ang = this.time * 0.18;
+      this.camera.position.set(Math.sin(ang) * 6.4, 3.5, Math.cos(ang) * 6.4);
+      this.camera.lookAt(0, 0.85, 0);
       this.coins.count = 0;
       this.orbs.count = 0;
       this.loot.count = 0;
       this.shadows.count = 0;
       this.selfScreen = false;
     } else {
-      this.ground.visible = false;
+      this.ground.visible = true;
       this.land.visible = true;
       this.landShadow.visible = true;
       this.gridLines.visible = true;
-      this.platform.visible = false;
+      this.stage.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;
       let selfZ = this.holdZ;
@@ -986,11 +1074,19 @@ export class Renderer {
           ribbon?.clear();
           const pop = this.popLife[pet.id] ?? 0;
           if (pop > 0) {
-            const u = 1 - pop / 0.25;
-            const grow = u < 0.28 ? 1 + (u / 0.28) * 0.9 : 1.9 * (1 - (u - 0.28) / 0.72);
+            let px = pet.x;
+            let pz = pet.z;
+            let py = 0.2;
+            if (pet.id === this.arcId && this.arcLife > 0) {
+              const u = 1 - this.arcLife / 0.72;
+              const e = u * u * (3 - 2 * u);
+              px = this.arcSx + (this.arcTx - this.arcSx) * e;
+              pz = this.arcSz + (this.arcTz - this.arcSz) * e;
+              py = Math.sin(Math.min(1, u) * Math.PI) * 1.45;
+            }
             const mesh = this.pets[pet.pet];
-            if (mesh && mesh.count < PET_CAP && grow > 0.04) {
-              this.placePet(mesh, mesh.count, pet.x * WORLD, 0, pet.z * WORLD, pet.h, 0, grow, 1);
+            if (mesh && mesh.count < PET_CAP) {
+              this.placePet(mesh, mesh.count, px * WORLD, py, pz * WORLD, pet.h, 0, 1.05, 1);
               mesh.count++;
             }
           }
@@ -998,15 +1094,22 @@ export class Renderer {
         }
         const wx = pet.x * WORLD;
         const wz = pet.z * WORLD;
-        const bob = Math.sin(this.time * 9 + pet.id) * 0.05;
-        const roll = Math.sin(this.time * 9 + pet.id) * 0.05;
+        const feet = this.surfaceAt(pet.id, pet.x, pet.z);
+        const wave = Math.sin(this.time * 8 + pet.id * 1.7);
+        const bob = Math.max(0, wave) * 0.1;
+        const squash = wave > 0 ? 1.07 : 0.9;
+        const roll = wave * 0.06;
         const mesh = this.pets[pet.pet];
         const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
+        const body = (pet.self ? 1.08 : 1) * shimmer;
         if (mesh && mesh.count < PET_CAP) {
-          this.placePet(mesh, mesh.count, wx, bob, wz, pet.h, roll, (pet.self ? 1.05 : 1) * shimmer, 1);
+          this.placePet(mesh, mesh.count, wx, feet + bob, wz, pet.h, roll, body, squash);
           mesh.count++;
         }
-        if (shadowN < SHADOW_CAP) this.place(this.shadows, shadowN++, wx, 0.06, wz, 0, 0, pet.self ? 1.05 : 0.9);
+        if (shadowN < SHADOW_CAP) {
+          this.place(this.shadows, shadowN++, wx, feet + 0.03, wz, 0, 0, pet.self ? 1.05 : 0.92);
+          this.placeBase(shadowN - 1, wx, feet + 0.05, wz, pet.id, pet.self ? 1.05 : 1);
+        }
         const path = this.paths[pet.id];
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
@@ -1017,9 +1120,9 @@ export class Renderer {
           if (ribbon && trail.n >= 1) {
             const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
             ribbon.setColor(
-              (col[0] + (255 - col[0]) * 0.38) / 255,
-              (col[1] + (255 - col[1]) * 0.38) / 255,
-              (col[2] + (255 - col[2]) * 0.38) / 255,
+              (col[0] + (255 - col[0]) * 0.55) / 255,
+              (col[1] + (255 - col[1]) * 0.55) / 255,
+              (col[2] + (255 - col[2]) * 0.55) / 255,
             );
             ribbon.draw(trail, pet.x, pet.z);
           }
@@ -1035,33 +1138,48 @@ export class Renderer {
           if (!path.sample(8.2 * (t + 1), this.sample)) continue;
           const newest = t === 0;
           const hop = newest ? pet.hop : 0;
-          const hopT = hop > 0 ? 1 - hop / 0.42 : 1;
-          const squash = hop > 0 ? 1 + Math.sin(hopT * Math.PI) * 0.5 : 1;
-          const lift = hop > 0 ? Math.sin(hopT * Math.PI) * 0.6 : 0;
-          const fb = Math.sin(this.time * 8 + t * 1.7) * 0.045;
+          const hopT = hop > 0 ? 1 - hop / 0.72 : 1;
+          const hopSquash = hop > 0 ? 1 + Math.sin(hopT * Math.PI) * 0.45 : 1;
+          const lift = hop > 0 ? Math.sin(hopT * Math.PI) * 1.35 : 0;
+          const fw = Math.sin(this.time * 8 + t * 1.7);
+          const fb = Math.max(0, fw) * 0.08;
+          const fFeet = this.surfaceAt(pet.id, this.sample.x, this.sample.z);
           this.placePet(
             follower,
             follower.count,
             this.sample.x * WORLD,
-            fb + lift,
+            fFeet + fb + lift,
             this.sample.z * WORLD,
             this.sample.h,
             0,
-            0.88,
-            squash,
+            0.94,
+            hop > 0 ? hopSquash : fw > 0 ? 1.06 : 0.92,
           );
           follower.count++;
           if (shadowN < SHADOW_CAP) {
-            this.place(this.shadows, shadowN++, this.sample.x * WORLD, 0.06, this.sample.z * WORLD, 0, 0, 0.72);
+            this.place(this.shadows, shadowN++, this.sample.x * WORLD, fFeet + 0.03, this.sample.z * WORLD, 0, 0, 0.78);
+            this.placeBase(shadowN - 1, this.sample.x * WORLD, fFeet + 0.05, this.sample.z * WORLD, pet.id, 0.86);
           }
           if (t === shown - 1 && pet.trainExtra > 0 && labelN < this.labels.length) {
             const label = this.labels[labelN++]!;
-            const p = this.project(this.sample.x, 1.3, this.sample.z);
+            const p = this.project(this.sample.x, fFeet + 1.45, this.sample.z);
             label.on = p.ok;
+            label.name = false;
             label.sx = p.x;
             label.sy = p.y;
             label.text = `+${pet.trainExtra}`;
+            label.color = '#243044';
           }
+        }
+        if (!pet.self && pet.name && labelN < this.labels.length) {
+          const label = this.labels[labelN++]!;
+          const p = this.project(pet.x, feet + 1.85, pet.z);
+          label.on = p.ok;
+          label.name = true;
+          label.sx = p.x;
+          label.sy = p.y;
+          label.text = pet.name;
+          label.color = PAL_CSS[(Math.max(1, pet.id) - 1) % PAL_CSS.length]!;
         }
         if (pet.self) {
           selfX = pet.x;
@@ -1088,7 +1206,12 @@ export class Renderer {
         if (mesh.count > 0) mesh.instanceMatrix.needsUpdate = true;
       }
       this.shadows.count = shadowN;
-      if (shadowN > 0) this.shadows.instanceMatrix.needsUpdate = true;
+      this.bases.count = shadowN;
+      if (shadowN > 0) {
+        this.shadows.instanceMatrix.needsUpdate = true;
+        this.bases.instanceMatrix.needsUpdate = true;
+        if (this.bases.instanceColor) this.bases.instanceColor.needsUpdate = true;
+      }
       if (!selfAlive) {
         this.ring.visible = false;
         this.selfScreen = false;
@@ -1102,7 +1225,7 @@ export class Renderer {
       // desktop show that same span on the short side and more on the long side.
       const short = Math.min(this.camera.aspect, 1);
       const dist = span / (2 * Math.tan((20 * Math.PI) / 180) * short);
-      const elev = (70 * Math.PI) / 180;
+      const elev = (64 * Math.PI) / 180;
       const back = Math.cos(elev) * dist;
       const height = Math.sin(elev) * dist - this.punch * 1.3;
       const fx = Math.cos(selfH);
@@ -1131,7 +1254,7 @@ export class Renderer {
       const jx = (Math.random() - 0.5) * this.shake * 0.35;
       const jz = (Math.random() - 0.5) * this.shake * 0.35;
       this.camera.position.set(this.camX + jx, this.camY, this.camZ + jz);
-      this.camera.lookAt(this.lookX, 0.35, this.lookZ);
+      this.camera.lookAt(this.lookX, 0.42, this.lookZ);
       const shx = this.camX - this.lookX;
       const shz = this.camZ - this.lookZ;
       const shl = Math.hypot(shx, shz) || 1;
@@ -1144,6 +1267,7 @@ export class Renderer {
     }
 
     this.stepParticles(dt);
+    this.stepCoins(dt);
     this.stepPops(dt);
     this.renderer.render(this.scene, this.camera);
     this.finishMeasure();
@@ -1177,6 +1301,7 @@ export class Renderer {
     for (let i = 0; i < this.popLife.length; i++) {
       if (this.popLife[i]! > 0) this.popLife[i] = Math.max(0, this.popLife[i]! - dt);
     }
+    if (this.arcLife > 0) this.arcLife = Math.max(0, this.arcLife - dt);
     if (this.killFlash > 0) {
       this.killFlash = Math.max(0, this.killFlash - dt);
       const u = 1 - this.killFlash / 0.3;
@@ -1297,6 +1422,60 @@ export class Renderer {
     }
   }
 
+  private riseSlabs(): void {
+    const id = this.territory.claimId;
+    const pulse = this.territory.claimPulse;
+    const rising = id > 0 && pulse > 0.02;
+    let s = 1;
+    if (rising) {
+      const t = 1 - pulse;
+      const ease = 1 - (1 - t) * (1 - t);
+      s = 0.08 + 0.92 * ease;
+    }
+    for (let i = 0; i < this.slots.length; i++) {
+      const slot = this.slots[i]!;
+      const y = rising && i === id ? s : 1;
+      if (slot.fill.scale.y !== y) slot.fill.scale.y = y;
+      if (slot.rim.scale.y !== y) slot.rim.scale.y = y;
+    }
+  }
+
+  private surfaceAt(id: number, x: number, z: number): number {
+    if (this.territory.contains(id, x, z) || this.territory.coveredByOther(id, x, z)) return SLAB_H;
+    return 0;
+  }
+
+  private placeBase(index: number, x: number, y: number, z: number, id: number, scale: number): void {
+    this.place(this.bases, index, x, y, z, 0, 0, scale);
+    const c = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
+    this.bases.instanceColor?.setXYZ(index, c[0] / 255, c[1] / 255, c[2] / 255);
+  }
+
+  private stepCoins(dt: number): void {
+    let n = 0;
+    const floorY = SLAB_H + 0.22;
+    for (let i = 0; i < this.fxLife.length; i++) {
+      const life = this.fxLife[i]! - dt;
+      if (life <= 0) {
+        this.fxLife[i] = 0;
+        continue;
+      }
+      this.fxLife[i] = life;
+      this.fxX[i] = this.fxX[i]! + this.fxVx[i]! * dt;
+      this.fxZ[i] = this.fxZ[i]! + this.fxVz[i]! * dt;
+      this.fxY[i] = this.fxY[i]! + this.fxVy[i]! * dt;
+      this.fxVy[i] = this.fxVy[i]! - 10 * dt;
+      if (this.fxY[i]! < floorY) {
+        this.fxY[i] = floorY;
+        this.fxVy[i] = Math.abs(this.fxVy[i]!) * 0.35;
+      }
+      this.place(this.fxCoins, n, this.fxX[i]!, this.fxY[i]!, this.fxZ[i]!, this.time * 9 + i, 0, 0.9);
+      n++;
+    }
+    this.fxCoins.count = n;
+    if (n > 0) this.fxCoins.instanceMatrix.needsUpdate = true;
+  }
+
   private placePet(
     mesh: InstancedMesh,
     index: number,
@@ -1356,8 +1535,69 @@ export class Renderer {
   }
 }
 
-function makeInstances(geo: BufferGeometry, color: number, cap: number): InstancedMesh {
-  const mesh = new InstancedMesh(geo, new MeshBasicMaterial({ color }), cap);
+function flatCoin(): BufferGeometry {
+  const geo = new CylinderGeometry(0.28, 0.28, 0.07, 16);
+  geo.rotateX(Math.PI / 2);
+  return geo;
+}
+
+function groundPattern(): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const g = canvas.getContext('2d')!;
+  g.fillStyle = '#e7edf3';
+  g.fillRect(0, 0, 128, 128);
+  g.fillStyle = 'rgba(148, 166, 184, 0.55)';
+  for (let y = 8; y < 128; y += 16) {
+    for (let x = 8; x < 128; x += 16) {
+      g.beginPath();
+      g.arc(x, y, 1.2, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  const tex = new CanvasTexture(canvas);
+  tex.wrapS = RepeatWrapping;
+  tex.wrapT = RepeatWrapping;
+  tex.repeat.set(26, 26);
+  tex.colorSpace = SRGBColorSpace;
+  return tex;
+}
+
+function titleBackdrop(): CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 512;
+  const g = canvas.getContext('2d')!;
+  g.fillStyle = '#e4ebf2';
+  g.fillRect(0, 0, 512, 512);
+  const blobs: Array<[number, number, string]> = [
+    [110, 130, '#ff2d7d'],
+    [390, 90, '#ff7a00'],
+    [70, 390, '#ffd600'],
+    [430, 370, '#1ec83e'],
+    [250, 240, '#00bcff'],
+    [300, 430, '#8e34ff'],
+    [180, 50, '#ff2460'],
+    [50, 210, '#ff705c'],
+  ];
+  for (const [x, y, color] of blobs) {
+    const rad = g.createRadialGradient(x, y, 8, x, y, 150);
+    rad.addColorStop(0, color);
+    rad.addColorStop(1, 'rgba(228,235,242,0)');
+    g.fillStyle = rad;
+    g.beginPath();
+    g.arc(x, y, 150, 0, Math.PI * 2);
+    g.fill();
+  }
+  const tex = new CanvasTexture(canvas);
+  tex.colorSpace = SRGBColorSpace;
+  return tex;
+}
+
+function makeInstances(geo: BufferGeometry, colorOrMat: number | MeshBasicMaterial, cap: number): InstancedMesh {
+  const mat = typeof colorOrMat === 'number' ? new MeshBasicMaterial({ color: colorOrMat }) : colorOrMat;
+  const mesh = new InstancedMesh(geo, mat, cap);
   mesh.frustumCulled = false;
   mesh.instanceMatrix.setUsage(DynamicDrawUsage);
   mesh.count = 0;

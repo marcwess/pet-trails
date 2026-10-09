@@ -63,6 +63,17 @@ export class Input {
     this.keys.delete(ev.key.toLowerCase());
   };
 
+  /** Where the finger is, for the on-screen ring. Steering math is unchanged. */
+  stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
+    return {
+      x: this.originX,
+      y: this.originY,
+      dx: this.lastX - this.originX,
+      dy: this.lastY - this.originY,
+      on: this.active,
+    };
+  }
+
   /**
    * Screen-space stick. `heading` is the pet's facing (camera looks along it),
    * so drag-up and W move toward the top of the screen.

@@ -1,22 +1,31 @@
 import type { MultiPolygon, Pair, Ring } from '@pet-trails/shared';
 import { ShapeUtils, Vector2 } from 'three';
 
-const RIM = 0.32;
+/**
+ * Slab thickness in world units (~1.2 cells). A 0.3-cell lip is only a few
+ * pixels under the play camera, so the wall is tall enough to read as a
+ * paper.io slab while the flat top stays the exact owner color.
+ */
+export const SLAB_H = 0.36;
 
 export interface LandBuffers {
   fillPos: Float32Array;
   fillIdx: Uint16Array;
   rimPos: Float32Array;
   rimIdx: Uint16Array;
+  shadowPos: Float32Array;
+  shadowIdx: Uint16Array;
 }
 
-/** Triangulate an owner's polygons and an inset rim band. Empty land returns null. */
+/** Triangulate an owner's polygons, extrude the sides, and lay a contact shadow. */
 export function buildLand(mp: MultiPolygon, world: number): LandBuffers | null {
   if (mp.length === 0) return null;
   const fillP: number[] = [];
   const fillI: number[] = [];
   const rimP: number[] = [];
   const rimI: number[] = [];
+  const shadowP: number[] = [];
+  const shadowI: number[] = [];
   for (const poly of mp) {
     if (poly.length === 0) continue;
     const contour = openRing(poly[0]!);
@@ -33,25 +42,51 @@ export function buildLand(mp: MultiPolygon, world: number): LandBuffers | null {
     const faces = ShapeUtils.triangulateShape(shape, holes);
     const base = fillP.length / 3;
     const all = [contour, ...holeRings];
+    let sx = 0;
+    let sy = 0;
+    let sn = 0;
     for (const ring of all) {
       for (const p of ring) {
-        fillP.push(p[0] * world, 0.07, p[1] * world);
+        fillP.push(p[0] * world, SLAB_H, p[1] * world);
+        sx += p[0];
+        sy += p[1];
+        sn++;
       }
     }
     for (const face of faces) {
       fillI.push(base + face[0]!, base + face[1]!, base + face[2]!);
     }
-    pushRim(contour, mp, world, rimP, rimI);
-    for (const hole of holeRings) pushRim(hole, mp, world, rimP, rimI);
+    const cx = sn > 0 ? sx / sn : contour[0]![0];
+    const cy = sn > 0 ? sy / sn : contour[0]![1];
+    const sBase = shadowP.length / 3;
+    for (const ring of all) {
+      for (const p of ring) {
+        const ox = p[0] + (p[0] - cx) * 0.035 + 0.14;
+        const oy = p[1] + (p[1] - cy) * 0.035 + 0.1;
+        shadowP.push(ox * world, 0.012, oy * world);
+      }
+    }
+    for (const face of faces) {
+      shadowI.push(sBase + face[0]!, sBase + face[1]!, sBase + face[2]!);
+    }
+    pushWalls(contour, world, rimP, rimI);
+    for (const hole of holeRings) pushWalls(hole, world, rimP, rimI);
   }
   if (fillI.length < 3) return null;
   const fillPos = Float32Array.from(fillP);
   const fillIdx = Uint16Array.from(fillI);
   faceUp(fillPos, fillIdx);
-  const rimPos = Float32Array.from(rimP);
-  const rimIdx = Uint16Array.from(rimI);
-  if (rimIdx.length >= 3) faceUp(rimPos, rimIdx);
-  return { fillPos, fillIdx, rimPos, rimIdx };
+  const shadowPos = Float32Array.from(shadowP);
+  const shadowIdx = Uint16Array.from(shadowI);
+  if (shadowIdx.length >= 3) faceUp(shadowPos, shadowIdx);
+  return {
+    fillPos,
+    fillIdx,
+    rimPos: Float32Array.from(rimP),
+    rimIdx: Uint16Array.from(rimI),
+    shadowPos,
+    shadowIdx,
+  };
 }
 
 function openRing(ring: Ring): Pair[] {
@@ -70,7 +105,6 @@ function faceUp(pos: Float32Array, idx: Uint16Array): void {
     const a = idx[i]! * 3;
     const b = idx[i + 1]! * 3;
     const c = idx[i + 2]! * 3;
-    // Positive Y is (bz-az)*(cx-ax) - (bx-ax)*(cz-az). The camera looks down onto +Y.
     const cross = (pos[b + 2]! - pos[a + 2]!) * (pos[c]! - pos[a]!) - (pos[b]! - pos[a]!) * (pos[c + 2]! - pos[a + 2]!);
     if (cross < 0) {
       const tmp = idx[i + 1]!;
@@ -80,96 +114,23 @@ function faceUp(pos: Float32Array, idx: Uint16Array): void {
   }
 }
 
-function pointIn(mp: MultiPolygon, x: number, y: number): boolean {
-  for (const poly of mp) {
-    if (poly.length === 0) continue;
-    if (!ray(poly[0]!, x, y)) continue;
-    let hole = false;
-    for (let h = 1; h < poly.length; h++) {
-      if (ray(poly[h]!, x, y)) {
-        hole = true;
-        break;
-      }
-    }
-    if (!hole) return true;
-  }
-  return false;
-}
-
-function ray(ring: Ring, x: number, y: number): boolean {
-  const n = ring.length > 1 && near(ring[0]!, ring[ring.length - 1]!) ? ring.length - 1 : ring.length;
-  let inside = false;
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = ring[i]![0];
-    const yi = ring[i]![1];
-    const xj = ring[j]![0];
-    const yj = ring[j]![1];
-    if (yi === yj) continue;
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-
-function pushRim(ring: Pair[], mp: MultiPolygon, world: number, pos: number[], idx: number[]): void {
-  const inner = inset(ring, mp);
-  if (!inner) return;
+/** Vertical quads. Outward for a CCW outer ring and into a CW hole. */
+function pushWalls(ring: Pair[], world: number, pos: number[], idx: number[]): void {
   const n = ring.length;
+  if (n < 3) return;
   const base = pos.length / 3;
   for (let i = 0; i < n; i++) {
-    pos.push(ring[i]![0] * world, 0.09, ring[i]![1] * world);
+    pos.push(ring[i]![0] * world, 0, ring[i]![1] * world);
   }
   for (let i = 0; i < n; i++) {
-    pos.push(inner[i]![0] * world, 0.09, inner[i]![1] * world);
+    pos.push(ring[i]![0] * world, SLAB_H, ring[i]![1] * world);
   }
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n;
-    idx.push(base + i, base + n + i, base + j, base + j, base + n + i, base + n + j);
+    const b0 = base + i;
+    const b1 = base + j;
+    const t0 = base + n + i;
+    const t1 = base + n + j;
+    idx.push(b0, t0, t1, b0, t1, b1);
   }
-}
-
-function inset(ring: Pair[], mp: MultiPolygon): Pair[] | null {
-  const n = ring.length;
-  if (n < 3) return null;
-  const out: Pair[] = [];
-  for (let i = 0; i < n; i++) {
-    const prev = ring[(i - 1 + n) % n]!;
-    const cur = ring[i]!;
-    const next = ring[(i + 1) % n]!;
-    let ax = cur[0] - prev[0];
-    let ay = cur[1] - prev[1];
-    let bx = next[0] - cur[0];
-    let by = next[1] - cur[1];
-    const la = Math.hypot(ax, ay) || 1;
-    const lb = Math.hypot(bx, by) || 1;
-    ax /= la;
-    ay /= la;
-    bx /= lb;
-    by /= lb;
-    let nx = -ay - by;
-    let ny = ax + bx;
-    const nl = Math.hypot(nx, ny);
-    if (nl < 1e-5) {
-      nx = -ay;
-      ny = ax;
-    } else {
-      nx /= nl;
-      ny /= nl;
-    }
-    const denom = nx * -ay + ny * ax;
-    let miter = Math.abs(denom) > 0.35 ? RIM / denom : RIM;
-    if (miter > RIM * 2.4) miter = RIM * 2.4;
-    if (miter < -RIM * 2.4) miter = -RIM * 2.4;
-    let ox = cur[0] + nx * miter;
-    let oy = cur[1] + ny * miter;
-    if (!pointIn(mp, ox, oy)) {
-      ox = cur[0] - nx * Math.abs(miter);
-      oy = cur[1] - ny * Math.abs(miter);
-      if (!pointIn(mp, ox, oy)) {
-        ox = cur[0] + nx * RIM * 0.5;
-        oy = cur[1] + ny * RIM * 0.5;
-      }
-    }
-    out.push([ox, oy]);
-  }
-  return out;
 }

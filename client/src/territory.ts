@@ -11,6 +11,7 @@ export class Territory {
   readonly gridH: number;
   snapshotUploads = 0;
   claimPulse = 0;
+  claimId = 0;
   claimX0 = 0;
   claimY0 = 0;
   claimX1 = 0;
@@ -130,6 +131,7 @@ export class Territory {
         this.claimY0 = box.y0;
         this.claimX1 = box.x1;
         this.claimY1 = box.y1;
+        this.claimId = id;
         this.claimPulse = 1;
       }
     }
