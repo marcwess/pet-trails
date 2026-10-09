@@ -31,6 +31,7 @@ export function integrateBody(
   dt: number,
   cfg: Pick<GameConfig, 'speed' | 'turnRate' | 'gridW' | 'gridH'>,
   onCell?: (cx: number, cy: number) => boolean,
+  onBorder?: () => void,
 ): void {
   if (body.desiredX !== 0 || body.desiredY !== 0) {
     const target = Math.atan2(body.desiredY, body.desiredX);
@@ -45,7 +46,8 @@ export function integrateBody(
   const y0 = body.y;
   let nx = x0 + Math.cos(body.heading) * cfg.speed * dt;
   let ny = y0 + Math.sin(body.heading) * cfg.speed * dt;
-  const m = 0.51;
+  const m = 0.35;
+  const hitBorder = nx < m || ny < m || nx > cfg.gridW - m || ny > cfg.gridH - m;
   if (nx < m) nx = m;
   if (ny < m) ny = m;
   if (nx > cfg.gridW - m) nx = cfg.gridW - m;
@@ -65,6 +67,7 @@ export function integrateBody(
   }
   body.x = nx;
   body.y = ny;
+  if (hitBorder && onBorder) onBorder();
 }
 
 /**

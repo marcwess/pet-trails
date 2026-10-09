@@ -19,6 +19,7 @@ const REASONS: Record<DeathReason, string> = {
   self: 'You crossed your trail!',
   headon: 'Head-on collision!',
   enclosed: 'You got surrounded!',
+  border: 'You hit the wall!',
 };
 
 export function deathTitle(reason: string): string {
@@ -30,6 +31,7 @@ export class Hud {
   private readonly title = must('title');
   private readonly hud = must('hud');
   private readonly death = must('death');
+  private readonly dim = must('dim');
   private readonly deathTitleEl = must('death-title');
   private readonly deathStats = must('death-stats');
   private readonly petline = must('petline');
@@ -117,9 +119,11 @@ export class Hud {
   showDeath(view: DeathView | null): void {
     if (!view) {
       this.death.hidden = true;
+      this.dim.hidden = true;
       return;
     }
     this.death.hidden = false;
+    this.dim.hidden = false;
     this.deathTitleEl.textContent = view.title;
     this.deathStats.replaceChildren();
     for (const row of view.rows) {
@@ -162,7 +166,14 @@ export class Hud {
     el.classList.add('show');
   }
 
-  popup(sx: number, sy: number, text: string, kind: 'coin' | 'xp' | 'loot'): void {
+  setYou(pct: string, kills: number): void {
+    const pctEl = document.getElementById('you-pct');
+    const killsEl = document.getElementById('you-kills');
+    if (pctEl) pctEl.textContent = pct;
+    if (killsEl) killsEl.textContent = kills === 1 ? '1 kill' : `${kills} kills`;
+  }
+
+  popup(sx: number, sy: number, text: string, kind: 'coin' | 'xp' | 'loot' | 'claim'): void {
     const el = this.popups[this.popupCursor]!;
     this.popupCursor = (this.popupCursor + 1) % this.popups.length;
     el.className = `popup ${kind}`;

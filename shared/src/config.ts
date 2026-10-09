@@ -3,6 +3,8 @@
 export interface GameConfig {
   gridW: number;
   gridH: number;
+  /** World units per grid cell. The pet is about 4–5 cells wide. */
+  worldScale: number;
   tickHz: number;
   maxEntities: number;
   targetPopulation: number;
@@ -64,16 +66,17 @@ export const RARITY_ODDS: Record<RarityName, number> = {
 };
 
 export const CONFIG: GameConfig = {
-  gridW: 150,
-  gridH: 150,
+  gridW: 200,
+  gridH: 200,
+  worldScale: 0.28,
   tickHz: 20,
   maxEntities: 16,
-  targetPopulation: 10,
-  speed: 7.4,
-  turnRate: 9.2,
-  spawnSize: 9,
-  headRadius: 0.46,
-  pickupRadius: 1.05,
+  targetPopulation: 11,
+  speed: 13.5,
+  turnRate: 5.1,
+  spawnSize: 18,
+  headRadius: 0.9,
+  pickupRadius: 2.1,
   maxTrainStored: 48,
   maxTrainVisible: 12,
   coinValue: 1,
@@ -86,13 +89,13 @@ export const CONFIG: GameConfig = {
   pickupTarget: 46,
   rareLootChance: 0.08,
   killDropCoins: 4,
-  botThinkSec: 0.18,
-  botMistakeChance: 0.07,
-  botThreatRange: 7.5,
-  botHuntRange: 20,
-  botLegMin: 10,
-  botLegMax: 18,
-  botRespawnSec: 1.6,
+  botThinkSec: 0.14,
+  botMistakeChance: 0.06,
+  botThreatRange: 14,
+  botHuntRange: 38,
+  botLegMin: 16,
+  botLegMax: 34,
+  botRespawnSec: 1.15,
   levelCap: 20,
   abilities: {
     dashSpeed: 1.85,

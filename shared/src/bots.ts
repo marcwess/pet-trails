@@ -2,13 +2,6 @@ import type { GameConfig } from './config.js';
 import type { Grid } from './grid.js';
 import type { Player } from './player.js';
 
-const DIRS: ReadonlyArray<readonly [number, number]> = [
-  [1, 0],
-  [0, 1],
-  [-1, 0],
-  [0, -1],
-];
-
 export interface BotView {
   tick: number;
   cfg: GameConfig;
@@ -18,18 +11,17 @@ export interface BotView {
   dt: number;
 }
 
-function setDir(p: Player, dir: number): void {
-  const d = ((dir % 4) + 4) % 4;
-  p.botDir = d;
-  p.desiredX = DIRS[d]![0];
-  p.desiredY = DIRS[d]![1];
+function steer(p: Player, angle: number): void {
+  p.desiredX = Math.cos(angle);
+  p.desiredY = Math.sin(angle);
 }
 
 function goHome(p: Player, view: BotView): void {
   p.botPhase = 3;
+  p.botMoved = 0;
   const land = view.grid.landCount[p.id] ?? 0;
   if (land <= 0) {
-    setDir(p, (view.rng() * 4) | 0);
+    steer(p, view.rng() * Math.PI * 2);
     return;
   }
   const cx = view.grid.sumX[p.id]! / land;
@@ -38,25 +30,28 @@ function goHome(p: Player, view: BotView): void {
   p.desiredY = cy - p.y;
 }
 
-function nearestTrail(
-  p: Player,
-  view: BotView,
-): { x: number; y: number; dist: number; land: number } | null {
+function legLength(p: Player, view: BotView): number {
+  const { cfg } = view;
+  let leg = cfg.botLegMin + view.rng() * (cfg.botLegMax - cfg.botLegMin);
+  if (view.rng() < 0.22) leg *= 1.85;
+  if (p.botStyle === 0) leg *= 0.85;
+  return leg;
+}
+
+function nearestTrail(p: Player, view: BotView): { x: number; y: number; dist: number; land: number } | null {
   const { w } = view.grid;
   const range = view.cfg.botHuntRange;
   let bestD = range;
   let best: { x: number; y: number; dist: number; land: number } | null = null;
   for (let id = 1; id < view.players.length; id++) {
     const e = view.players[id];
-    if (!e || !e.active || !e.alive || e.id === p.id || e.trailLen === 0) continue;
-    const step = Math.max(1, (e.trailLen / 28) | 0);
+    if (!e || !e.active || !e.alive || e.id === p.id || e.trailLen < 4) continue;
+    const step = Math.max(1, (e.trailLen / 24) | 0);
     for (let t = 0; t < e.trailLen; t += step) {
       const i = e.trail[t]!;
       const x = (i % w) + 0.5;
       const y = ((i / w) | 0) + 0.5;
-      const dx = x - p.x;
-      const dy = y - p.y;
-      const d = Math.hypot(dx, dy);
+      const d = Math.hypot(x - p.x, y - p.y);
       if (d < bestD) {
         bestD = d;
         best = { x, y, dist: d, land: view.grid.landCount[e.id] ?? 0 };
@@ -66,20 +61,35 @@ function nearestTrail(
   return best;
 }
 
-/** Steer off the bot's own trail and away from the map edge. */
-function avoid(p: Player, view: BotView): void {
+function trailThreatened(p: Player, view: BotView): boolean {
+  if (p.trailLen < 4) return false;
+  const { w } = view.grid;
+  const step = Math.max(1, (p.trailLen / 10) | 0);
+  for (let t = 0; t < p.trailLen; t += step) {
+    const i = p.trail[t]!;
+    const x = (i % w) + 0.5;
+    const y = ((i / w) | 0) + 0.5;
+    for (let id = 1; id < view.players.length; id++) {
+      const e = view.players[id];
+      if (!e || !e.active || !e.alive || e.id === p.id) continue;
+      if (Math.hypot(e.x - x, e.y - y) < 7) return true;
+    }
+  }
+  return false;
+}
+
+/** Turn away from the bot's own trail and the map edge. */
+function avoid(p: Player, view: BotView): boolean {
   const { grid, cfg } = view;
-  let dx = p.desiredX;
-  let dy = p.desiredY;
-  const len = Math.hypot(dx, dy) || 1;
-  dx /= len;
-  dy /= len;
-  if (p.x < 3 || p.x > cfg.gridW - 3 || p.y < 3 || p.y > cfg.gridH - 3) {
+  const edge = 6;
+  if (p.x < edge || p.x > cfg.gridW - edge || p.y < edge || p.y > cfg.gridH - edge) {
     p.desiredX = cfg.gridW / 2 - p.x;
     p.desiredY = cfg.gridH / 2 - p.y;
-    return;
+    return true;
   }
-  for (const dist of [1.25, 2.4]) {
+  const dx = Math.cos(p.heading);
+  const dy = Math.sin(p.heading);
+  for (const dist of [3.2, 6.5]) {
     const x = p.x + dx * dist;
     const y = p.y + dy * dist;
     const cx = Math.floor(x);
@@ -87,106 +97,95 @@ function avoid(p: Player, view: BotView): void {
     if (cx < 0 || cy < 0 || cx >= grid.w || cy >= grid.h) continue;
     const i = grid.idx(cx, cy);
     if (grid.trail[i] === p.id && grid.owner[i] !== p.id) {
-      p.desiredX = -dy;
-      p.desiredY = dx * p.botTurnSign || dx;
-      return;
+      const s = p.botTurnSign || 1;
+      p.desiredX = -dy * s;
+      p.desiredY = dx * s;
+      return true;
     }
   }
+  return false;
 }
 
 /**
- * Farmers draw a rectangle and come home. Hunters peel off toward exposed
- * trails. Everyone retreats from a bigger neighbor and sometimes flubs a turn.
+ * Free-angle loops of varying size. Bots head home when a rival nears their
+ * trail, hunt exposed trails, and sometimes commit to a long risky loop.
  */
 export function updateBot(p: Player, view: BotView): void {
   const { cfg } = view;
-  p.botMoved += cfg.speed * view.dt;
+  if (p.outside) p.botMoved += cfg.speed * view.dt;
+
+  if (avoid(p, view)) return;
+
+  if (p.outside && (trailThreatened(p, view) || biggerNeighbor(p, view))) {
+    goHome(p, view);
+    return;
+  }
 
   const thinkDue = view.tick >= p.botNextThink;
-  if (!thinkDue && p.botPhase !== 3 && p.botPhase !== 4) {
-    avoid(p, view);
-    return;
-  }
   if (thinkDue) {
-    const thinkTicks = Math.max(1, Math.round(cfg.botThinkSec * cfg.tickHz));
-    p.botNextThink = view.tick + thinkTicks;
-  }
-
-  if (thinkDue && view.rng() < cfg.botMistakeChance) {
-    setDir(p, (view.rng() * 4) | 0);
-    p.botNextThink = view.tick + Math.round(0.45 * cfg.tickHz);
-    p.botPhase = p.outside ? 2 : 1;
-    p.botMoved = 0;
-    return;
-  }
-
-  if (p.outside) {
-    for (let id = 1; id < view.players.length; id++) {
-      const e = view.players[id];
-      if (!e || !e.active || !e.alive || e.id === p.id) continue;
-      const dx = e.x - p.x;
-      const dy = e.y - p.y;
-      if (dx * dx + dy * dy < cfg.botThreatRange * cfg.botThreatRange && e.land > p.land) {
-        goHome(p, view);
-        avoid(p, view);
+    p.botNextThink = view.tick + Math.max(1, Math.round(cfg.botThinkSec * cfg.tickHz));
+    if (view.rng() < cfg.botMistakeChance) {
+      steer(p, p.heading + (view.rng() - 0.5) * 1.4);
+      return;
+    }
+    const huntBias = p.botStyle === 1 ? 0.72 : 0.34;
+    if (view.rng() < huntBias) {
+      const target = nearestTrail(p, view);
+      if (target && (p.land + 12 >= target.land * 0.65 || target.dist < 14)) {
+        p.botPhase = 4;
+        p.desiredX = target.x - p.x;
+        p.desiredY = target.y - p.y;
+        p.botMoved = 0;
         return;
       }
     }
   }
 
-  const huntBias = p.botStyle === 1 ? 0.85 : 0.28;
-  if (thinkDue && view.rng() < huntBias) {
-    const target = nearestTrail(p, view);
-    if (target && (p.land + 8 >= target.land * 0.7 || target.dist < 9)) {
-      p.botPhase = 4;
-      p.desiredX = target.x - p.x;
-      p.desiredY = target.y - p.y;
-      avoid(p, view);
-      return;
-    }
-  }
-
   if (p.botPhase === 4) {
-    if (!p.outside && p.trailLen === 0) p.botPhase = 0;
-    else if (p.botMoved > 28) goHome(p, view);
-    avoid(p, view);
+    if (p.botMoved > 42 || (!p.outside && p.trailLen === 0 && p.botMoved > 4)) {
+      if (p.outside) goHome(p, view);
+      else p.botPhase = 0;
+    }
     return;
   }
 
   if (!p.outside && (p.botPhase === 0 || p.botPhase === 3)) {
-    setDir(p, (view.rng() * 4) | 0);
+    const ang = p.heading + (view.rng() - 0.5) * 0.8;
+    steer(p, ang);
     p.botPhase = 1;
-    p.botLeg = cfg.botLegMin + view.rng() * (cfg.botLegMax - cfg.botLegMin);
+    p.botTurns = 0;
     p.botMoved = 0;
+    p.botLeg = legLength(p, view);
+    p.botTurnSign = view.rng() < 0.5 ? -1 : 1;
     return;
   }
 
   if (p.botPhase === 1 && p.outside && p.botMoved >= p.botLeg) {
-    setDir(p, p.botDir + p.botTurnSign);
-    p.botPhase = 2;
-    p.botLeg = cfg.botLegMin + view.rng() * (cfg.botLegMax - cfg.botLegMin);
+    p.botTurns++;
+    if (p.botTurns >= 3) {
+      goHome(p, view);
+      return;
+    }
+    steer(p, p.heading + p.botTurnSign * (Math.PI / 2));
     p.botMoved = 0;
-    avoid(p, view);
-    return;
-  }
-
-  if (p.botPhase === 2 && p.botMoved >= p.botLeg) {
-    goHome(p, view);
-    avoid(p, view);
+    p.botLeg = legLength(p, view);
     return;
   }
 
   if (p.botPhase === 3) {
     goHome(p, view);
     if (!p.outside) p.botPhase = 0;
-    else if (p.botMoved > 46) {
-      setDir(p, (view.rng() * 4) | 0);
-      p.botPhase = 1;
-      p.botMoved = 0;
-    }
-    avoid(p, view);
     return;
   }
+}
 
-  avoid(p, view);
+function biggerNeighbor(p: Player, view: BotView): boolean {
+  const r = view.cfg.botThreatRange;
+  for (let id = 1; id < view.players.length; id++) {
+    const e = view.players[id];
+    if (!e || !e.active || !e.alive || e.id === p.id) continue;
+    if (e.land <= p.land) continue;
+    if (Math.hypot(e.x - p.x, e.y - p.y) < r) return true;
+  }
+  return false;
 }

@@ -1,4 +1,4 @@
-export type DeathReason = 'trail' | 'self' | 'headon' | 'enclosed';
+export type DeathReason = 'trail' | 'self' | 'headon' | 'enclosed' | 'border';
 
 export class Player {
   readonly id: number;
@@ -34,6 +34,7 @@ export class Player {
   botDir = 0;
   botLeg = 12;
   botMoved = 0;
+  botTurns = 0;
   botNextThink = 0;
   botTurnSign = 1;
   botStyle = 0;
@@ -63,6 +64,7 @@ export class Player {
     this.land = 0;
     this.botPhase = 0;
     this.botMoved = 0;
+    this.botTurns = 0;
     this.botNextThink = 0;
   }
 }

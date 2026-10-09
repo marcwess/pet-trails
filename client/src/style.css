@@ -124,24 +124,48 @@ canvas {
 
 .lb {
   position: absolute;
-  top: calc(46px + env(safe-area-inset-top));
-  left: 12px;
-  min-width: 168px;
-  max-width: 220px;
-  background: var(--card);
-  border-radius: 18px;
-  padding: 8px;
-  box-shadow: 0 4px 0 rgba(36, 48, 68, 0.08);
+  top: calc(42px + env(safe-area-inset-top));
+  left: 10px;
+  width: 40vw;
+  max-width: 168px;
+  background: rgba(255, 252, 245, 0.72);
+  border-radius: 14px;
+  padding: 4px;
+  box-shadow: 0 3px 0 rgba(36, 48, 68, 0.06);
 }
 
 .lb .row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 12px;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 8px;
   font-weight: 650;
+  font-size: 12px;
+}
+
+.you {
+  position: absolute;
+  top: calc(40px + env(safe-area-inset-top));
+  right: 12px;
+  text-align: right;
+  pointer-events: none;
+}
+
+.you #you-pct {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 0.95;
+  letter-spacing: -0.03em;
+  color: #243044;
+  text-shadow: 0 2px 0 rgba(255, 255, 255, 0.65);
+}
+
+.you #you-kills {
+  margin-top: 2px;
   font-size: 14px;
+  font-weight: 650;
+  color: #3d4d66;
 }
 
 .lb .row.me { background: #ffe08a; }
@@ -242,6 +266,7 @@ canvas {
 .popup.coin { color: #c47d00; }
 .popup.xp { color: #0a7ea4; }
 .popup.loot { color: #b4237a; }
+.popup.claim { color: #0b8f4e; font-size: 22px; }
 
 .plus {
   position: absolute;
@@ -254,6 +279,26 @@ canvas {
   transform: translate(-50%, -50%);
   display: none;
 }
+
+#dim {
+  position: absolute;
+  inset: 0;
+  background: rgba(18, 28, 44, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+#death.sheet {
+  top: 50%;
+  bottom: auto;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100% - 32px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+}
+
+#death.sheet h2 { font-size: 26px; }
+.stats li { font-size: 16px; }
 
 #perf {
   position: absolute;

@@ -1,5 +1,5 @@
 import { PALETTE } from '@pet-trails/shared';
-import { DataTexture, NearestFilter, RGBAFormat, SRGBColorSpace, UnsignedByteType, type WebGLRenderer } from 'three';
+import { DataTexture, LinearFilter, LinearSRGBColorSpace, RGBAFormat, UnsignedByteType, type WebGLRenderer } from 'three';
 
 const S = 4;
 
@@ -24,6 +24,12 @@ export class Territory {
   private readonly queued: Uint8Array;
   private readonly qIdx: Int32Array;
   private qN = 0;
+  private readonly flash: Uint8Array;
+  private readonly fade: Uint8Array;
+  private readonly fadeOwner: Uint8Array;
+  private readonly hot: Int32Array;
+  private readonly hotMark: Uint8Array;
+  private hotN = 0;
   private readonly rowDirty: Uint8Array;
   private rowCount = 0;
   private now = 0;
@@ -42,12 +48,17 @@ export class Territory {
     this.revealAt = new Float32Array(n);
     this.queued = new Uint8Array(n);
     this.qIdx = new Int32Array(n);
+    this.flash = new Uint8Array(n);
+    this.fade = new Uint8Array(n);
+    this.fadeOwner = new Uint8Array(n);
+    this.hot = new Int32Array(n);
+    this.hotMark = new Uint8Array(n);
     this.rowDirty = new Uint8Array(this.texH);
     this.data = new Uint8Array(new ArrayBuffer(this.texW * this.texH * 4));
     this.texture = new DataTexture(this.data, this.texW, this.texH, RGBAFormat, UnsignedByteType);
-    this.texture.colorSpace = SRGBColorSpace;
-    this.texture.magFilter = NearestFilter;
-    this.texture.minFilter = NearestFilter;
+    this.texture.colorSpace = LinearSRGBColorSpace;
+    this.texture.magFilter = LinearFilter;
+    this.texture.minFilter = LinearFilter;
     this.texture.generateMipmaps = false;
     this.texture.flipY = false;
     this.texture.needsUpdate = true;
@@ -61,7 +72,11 @@ export class Territory {
     this.drawOwner.set(owner);
     this.drawTrail.set(trail);
     this.qN = 0;
+    this.hotN = 0;
     this.queued.fill(0);
+    this.flash.fill(0);
+    this.fade.fill(0);
+    this.hotMark.fill(0);
     this.paintAll();
     this.snapshotUploads++;
     this.ready = false;
@@ -76,15 +91,31 @@ export class Territory {
       const len = runs[k++]!;
       for (let i = 0; i < len; i++) {
         const idx = start + i;
+        if (o === 0 && this.drawOwner[idx] === 0 && this.fade[idx] === 0) {
+          this.owner[idx] = 0;
+          this.trail[idx] = tr;
+          continue;
+        }
+        if (o === 0 && this.drawOwner[idx] !== 0 && tr === 0) {
+          this.owner[idx] = 0;
+          this.trail[idx] = 0;
+          if (this.fade[idx] === 0) {
+            this.fade[idx] = 255;
+            this.fadeOwner[idx] = this.drawOwner[idx]!;
+            this.touchHot(idx);
+          }
+          continue;
+        }
+        this.fade[idx] = 0;
         this.owner[idx] = o;
         this.trail[idx] = tr;
         const cx = idx % this.gridW;
         const cy = (idx / this.gridW) | 0;
         let delay = 0;
-        if (animate) {
+        if (animate && o !== 0) {
           const dx = cx + 0.5 - ox;
           const dy = cy + 0.5 - oy;
-          delay = Math.min(0.4, Math.hypot(dx, dy) * 0.013);
+          delay = Math.min(0.35, Math.hypot(dx, dy) * 0.011);
         }
         this.revealAt[idx] = this.now + delay;
         if (!this.queued[idx]) {
@@ -107,9 +138,45 @@ export class Territory {
       this.queued[i] = 0;
       this.drawOwner[i] = this.owner[i]!;
       this.drawTrail[i] = this.trail[i]!;
+      if (this.drawOwner[i] !== 0) {
+        this.flash[i] = 255;
+        this.touchHot(i);
+      }
       this.paintIndex(i, true);
     }
     this.qN = w;
+    this.cool(dt);
+  }
+
+  private touchHot(i: number): void {
+    if (this.hotMark[i]) return;
+    this.hotMark[i] = 1;
+    this.hot[this.hotN++] = i;
+  }
+
+  private cool(dt: number): void {
+    const drop = dt * 780;
+    let w = 0;
+    for (let k = 0; k < this.hotN; k++) {
+      const i = this.hot[k]!;
+      let live = false;
+      if (this.flash[i]! > 0) {
+        this.flash[i] = Math.max(0, this.flash[i]! - drop);
+        live = true;
+      }
+      if (this.fade[i]! > 0) {
+        this.fade[i] = Math.max(0, this.fade[i]! - drop * 1.6);
+        if (this.fade[i] === 0) {
+          this.drawOwner[i] = 0;
+          this.drawTrail[i] = 0;
+        }
+        live = true;
+      }
+      if (live || this.flash[i] === 0) this.paintCell(i % this.gridW, (i / this.gridW) | 0);
+      if (this.flash[i]! > 0 || this.fade[i]! > 0) this.hot[w++] = i;
+      else this.hotMark[i] = 0;
+    }
+    this.hotN = w;
   }
 
   /** Push dirty rows. Does not set needsUpdate, so three will not reupload the full image. */
@@ -165,72 +232,57 @@ export class Territory {
     if (cy + 1 < this.gridH) this.paintCell(cx, cy + 1);
   }
 
-  private key(cx: number, cy: number): number {
+  private shownOwner(cx: number, cy: number): number {
+    if (cx < 0 || cy < 0 || cx >= this.gridW || cy >= this.gridH) return -1;
     const i = cy * this.gridW + cx;
-    const tr = this.drawTrail[i]!;
-    return tr ? tr + 256 : this.drawOwner[i]!;
+    if (this.fade[i]! > 0) return this.fadeOwner[i]!;
+    return this.drawOwner[i]!;
   }
 
   private paintCell(cx: number, cy: number): void {
     const i = cy * this.gridW + cx;
-    const owner = this.drawOwner[i]!;
-    const trail = this.drawTrail[i]!;
-    const mine = this.key(cx, cy);
-    let r: number;
-    let g: number;
-    let b: number;
-    if (trail) {
-      const c = PALETTE[(trail - 1) % PALETTE.length]!;
-      r = c[0] + (255 - c[0]) * 0.58;
-      g = c[1] + (255 - c[1]) * 0.58;
-      b = c[2] + (255 - c[2]) * 0.58;
-    } else if (owner) {
+    const fade = this.fade[i] ?? 0;
+    const owner = fade > 0 ? this.fadeOwner[i]! : this.drawOwner[i]!;
+    const flash = this.flash[i] ?? 0;
+    let r = 186;
+    let g = 224;
+    let b = 196;
+    if (owner) {
       const c = PALETTE[(owner - 1) % PALETTE.length]!;
-      r = c[0];
-      g = c[1];
-      b = c[2];
-    } else {
-      const alt = ((cx + cy) & 1) === 0;
-      r = alt ? 184 : 176;
-      g = alt ? 224 : 216;
-      b = alt ? 194 : 186;
+      const f = flash / 255;
+      r = c[0] + (255 - c[0]) * f * 0.72;
+      g = c[1] + (255 - c[1]) * f * 0.72;
+      b = c[2] + (255 - c[2]) * f * 0.72;
     }
-    const filled = owner !== 0 || trail !== 0;
+    const leftDiff = owner !== 0 && this.shownOwner(cx - 1, cy) !== owner;
+    const rightDiff = owner !== 0 && this.shownOwner(cx + 1, cy) !== owner;
+    const upDiff = owner !== 0 && this.shownOwner(cx, cy - 1) !== owner;
+    const downDiff = owner !== 0 && this.shownOwner(cx, cy + 1) !== owner;
     // Plane rotateX(-90) puts texture v=1 at world Z=0, and WebGL puts the last
     // buffer row at v=1. Write sim y=0 into that row so land sits under the pet.
     const y0 = (this.gridH - 1 - cy) * S;
     const x0 = cx * S;
+    const fadeA = fade > 0 ? fade / 255 : 1;
     for (let py = 0; py < S; py++) {
       const row = (y0 + py) * this.texW;
+      let ay = 255;
+      if (owner) {
+        if (upDiff) ay = Math.min(ay, py === 0 ? 60 : py === 1 ? 150 : 255);
+        if (downDiff) ay = Math.min(ay, py === S - 1 ? 60 : py === S - 2 ? 150 : 255);
+      }
       for (let px = 0; px < S; px++) {
-        let cr = r;
-        let cg = g;
-        let cb = b;
-        if (filled) {
-          let differ = false;
-          if (px === 0 || px === S - 1) {
-            const nx = cx + (px === 0 ? -1 : 1);
-            if (nx < 0 || nx >= this.gridW || this.key(nx, cy) !== mine) differ = true;
-          }
-          if (py === 0 || py === S - 1) {
-            const ny = cy + (py === 0 ? -1 : 1);
-            if (ny < 0 || ny >= this.gridH || this.key(cx, ny) !== mine) differ = true;
-          }
-          if (differ) {
-            cr = r * 0.58;
-            cg = g * 0.58;
-            cb = b * 0.58;
-          } else if (trail && px >= 1 && px <= 2 && py >= 1 && py <= 2) {
-            cr = Math.min(255, cr + 22);
-            cg = Math.min(255, cg + 22);
-            cb = Math.min(255, cb + 22);
-          }
+        let ax = 255;
+        if (owner) {
+          if (leftDiff) ax = Math.min(ax, px === 0 ? 60 : px === 1 ? 150 : 255);
+          if (rightDiff) ax = Math.min(ax, px === S - 1 ? 60 : px === S - 2 ? 150 : 255);
         }
+        let a = owner ? Math.min(ax, ay) * fadeA : 0;
+        if (!owner) a = 0;
         const p = (row + x0 + px) * 4;
-        this.data[p] = cr;
-        this.data[p + 1] = cg;
-        this.data[p + 2] = cb;
-        this.data[p + 3] = 255;
+        this.data[p] = r;
+        this.data[p + 1] = g;
+        this.data[p + 2] = b;
+        this.data[p + 3] = a;
       }
     }
     for (let py = 0; py < S; py++) {

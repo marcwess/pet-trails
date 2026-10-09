@@ -151,7 +151,9 @@ export class Sim {
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
       p.aliveMs += dt * 1000;
-      integrateBody(p, dt, this.cfg, (cx, cy) => this.enterCell(p, cx, cy));
+      integrateBody(p, dt, this.cfg, (cx, cy) => this.enterCell(p, cx, cy), () => {
+        if (p.alive) this.kill(p, null, 'border');
+      });
     }
 
     this.resolveHeadOns();
@@ -255,12 +257,20 @@ export class Sim {
   private spawn(p: Player): void {
     if (p.alive) this.grid.clearPlayer(p.id);
     p.resetRun();
-    const spot = this.findSpawn();
+    const spot = this.findSpawn(p.bot);
     const size = this.cfg.spawnSize;
     this.grid.fillRect(p.id, spot.x, spot.y, size, size);
     p.x = spot.x + size / 2;
     p.y = spot.y + size / 2;
-    p.heading = this.rng() * Math.PI * 2;
+    let ang = this.rng() * Math.PI * 2;
+    const reach = 36;
+    const nx = p.x + Math.cos(ang) * reach;
+    const ny = p.y + Math.sin(ang) * reach;
+    const { gridW: w, gridH: h } = this.cfg;
+    if (nx < 22 || ny < 22 || nx > w - 22 || ny > h - 22) {
+      ang = Math.atan2(h / 2 - p.y, w / 2 - p.x) + (this.rng() - 0.5) * 0.9;
+    }
+    p.heading = ang;
     p.desiredX = Math.cos(p.heading);
     p.desiredY = Math.sin(p.heading);
     p.alive = true;
@@ -269,31 +279,99 @@ export class Sim {
     p.respawnTick = 0;
     p.botPhase = 0;
     p.botMoved = 0;
+    p.botTurns = 0;
+    p.botTurnSign = this.rng() < 0.5 ? -1 : 1;
     p.botNextThink = this.tick + rngInt(this.rng, 6);
   }
 
-  private findSpawn(): { x: number; y: number } {
+  private livingAnchor(human: boolean): { x: number; y: number } | null {
+    for (const o of this.roster) {
+      if (!o.active || !o.alive) continue;
+      if (human ? !o.bot : o.bot) return { x: o.x, y: o.y };
+    }
+    return null;
+  }
+
+  private botsNear(x: number, y: number, range: number): number {
+    let n = 0;
+    for (const o of this.roster) {
+      if (!o.active || !o.alive || !o.bot) continue;
+      if (Math.hypot(o.x - x, o.y - y) <= range) n++;
+    }
+    return n;
+  }
+
+  private findSpawn(bot: boolean): { x: number; y: number } {
     const size = this.cfg.spawnSize;
     const { gridW: w, gridH: h } = this.cfg;
+    const margin = 26;
+    const cx0 = w / 2;
+    const cy0 = h / 2;
+    const human = this.livingAnchor(true);
+
+    if (!bot) {
+      const x = Math.round(cx0 - size / 2);
+      const y = Math.round(cy0 - size / 2);
+      if (x >= margin && y >= margin && this.areaClear(x, y, size)) return { x, y };
+    }
+
+    if (bot && !human && this.botsNear(cx0, cy0, 40) < 4) {
+      const slot = this.botsNear(cx0, cy0, 40);
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const ang = (slot / 4) * Math.PI * 2 + 0.5 + attempt * 0.35;
+        const dist = 24 + attempt * 1.5;
+        const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
+        const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
+        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
+        if (this.areaClear(x, y, size)) return { x, y };
+      }
+    }
+
+    const anchor = bot ? human : this.livingAnchor(false);
+    const wantNear = bot ? !!human && this.botsNear(human!.x, human!.y, 32) < 4 : !!anchor;
+    if (wantNear && anchor) {
+      for (let attempt = 0; attempt < 36; attempt++) {
+        const ang = this.rng() * Math.PI * 2;
+        const dist = 20 + this.rng() * 10;
+        const x = Math.round(anchor.x + Math.cos(ang) * dist - size / 2);
+        const y = Math.round(anchor.y + Math.sin(ang) * dist - size / 2);
+        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
+        if (!this.areaClear(x, y, size)) continue;
+        return { x, y };
+      }
+    }
+
+    if (bot && !human) {
+      for (let attempt = 0; attempt < 28; attempt++) {
+        const ang = this.rng() * Math.PI * 2;
+        const dist = 50 + this.rng() * 24;
+        const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
+        const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
+        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
+        if (this.areaClear(x, y, size)) return { x, y };
+      }
+    }
+
+    const span = Math.max(1, w - size - margin * 2);
     for (let attempt = 0; attempt < 48; attempt++) {
-      const x = 2 + rngInt(this.rng, Math.max(1, w - size - 4));
-      const y = 2 + rngInt(this.rng, Math.max(1, h - size - 4));
+      const x = margin + rngInt(this.rng, span);
+      const y = margin + rngInt(this.rng, Math.max(1, h - size - margin * 2));
       if (!this.areaClear(x, y, size)) continue;
-      const cx = x + size / 2;
-      const cy = y + size / 2;
-      let far = true;
+      const px = x + size / 2;
+      const py = y + size / 2;
+      let crowded = false;
       for (const o of this.roster) {
         if (!o.active || !o.alive) continue;
-        if (Math.hypot(o.x - cx, o.y - cy) < size + 6) {
-          far = false;
+        if (Math.hypot(o.x - px, o.y - py) < size * 0.7) {
+          crowded = true;
           break;
         }
       }
-      if (far) return { x, y };
+      if (!crowded) return { x, y };
     }
     return {
-      x: 2 + rngInt(this.rng, Math.max(1, w - size - 4)),
-      y: 2 + rngInt(this.rng, Math.max(1, h - size - 4)),
+      x: margin + rngInt(this.rng, span),
+      y: margin + rngInt(this.rng, Math.max(1, h - size - margin * 2)),
     };
   }
 

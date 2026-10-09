@@ -42,7 +42,8 @@ test('websocket join receives a welcome, the grid, and deltas', async () => {
     assert.ok(welcome, 'missing welcome');
     const grid = messages.find((m) => Buffer.isBuffer(m) && m[0] === 1);
     assert.ok(grid, 'missing grid snapshot');
-    assert.equal((grid as Buffer).length, 5 + 150 * 150 * 2);
+    const cells = srv.room.sim.cfg.gridW * srv.room.sim.cfg.gridH;
+    assert.equal((grid as Buffer).length, 5 + cells * 2);
     const delta = messages.find((m) => typeof m === 'string' && m.includes('"delta"'));
     assert.ok(delta, 'missing delta');
     ws.send(JSON.stringify({ t: 'input', seq: 1, x: 1, y: 0 }));

@@ -39,6 +39,7 @@ interface Ent {
   train: Uint8Array;
   trainShown: number;
   trainLen: number;
+  hop: number;
   outside: boolean;
   prevX: number;
   prevZ: number;
@@ -78,6 +79,7 @@ export class Game {
   private serverTick = 0;
   private serverTickAt = 0;
   private steerUntil = 0;
+  private hitLeft = 0;
   private boardAcc = 0;
   private died = false;
   private readonly board: BoardRow[] = [];
@@ -123,6 +125,8 @@ export class Game {
         trainShown: 0,
         trainExtra: 0,
         self: false,
+        outside: false,
+        hop: 0,
       });
     }
     for (let i = 0; i < 72; i++) this.drawPickups.push({ x: 0, z: 0, kind: 0 });
@@ -216,14 +220,21 @@ export class Game {
   }
 
   private tick(dt: number): void {
-    this.input.sample();
+    if (this.hitLeft > 0) this.hitLeft = Math.max(0, this.hitLeft - dt);
+    const frame = this.hitLeft > 0 ? 0 : dt;
+    for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
+    const self = this.ents[this.selfId];
+    if (self) this.renderer.landPct = self.land / (CONFIG.gridW * CONFIG.gridH);
+    const viewH = this.predPrimed ? this.predH : (self?.h ?? 0);
+    this.input.sample(viewH);
     if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
     if (this.phase === 'playing') {
-      if (this.offline) this.stepOffline(dt);
-      else this.stepOnline(dt);
+      if (this.offline) this.stepOffline(frame);
+      else this.stepOnline(frame);
     }
     const petCount = this.fillDraw();
-    this.renderer.update(dt, this.phase === 'title' ? 'title' : 'play', this.profile.pet.species, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase !== 'title');
+    const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
+    this.renderer.update(frame || dt * 0.15, view, this.profile.pet.species, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
     if (this.phase !== 'title') this.snapCam = false;
     this.hud.setLabels(this.renderer.labels);
     this.boardAcc += dt;
@@ -302,6 +313,7 @@ export class Game {
       ent.coins = p.coins;
       ent.xp = p.xp;
       ent.outside = p.outside;
+      if (p.trainLen > ent.trainLen) ent.hop = 0.42;
       ent.trainShown = Math.min(CONFIG.maxTrainVisible, p.trainLen);
       ent.trainLen = p.trainLen;
       for (let i = 0; i < ent.trainShown; i++) ent.train[i] = p.train[i]!;
@@ -409,6 +421,7 @@ export class Game {
     ent.kills = snap.k;
     ent.coins = snap.c;
     ent.xp = snap.xp;
+    if (snap.tn > ent.trainLen) ent.hop = 0.42;
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
     for (let i = 0; i < ent.trainShown; i++) ent.train[i] = snap.tr[i] ?? 0;
@@ -452,16 +465,20 @@ export class Game {
         if (ent) ent.used = false;
       } else if (ev.e === 'kill') {
         const mine = ev.killer === this.selfId || ev.victim === this.selfId;
-        this.renderer.burst(ev.x, ev.y, ev.killer || ev.victim, mine);
+        this.renderer.burst(ev.x, ev.y, ev.victim, mine);
+        if (mine) this.hitLeft = 0.06;
         if (ev.killer === this.selfId) {
           const victim = this.ents[ev.victim];
           this.hud.toast(`Caught ${victim?.name || 'a pet'}!`);
           buzz(14);
         }
       } else if (ev.e === 'claim') {
-        if (ev.id === this.selfId && ev.n > 30) {
-          this.renderer.punchClaim();
-          if (ev.n > 120) buzz(10);
+        if (ev.id === this.selfId && ev.n > 12) {
+          const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
+          const at = this.renderer.project(ev.x, 1.6, ev.y);
+          this.hud.popup(at.x, at.y, `+${pct.toFixed(1)}%`, 'claim');
+          if (ev.n > 40) this.renderer.punchClaim();
+          if (ev.n > 180) buzz(10);
         }
       } else if (ev.e === 'die') {
         if (ev.id === this.selfId && !this.died) this.onDeath(ev);
@@ -510,6 +527,8 @@ export class Game {
       draw.train = ent.train;
       draw.trainShown = ent.trainShown;
       draw.trainExtra = Math.max(0, ent.trainLen - ent.trainShown);
+      draw.outside = ent.outside;
+      draw.hop = ent.hop;
       if (!ent.alive) {
         draw.x = ent.x;
         draw.z = ent.z;
@@ -559,6 +578,11 @@ export class Game {
       row.color = cssColor(ent.id);
     }
     this.hud.setBoard(this.board);
+    const me = this.ents[this.selfId];
+    if (me && me.used) {
+      const pct = (me.land / total) * 100;
+      this.hud.setYou(`${pct.toFixed(1)}%`, me.kills);
+    }
   }
 
   private playerView() {
@@ -643,6 +667,7 @@ function makeEnt(id: number): Ent {
     train: new Uint8Array(CONFIG.maxTrainVisible),
     trainShown: 0,
     trainLen: 0,
+    hop: 0,
     outside: false,
     prevX: 0,
     prevZ: 0,

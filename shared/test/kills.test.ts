@@ -16,6 +16,24 @@ function placePair(seed: number) {
   return { sim, a, b };
 }
 
+test('crossing the map border kills you and shows a border death', () => {
+  const sim = new Sim(
+    { gridW: 24, gridH: 24, spawnSize: 4, speed: 30, turnRate: 40, tickHz: 20, pickupTarget: 0 },
+    4,
+  );
+  const a = sim.addHuman('A', 0);
+  assert.ok(a);
+  sim.debugPlace(a.id, 2.2, 12, Math.PI);
+  for (let i = 0; i < 40 && a.alive; i++) {
+    sim.setInput(a.id, -1, 0, i + 1);
+    sim.step();
+  }
+  assert.equal(a.alive, false);
+  assert.equal(a.deathReason, 'border');
+  const died = sim.consumeEvents().find((e) => e.e === 'die' && e.id === a.id);
+  assert.ok(died && died.e === 'die' && died.reason === 'border');
+});
+
 test('cutting a trail kills the owner and credits the cutter', () => {
   const { sim, a, b } = placePair(1);
   sim.debugGiveRect(a.id, 2, 2, 4, 4);

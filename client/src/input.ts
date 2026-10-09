@@ -62,33 +62,42 @@ export class Input {
     this.keys.delete(ev.key.toLowerCase());
   };
 
-  /** Screen +Y is sim +Y (camera looks from +Z). WASD up is screen-up, sim -Y. */
-  sample(): void {
+  /**
+   * Screen-space stick. `heading` is the pet's facing (camera looks along it),
+   * so drag-up and W move toward the top of the screen.
+   */
+  sample(heading: number): void {
     let x = 0;
     let y = 0;
     let steering = false;
+    const fx = Math.cos(heading);
+    const fz = Math.sin(heading);
     const w = this.keys.has('w') || this.keys.has('arrowup');
     const a = this.keys.has('a') || this.keys.has('arrowleft');
     const s = this.keys.has('s') || this.keys.has('arrowdown');
     const d = this.keys.has('d') || this.keys.has('arrowright');
     if (w || a || s || d) {
-      x = (d ? 1 : 0) - (a ? 1 : 0);
-      y = (s ? 1 : 0) - (w ? 1 : 0);
+      const sx = (d ? 1 : 0) - (a ? 1 : 0);
+      const sy = (w ? 1 : 0) - (s ? 1 : 0);
+      x = -fz * sx + fx * sy;
+      y = fx * sx + fz * sy;
       steering = true;
     } else if (this.active) {
       const dx = this.lastX - this.originX;
       const dy = this.lastY - this.originY;
       if (dx * dx + dy * dy > 36) {
-        x = dx;
-        y = dy;
+        x = -fz * dx - fx * dy;
+        y = fx * dx - fz * dy;
         steering = true;
       }
     } else if (this.fine && this.mouseValid) {
       const p = this.playerScreen();
       if (p) {
-        x = this.mouseX - p.x;
-        y = this.mouseY - p.y;
-        if (x * x + y * y > 16) steering = true;
+        const dx = this.mouseX - p.x;
+        const dy = this.mouseY - p.y;
+        x = -fz * dx - fx * dy;
+        y = fx * dx - fz * dy;
+        if (dx * dx + dy * dy > 16) steering = true;
       }
     }
     if (steering) {
