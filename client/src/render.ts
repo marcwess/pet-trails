@@ -9,6 +9,7 @@ import {
   DirectionalLight,
   DoubleSide,
   DynamicDrawUsage,
+  Group,
   HemisphereLight,
   InstancedBufferAttribute,
   InstancedMesh,
@@ -620,6 +621,16 @@ export class Renderer {
     this.scene.add(this.claimRing);
 
     for (let i = 0; i < 16; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false });
+    // Mirror X so the south-looking camera is north-up with east on the right.
+    // Three's right-handed lookAt would otherwise put east on the left.
+    const mirror = new Group();
+    mirror.scale.x = -1;
+    for (const child of [...this.scene.children]) {
+      if (child.type === 'HemisphereLight' || child.type === 'DirectionalLight') continue;
+      this.scene.remove(child);
+      mirror.add(child);
+    }
+    this.scene.add(mirror);
     this.applySize();
     window.addEventListener('resize', () => this.applySize());
     if (perf.enabled) (window as unknown as { __r?: Renderer }).__r = this;
@@ -1188,14 +1199,16 @@ export class Renderer {
       const lx = px + fx * 1.35;
       const lz = pz + fz * 1.35;
       // North-up. The look point still leads the pet, but the camera stays due
-      // south of it, so steering turns the pet and never the map.
-      const tx = lx;
+      // south of it, so steering turns the pet and never the map. The world
+      // group is mirrored on X, which puts east on the right of this view.
+      const lookSceneX = -lx;
+      const tx = lookSceneX;
       const tz = lz - back;
       if (!this.camInit || snapCam) {
         this.camX = tx;
         this.camY = height;
         this.camZ = tz;
-        this.lookX = lx;
+        this.lookX = lookSceneX;
         this.lookZ = lz;
         this.camInit = true;
       } else {
@@ -1203,7 +1216,7 @@ export class Renderer {
         this.camX += (tx - this.camX) * k;
         this.camY += (height - this.camY) * k;
         this.camZ += (tz - this.camZ) * k;
-        this.lookX += (lx - this.lookX) * k;
+        this.lookX += (lookSceneX - this.lookX) * k;
         this.lookZ += (lz - this.lookZ) * k;
       }
       const jx = (Math.random() - 0.5) * this.shake * 0.35;
@@ -1215,7 +1228,7 @@ export class Renderer {
       const shz = this.camZ - this.lookZ;
       const shl = Math.hypot(shx, shz) || 1;
       const off = 0.07;
-      this.landShadow.position.set((shx / shl) * off, -0.02, (shz / shl) * off);
+      this.landShadow.position.set(-(shx / shl) * off, -0.02, (shz / shl) * off);
 
       this.layoutPickups(this.coins, pickups, pickupCount, 0);
       this.layoutPickups(this.orbs, pickups, pickupCount, 1);
@@ -1316,7 +1329,7 @@ export class Renderer {
   }
 
   project(x: number, y: number, z: number): { x: number; y: number; ok: boolean } {
-    this.proj.set(x * WORLD, y, z * WORLD).project(this.camera);
+    this.proj.set(-x * WORLD, y, z * WORLD).project(this.camera);
     const w = this.renderer.domElement.clientWidth || window.innerWidth;
     const h = this.renderer.domElement.clientHeight || window.innerHeight;
     return {

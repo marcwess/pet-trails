@@ -69,8 +69,8 @@ export class Input {
   };
 
   /**
-   * Absolute stick. Screen up is map north, screen right is map east.
-   * Drag is measured from the touch-down point, keys are world axes, and the
+   * Absolute stick. Screen up is world +Y and screen right is world +X.
+   * Drag is measured from the touch-down point, keys are those axes, and the
    * mouse is measured from the pet's screen position.
    */
   sample(): void {
