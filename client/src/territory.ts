@@ -17,7 +17,9 @@ const TOUCH_N = 32768;
  *
  * Cells are painted solid. A finished claim (not every frame) snaps that
  * owner's contour onto the trail and relaxes the stairs, then rewrites the
- * edge band. One opaque map plane alpha-tests that texture.
+ * edge band. Empty texels stay alpha 0. The renderer draws one tight quad
+ * per owner and alpha-tests this texture, so the mint clear color shows
+ * through and land quads do not cover the whole screen.
  */
 export class Territory {
   readonly gridW: number;
@@ -49,6 +51,26 @@ export class Territory {
     }
     if (cells === 0) return null;
     return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1, cells };
+  }
+
+  /**
+   * Inclusive cell bounds for every owner that currently has land.
+   * `into` is packed as id, x0, y0, x1, y1. Returns the owner count.
+   */
+  landSpans(into: Int16Array): number {
+    let n = 0;
+    for (let id = 1; id < MAX_OWNERS; id++) {
+      if (!this.bbOn[id]) continue;
+      const o = n * 5;
+      if (o + 4 >= into.length) break;
+      into[o] = id;
+      into[o + 1] = this.bbMinX[id]!;
+      into[o + 2] = this.bbMinY[id]!;
+      into[o + 3] = this.bbMaxX[id]!;
+      into[o + 4] = this.bbMaxY[id]!;
+      n++;
+    }
+    return n;
   }
 
   private readonly data: Uint8Array<ArrayBuffer>;
@@ -431,19 +453,23 @@ export class Territory {
 
   private paintCell(cx: number, cy: number, writeAlpha: boolean): void {
     const i = cy * this.gridW + cx;
-    const fade = this.fade[i] ?? 0;
-    const owner = fade > 0 ? this.fadeOwner[i]! : this.drawOwner[i]!;
+    const fadeByte = this.fade[i] ?? 0;
+    const owner = fadeByte > 0 ? this.fadeOwner[i]! : this.drawOwner[i]!;
     const rgb = this.rgb(owner, cx, cy);
     const y0 = (this.gridH - 1 - cy) * S;
     const x0 = cx * S;
-    const a = owner ? Math.round(255 * rgb.fade) : 0;
+    const fade = owner ? rgb.fade : 0;
+    const a = owner ? Math.round(Math.max(0, Math.min(1, fade)) * 255) : 0;
+    const r = a ? Math.round(rgb.r) : 0;
+    const g = a ? Math.round(rgb.g) : 0;
+    const b = a ? Math.round(rgb.b) : 0;
     for (let py = 0; py < S; py++) {
       const row = (y0 + py) * this.texW;
       for (let px = 0; px < S; px++) {
         const p = (row + x0 + px) * 4;
-        this.data[p] = rgb.r;
-        this.data[p + 1] = rgb.g;
-        this.data[p + 2] = rgb.b;
+        this.data[p] = r;
+        this.data[p + 1] = g;
+        this.data[p + 2] = b;
         if (writeAlpha) this.data[p + 3] = a;
       }
       this.markSpan(y0 + py, x0, x0 + S - 1);
@@ -521,6 +547,7 @@ export class Territory {
     this.undoRamp(owner);
     if (edges === 0) {
       this.touchLen[owner] = 0;
+      this.bbOn[owner] = 0;
       return;
     }
     this.writeLoops(owner, this.loopN[owner]! >= 2);
@@ -545,11 +572,13 @@ export class Territory {
       const cell = this.shownOwner(cx, cy);
       if (cell !== owner && cell !== 0) continue;
       const rgb = this.rgb(cell === owner ? owner : 0, cx, cy);
+      const fade = cell === owner ? rgb.fade : 0;
+      const a = cell === owner ? Math.round(Math.max(0, Math.min(1, fade)) * 255) : 0;
       const p = idx * 4;
-      this.data[p] = rgb.r;
-      this.data[p + 1] = rgb.g;
-      this.data[p + 2] = rgb.b;
-      this.data[p + 3] = cell === owner ? Math.round(255 * rgb.fade) : 0;
+      this.data[p] = a ? Math.round(rgb.r) : 0;
+      this.data[p + 1] = a ? Math.round(rgb.g) : 0;
+      this.data[p + 2] = a ? Math.round(rgb.b) : 0;
+      this.data[p + 3] = a;
       this.markSpan(ty, tx, tx);
     }
   }
@@ -837,46 +866,45 @@ export class Territory {
       const cell = this.shownOwner(cx, cy);
       if (cell > 0 && cell !== owner) continue;
       const rgb = this.rgb(owner, cx, cy);
-      const fade = cell === owner ? rgb.fade : signed > -0.05 ? 1 : 0;
+      const fill = cell === owner ? rgb.fade : signed > 0 ? 1 : 0;
       let shade = 1;
-      let alpha = 0;
-      if (signed >= 0) {
-        alpha = Math.round(255 * fade);
-        if (signed < rim) {
-          const t = 1 - signed / rim;
-          shade = 1 - 0.42 * t;
-        }
-      } else if (signed > -0.18) {
-        alpha = Math.round(255 * Math.max(0, (signed + 0.18) / 0.18) * fade);
+      if (signed > 0.015 && signed < rim) {
+        const t = 1 - signed / rim;
+        shade = 1 - 0.42 * t;
       }
+      let coverage = 0;
+      if (signed >= 0.08) coverage = fill;
+      else if (signed > -0.1) coverage = fill * Math.max(0, (signed + 0.1) / 0.18);
+      const a = Math.round(Math.max(0, Math.min(1, coverage)) * 255);
       const p = idx * 4;
-      this.data[p] = Math.round(rgb.r * shade);
-      this.data[p + 1] = Math.round(rgb.g * shade);
-      this.data[p + 2] = Math.round(rgb.b * shade);
-      this.data[p + 3] = alpha;
+      this.data[p] = a ? Math.round(rgb.r * shade) : 0;
+      this.data[p + 1] = a ? Math.round(rgb.g * shade) : 0;
+      this.data[p + 2] = a ? Math.round(rgb.b * shade) : 0;
+      this.data[p + 3] = a;
       this.markSpan(ty, tx, tx);
     }
     this.bakeShadow();
   }
 
-  /** One texel outside the fill, toward +x / +texture-y, so the shadow stays on the edge. */
+  /** One texel outside the fill, toward +x / +texture-y, mixed onto the mint ground. */
   private bakeShadow(): void {
     const n = this.touchN;
     for (let k = 0; k < n; k++) {
       const idx = this.touch[k]!;
-      if (this.data[idx * 4 + 3]! < 200) continue;
+      if (!this.isFill(idx)) continue;
       const tx = (idx % this.texW) + 1;
       const ty = ((idx / this.texW) | 0) + 1;
       if (tx < 0 || ty < 0 || tx >= this.texW || ty >= this.texH) continue;
       const sidx = ty * this.texW + tx;
-      if (this.data[sidx * 4 + 3]! > 90) continue;
+      if (this.data[sidx * 4 + 3]! > 28) continue;
       const sim = this.simOf(tx, ty);
       const cell = this.shownOwner(Math.floor(sim.x), Math.floor(sim.y));
       if (cell > 0) continue;
       const p = sidx * 4;
-      this.data[p] = 18;
-      this.data[p + 1] = 42;
-      this.data[p + 2] = 36;
+      const strength = 0.58;
+      this.data[p] = Math.round(140 * (1 - strength) + 18 * strength);
+      this.data[p + 1] = Math.round(214 * (1 - strength) + 42 * strength);
+      this.data[p + 2] = Math.round(182 * (1 - strength) + 36 * strength);
       this.data[p + 3] = 230;
       this.markSpan(ty, tx, tx);
       if (this.sdStamp[sidx] !== this.sid && this.touchN < this.touch.length) {
@@ -885,6 +913,10 @@ export class Territory {
         this.sd[sidx] = -0.3;
       }
     }
+  }
+
+  private isFill(idx: number): boolean {
+    return this.data[idx * 4 + 3]! > 190;
   }
 
   /** Buffer texel to continuous cell position. Linear and matches paintCell. */

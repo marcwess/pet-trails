@@ -385,6 +385,10 @@ export class Renderer {
   private readonly ground: Mesh;
   private readonly gridLines: LineSegments;
   private readonly land: Mesh;
+  private readonly landPos: BufferAttribute;
+  private readonly landUv: BufferAttribute;
+  private landSig = 1;
+  private readonly spans = new Int16Array(24 * 5);
   private readonly flashRing: Mesh;
   private readonly claimRing: Mesh;
   private readonly popLife = new Float32Array(24);
@@ -471,19 +475,40 @@ export class Renderer {
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
     this.scene.add(this.gridLines);
-    const landGeo = this.mapPlane(gw, gh);
+    const landGeo = new BufGeo();
+    const quads = 24;
+    const posArr = new Float32Array(quads * 12);
+    const uvArr = new Float32Array(quads * 8);
+    const index = new Uint16Array(quads * 6);
+    for (let i = 0; i < quads; i++) {
+      const v = i * 4;
+      const o = i * 6;
+      index[o] = v;
+      index[o + 1] = v + 1;
+      index[o + 2] = v + 2;
+      index[o + 3] = v + 1;
+      index[o + 4] = v + 3;
+      index[o + 5] = v + 2;
+    }
+    this.landPos = new BufferAttribute(posArr, 3);
+    this.landUv = new BufferAttribute(uvArr, 2);
+    this.landPos.setUsage(DynamicDrawUsage);
+    this.landUv.setUsage(DynamicDrawUsage);
+    landGeo.setAttribute('position', this.landPos);
+    landGeo.setAttribute('uv', this.landUv);
+    landGeo.setIndex(new BufferAttribute(index, 1));
+    landGeo.setDrawRange(0, 0);
     this.land = new Mesh(
       landGeo,
       new MeshBasicMaterial({
         map: territory.texture,
-        alphaTest: 0.4,
+        alphaTest: 0.42,
         transparent: false,
         depthWrite: true,
         toneMapped: false,
       }),
     );
     this.land.frustumCulled = false;
-    this.land.position.y = 0.02;
     this.land.renderOrder = 1;
     this.scene.add(this.land);
     this.addFence(gw, gh);
@@ -527,7 +552,7 @@ export class Renderer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
 
-    this.parts = new InstancedMesh(new BoxGeometry(0.36, 0.36, 0.36), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
+    this.parts = new InstancedMesh(new BoxGeometry(0.55, 0.55, 0.55), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
     this.parts.frustumCulled = false;
     this.parts.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -576,6 +601,7 @@ export class Renderer {
     for (let i = 0; i < 16; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false });
     this.applySize();
     window.addEventListener('resize', () => this.applySize());
+    if (perf.enabled) (window as unknown as { __r?: Renderer }).__r = this;
   }
 
   warmup(): void {
@@ -684,18 +710,100 @@ export class Renderer {
     return lines;
   }
 
-  /** Full-map plane. UVs match the territory shader's world mapping: v = 1 at world z = 0. */
-  private mapPlane(gw: number, gh: number): BufGeo {
-    const geo = new PlaneGeometry(gw, gh);
-    geo.rotateX(-Math.PI / 2);
-    geo.translate(gw / 2, 0, gh / 2);
-    const pos = geo.getAttribute('position');
-    const uv = geo.getAttribute('uv');
-    for (let i = 0; i < pos.count; i++) {
-      uv.setXY(i, pos.getX(i) / gw, 1 - pos.getZ(i) / gh);
+  /**
+   * One quad per owner, padded just enough for the rim and the one-texel
+   * shadow. UVs match the territory texture: v = 1 at world z = 0.
+   * A live claim eases the new patch up by a few percent, then back.
+   */
+  private syncLandQuads(): void {
+    const n = this.territory.landSpans(this.spans);
+    const pulse = this.territory.claimPulse;
+    const pulseQ = pulse > 0.02 ? (pulse * 24) | 0 : 0;
+    let sig = n * 131 + pulseQ;
+    for (let i = 0; i < n * 5; i++) sig = (Math.imul(sig, 33) + this.spans[i]!) | 0;
+    if (sig === this.landSig) return;
+    this.landSig = sig;
+    const gw = this.territory.gridW * WORLD;
+    const gh = this.territory.gridH * WORLD;
+    const pos = this.landPos.array as Float32Array;
+    const uv = this.landUv.array as Float32Array;
+    const pad = 1.65;
+    const y = 0.02;
+    for (let i = 0; i < n; i++) {
+      const o = i * 5;
+      let x0 = (this.spans[o + 1]! - pad) * WORLD;
+      let z0 = (this.spans[o + 2]! - pad) * WORLD;
+      let x1 = (this.spans[o + 3]! + 1 + pad) * WORLD;
+      let z1 = (this.spans[o + 4]! + 1 + pad) * WORLD;
+      if (pulse > 0.02 && this.quadHasClaim(i)) {
+        const bounce = 1 + Math.sin((1 - pulse) * Math.PI) * 0.075;
+        const mx = (x0 + x1) * 0.5;
+        const mz = (z0 + z1) * 0.5;
+        x0 = mx + (x0 - mx) * bounce;
+        x1 = mx + (x1 - mx) * bounce;
+        z0 = mz + (z0 - mz) * bounce;
+        z1 = mz + (z1 - mz) * bounce;
+      }
+      const u0 = x0 / gw;
+      const u1 = x1 / gw;
+      const v0 = 1 - z0 / gh;
+      const v1 = 1 - z1 / gh;
+      const p = i * 12;
+      const t = i * 8;
+      pos[p] = x0;
+      pos[p + 1] = y;
+      pos[p + 2] = z0;
+      pos[p + 3] = x1;
+      pos[p + 4] = y;
+      pos[p + 5] = z0;
+      pos[p + 6] = x0;
+      pos[p + 7] = y;
+      pos[p + 8] = z1;
+      pos[p + 9] = x1;
+      pos[p + 10] = y;
+      pos[p + 11] = z1;
+      uv[t] = u0;
+      uv[t + 1] = v0;
+      uv[t + 2] = u1;
+      uv[t + 3] = v0;
+      uv[t + 4] = u0;
+      uv[t + 5] = v1;
+      uv[t + 6] = u1;
+      uv[t + 7] = v1;
     }
-    uv.needsUpdate = true;
-    return geo;
+    this.landPos.clearUpdateRanges();
+    this.landUv.clearUpdateRanges();
+    this.landPos.addUpdateRange(0, Math.max(1, n * 12));
+    this.landUv.addUpdateRange(0, Math.max(1, n * 8));
+    this.landPos.needsUpdate = true;
+    this.landUv.needsUpdate = true;
+    this.land.geometry.setDrawRange(0, n * 6);
+  }
+
+  private quadHasClaim(i: number): boolean {
+    const o = i * 5;
+    const x0 = this.spans[o + 1]!;
+    const y0 = this.spans[o + 2]!;
+    const x1 = this.spans[o + 3]!;
+    const y1 = this.spans[o + 4]!;
+    const c = this.territory;
+    return c.claimX1 >= x0 && c.claimX0 <= x1 && c.claimY1 >= y0 && c.claimY0 <= y1;
+  }
+
+  /** World-space XZ boxes of the land quads. Width and depth are in world units. */
+  landBoxes(): Array<{ x0: number; z0: number; x1: number; z1: number; w: number; d: number }> {
+    const n = this.land.geometry.drawRange.count / 6;
+    const pos = this.landPos.array as Float32Array;
+    const out: Array<{ x0: number; z0: number; x1: number; z1: number; w: number; d: number }> = [];
+    for (let i = 0; i < n; i++) {
+      const p = i * 12;
+      const x0 = pos[p]!;
+      const z0 = pos[p + 2]!;
+      const x1 = pos[p + 3]!;
+      const z1 = pos[p + 8]!;
+      out.push({ x0, z0, x1, z1, w: x1 - x0, d: z1 - z0 });
+    }
+    return out;
   }
 
   private addFence(gw: number, gh: number): void {
@@ -804,6 +912,7 @@ export class Renderer {
   ): void {
     this.time += dt;
     this.territory.update(dt);
+    this.syncLandQuads();
     this.syncClaimRing();
     this.perf.beginFrame();
     this.territory.upload(this.renderer);
@@ -873,7 +982,7 @@ export class Renderer {
           const pop = this.popLife[pet.id] ?? 0;
           if (pop > 0) {
             const u = 1 - pop / 0.25;
-            const grow = u < 0.28 ? 1 + (u / 0.28) * 0.55 : 1.55 * (1 - (u - 0.28) / 0.72);
+            const grow = u < 0.28 ? 1 + (u / 0.28) * 0.9 : 1.9 * (1 - (u - 0.28) / 0.72);
             const mesh = this.pets[pet.pet];
             if (mesh && mesh.count < PET_CAP && grow > 0.04) {
               this.placePet(mesh, mesh.count, pet.x * WORLD, 0, pet.z * WORLD, pet.h, 0, grow, 1);
@@ -1160,7 +1269,7 @@ export class Renderer {
       this.pr[w] = nr;
       this.pg[w] = ng;
       this.pb[w] = nb;
-      this.place(this.parts, w, nx, ny, nz, life * 8, life * 4, 0.85 + life * 2.1);
+      this.place(this.parts, w, nx, ny, nz, life * 8, life * 4, 1.25 + life * 2.7);
       this.parts.instanceColor?.setXYZ(w, nr, ng, nb);
       w++;
     }

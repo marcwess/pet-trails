@@ -13,6 +13,7 @@ export class Input {
   private mouseY = 0;
   private mouseValid = false;
   private readonly fine = window.matchMedia('(pointer: fine)').matches;
+  private readonly keysOnly = new URLSearchParams(location.search).has('keys');
 
   constructor(private readonly playerScreen: () => { x: number; y: number } | null) {
     window.addEventListener('pointerdown', this.onDown, { passive: false });
@@ -90,7 +91,7 @@ export class Input {
         y = fx * dx - fz * dy;
         steering = true;
       }
-    } else if (this.fine && this.mouseValid) {
+    } else if (this.fine && this.mouseValid && !this.keysOnly) {
       const p = this.playerScreen();
       if (p) {
         const dx = this.mouseX - p.x;

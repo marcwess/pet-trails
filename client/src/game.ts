@@ -610,7 +610,7 @@ export class Game {
       topIds.push(id);
     }
     const me = this.ents[this.selfId];
-    if (me && me.used && !listed.has(this.selfId) && topIds.length < 6) {
+    if (me && me.used && me.alive && !listed.has(this.selfId) && topIds.length < 6) {
       listed.add(this.selfId);
       topIds.push(this.selfId);
     }
@@ -639,11 +639,33 @@ export class Game {
     id: number;
     cells: ReturnType<Territory['ownerBounds']>;
     pixels: Renderer['landMeasure'];
+    screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
   } {
     const id = this.selfId;
     const c = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
     this.renderer.queueColorMeasure(c[0], c[1], c[2]);
-    return { id, cells: this.territory.ownerBounds(id), pixels: this.renderer.landMeasure };
+    const cells = this.territory.ownerBounds(id);
+    let screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null = null;
+    if (cells) {
+      const pts = [
+        this.renderer.project(cells.x0, 0.02, cells.y0),
+        this.renderer.project(cells.x1 + 1, 0.02, cells.y0),
+        this.renderer.project(cells.x0, 0.02, cells.y1 + 1),
+        this.renderer.project(cells.x1 + 1, 0.02, cells.y1 + 1),
+      ].filter((p) => p.ok);
+      if (pts.length >= 3) {
+        const xs = pts.map((p) => p.x);
+        const ys = pts.map((p) => p.y);
+        screen = {
+          x0: Math.min(...xs),
+          y0: Math.min(...ys),
+          x1: Math.max(...xs),
+          y1: Math.max(...ys),
+          dpr: window.devicePixelRatio || 1,
+        };
+      }
+    }
+    return { id, cells, pixels: this.renderer.landMeasure, screen };
   }
 
   private playerView() {
@@ -830,6 +852,7 @@ declare global {
           maxX: number;
           maxY: number;
         } | null;
+        screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
       };
     };
   }
