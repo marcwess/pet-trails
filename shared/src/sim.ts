@@ -2,6 +2,7 @@ import { updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
 import { LandBook, polylineNearSegment } from './land.js';
 import { integrateBody } from './motion.js';
+import { circleRing, mapBlob, spawnRadius } from './shape.js';
 import { Player, type DeathReason } from './player.js';
 import { mulberry32, rngInt } from './rng.js';
 import type { SimEvent, SimStats } from './types.js';
@@ -23,6 +24,7 @@ const TRAIL_CAP = 8192;
  */
 export class Sim {
   readonly cfg: GameConfig;
+  readonly seed: number;
   readonly land: LandBook;
   readonly players: Array<Player | null>;
   readonly roster: Player[];
@@ -42,7 +44,8 @@ export class Sim {
 
   constructor(over: Partial<GameConfig> = {}, seed = 1) {
     this.cfg = makeConfig(over);
-    this.land = new LandBook(this.cfg.maxEntities, this.cfg.gridW, this.cfg.gridH);
+    this.seed = seed >>> 0;
+    this.land = new LandBook(this.cfg.maxEntities, this.cfg.gridW, this.cfg.gridH, mapBlob(this.seed, this.cfg.gridW, this.cfg.gridH));
     this.players = new Array(this.cfg.maxEntities + 1).fill(null);
     this.roster = [];
     for (let id = 1; id <= this.cfg.maxEntities; id++) {
@@ -179,7 +182,7 @@ export class Sim {
       p.aliveMs += dt * 1000;
       const x0 = p.x;
       const y0 = p.y;
-      integrateBody(p, dt, this.cfg);
+      integrateBody(p, dt, this.cfg, undefined, this.land.mapRing);
       if (!p.alive) continue;
       this.followSegment(p, x0, y0, p.x, p.y);
     }
@@ -236,6 +239,13 @@ export class Sim {
   /** Test helper: union a rectangle of land. Does not move the player. */
   debugGiveRect(id: number, x: number, y: number, w: number, h: number): void {
     this.land.unionRect(id, x, y, w, h);
+    const p = this.players[id];
+    if (p) p.land = this.land.areaOf(id);
+  }
+
+  /** Test helper: union a smooth disk of land. Does not move the player. */
+  debugGiveCircle(id: number, cx: number, cy: number, r: number): void {
+    this.land.unionPolygon(id, [circleRing(cx, cy, r, 48)]);
     const p = this.players[id];
     if (p) p.land = this.land.areaOf(id);
   }
@@ -298,22 +308,22 @@ export class Sim {
     if (p.alive) this.land.clear(p.id);
     p.resetRun();
     const spot = this.findSpawn(p.bot);
-    const size = this.cfg.spawnSize;
-    this.land.unionRect(p.id, spot.x, spot.y, size, size);
-    p.x = spot.x + size / 2;
-    p.y = spot.y + size / 2;
-    const { gridW: w, gridH: h } = this.cfg;
+    const radius = spawnRadius(this.cfg.spawnSize);
+    this.land.unionPolygon(p.id, [circleRing(spot.x, spot.y, radius, 48)]);
+    p.x = spot.x;
+    p.y = spot.y;
+    const mid = this.land.mapCenter();
     let ang = this.rng() * Math.PI * 2;
     if (p.bot) {
-      const rx = p.x - w / 2;
-      const ry = p.y - h / 2;
+      const rx = p.x - mid.x;
+      const ry = p.y - mid.y;
       if (rx * rx + ry * ry > 16) ang = Math.atan2(rx, -ry) + (this.rng() - 0.5) * 0.5;
     }
     const reach = 36;
     const nx = p.x + Math.cos(ang) * reach;
     const ny = p.y + Math.sin(ang) * reach;
-    if (nx < 22 || ny < 22 || nx > w - 22 || ny > h - 22) {
-      ang = Math.atan2(h / 2 - p.y, w / 2 - p.x) + (this.rng() - 0.5) * 0.9;
+    if (!this.land.insideMap(nx, ny)) {
+      ang = Math.atan2(mid.y - p.y, mid.x - p.x) + (this.rng() - 0.5) * 0.9;
     }
     p.heading = ang;
     p.desiredX = Math.cos(p.heading);
@@ -339,27 +349,24 @@ export class Sim {
   }
 
   /**
-   * Pick a spawn square that keeps a gap from existing land and from every
-   * living head. The last resort still refuses to overlap land.
+   * Pick a spawn disk that sits inside the blob, with a gap from existing land
+   * and from every living head. The last resort still refuses to overlap land.
    */
   private findSpawn(bot: boolean): { x: number; y: number } {
-    const size = this.cfg.spawnSize;
-    const { gridW: w, gridH: h } = this.cfg;
-    const margin = Math.min(8, Math.max(1, Math.floor((Math.min(w, h) - size) / 4)));
-    const anchor = this.livingAnchor(true) ?? this.livingAnchor(false) ?? { x: w / 2, y: h / 2 };
+    const radius = spawnRadius(this.cfg.spawnSize);
+    const anchor = this.livingAnchor(true) ?? this.livingAnchor(false) ?? this.land.mapCenter();
     const want = bot ? 50 : 0;
     for (const gap of [14, 8, 4, 1]) {
-      const spot = this.bestSpawn(size, margin, gap, anchor.x, anchor.y, want, size + gap);
+      const spot = this.bestSpawn(radius, gap, anchor.x, anchor.y, want, radius * 2 + gap);
       if (spot) return spot;
     }
-    const spot = this.bestSpawn(size, margin, 0, anchor.x, anchor.y, want, 1);
+    const spot = this.bestSpawn(radius, 0, anchor.x, anchor.y, want, radius);
     if (spot) return spot;
-    return { x: margin, y: margin };
+    return this.land.mapCenter();
   }
 
   private bestSpawn(
-    size: number,
-    margin: number,
+    radius: number,
     gap: number,
     ax: number,
     ay: number,
@@ -367,19 +374,19 @@ export class Sim {
     headMin: number,
   ): { x: number; y: number } | null {
     const { gridW: w, gridH: h } = this.cfg;
-    const step = Math.max(4, Math.floor(size / 3));
+    const step = Math.max(4, Math.floor(radius));
     let bestX = 0;
     let bestY = 0;
     let bestScore = -Infinity;
     let found = 0;
-    for (let y = margin; y + size < h - margin; y += step) {
-      for (let x = margin; x + size < w - margin; x += step) {
-        if (!this.areaClear(x - gap, y - gap, size + gap * 2)) continue;
-        const px = x + size / 2;
-        const py = y + size / 2;
-        const head = this.nearestLiving(px, py);
+    for (let y = step; y < h - step; y += step) {
+      for (let x = step; x < w - step; x += step) {
+        const room = this.land.fenceAt(x, y);
+        if (!room.inside || room.dist < radius + 0.8) continue;
+        if (!this.diskClear(x, y, radius + gap)) continue;
+        const head = this.nearestLiving(x, y);
         if (head < headMin) continue;
-        const dist = Math.hypot(px - ax, py - ay);
+        const dist = Math.hypot(x - ax, y - ay);
         const score = head * 0.2 - Math.abs(dist - wantDist) + this.rng() * 6;
         found++;
         if (score > bestScore) {
@@ -403,10 +410,12 @@ export class Sim {
     return best;
   }
 
-  private areaClear(x0: number, y0: number, size: number): boolean {
-    if (this.land.hitsExcept(0, x0, y0, size, size)) return false;
-    const x1 = x0 + size;
-    const y1 = y0 + size;
+  private diskClear(cx: number, cy: number, radius: number): boolean {
+    const x0 = cx - radius;
+    const y0 = cy - radius;
+    if (this.land.hitsExcept(0, x0, y0, radius * 2, radius * 2)) return false;
+    const x1 = cx + radius;
+    const y1 = cy + radius;
     for (const p of this.roster) {
       if (!p.active || p.trailLen === 0) continue;
       for (let i = 0; i < p.trailLen; i += 2) {
@@ -552,7 +561,7 @@ export class Sim {
     ) {
       return;
     }
-    const total = this.cfg.gridW * this.cfg.gridH;
+    const total = Math.max(1, this.land.mapArea);
     const land = this.land.areaOf(victim.id);
     victim.lastPct = (land / total) * 100;
     victim.lastRank = this.rankOf(victim.id);
@@ -674,6 +683,8 @@ export class Sim {
     for (let attempt = 0; attempt < 8; attempt++) {
       const x = 1 + this.rng() * (this.cfg.gridW - 2);
       const y = 1 + this.rng() * (this.cfg.gridH - 2);
+      const room = this.land.fenceAt(x, y);
+      if (!room.inside || room.dist < 2) continue;
       if (this.land.ownerAt(x, y) !== 0) continue;
       if (this.nearTrail(x, y, 1.25)) continue;
       slot.active = true;
@@ -702,8 +713,15 @@ export class Sim {
       const ang = this.rng() * Math.PI * 2;
       const dist = 0.4 + this.rng() * 1.4;
       item.active = true;
-      item.x = Math.min(this.cfg.gridW - 1, Math.max(1, x + Math.cos(ang) * dist));
-      item.y = Math.min(this.cfg.gridH - 1, Math.max(1, y + Math.sin(ang) * dist));
+      let px = x + Math.cos(ang) * dist;
+      let py = y + Math.sin(ang) * dist;
+      const room = this.land.fenceAt(px, py);
+      if (!room.inside || room.dist < 0.6) {
+        px = room.x - room.nx * 1;
+        py = room.y - room.ny * 1;
+      }
+      item.x = px;
+      item.y = py;
       item.id = this.pickupSeq++;
       item.kind = 0;
       dropped++;

@@ -68,18 +68,18 @@ test('enemy land outside the loop is not stolen and they live', () => {
   sim.debugClear(a.id);
   sim.debugClear(b.id);
   sim.debugGiveRect(a.id, 2, 4, 3, 4);
-  sim.debugGiveRect(b.id, 12, 2, 3, 3);
+  sim.debugGiveRect(b.id, 10, 10, 3, 3);
   const trail: number[] = [];
   for (let x = 5; x <= 8; x++) trail.push(cell(sim, x, 5));
   for (let y = 6; y <= 7; y++) trail.push(cell(sim, 8, y));
   for (let x = 7; x >= 4; x--) trail.push(cell(sim, x, 7));
   sim.debugSetTrail(a.id, trail);
-  sim.debugPlace(b.id, 13.2, 3.2, 0);
+  sim.debugPlace(b.id, 11.2, 11.2, 0);
   const bLand = b.land;
   sim.debugClaim(a.id);
   assert.equal(b.alive, true);
   assert.equal(sim.land.areaOf(b.id), bLand);
-  assert.equal(sim.ownerAt(12.5, 2.5), b.id);
+  assert.equal(sim.ownerAt(10.5, 10.5), b.id);
 });
 
 test('a claim steals only the overlap and leaves the rest of a living rival', () => {

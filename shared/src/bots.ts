@@ -73,16 +73,15 @@ function trailThreatened(p: Player, view: BotView): boolean {
   return false;
 }
 
-/** Steer back toward mid-map near the fence. A bot's own trail is safe to cross. */
+/** Steer back inside when the curved fence is close. A bot's own trail is safe to cross. */
 function avoid(p: Player, view: BotView): boolean {
-  const { cfg } = view;
-  const edge = 6;
-  if (p.x < edge || p.x > cfg.gridW - edge || p.y < edge || p.y > cfg.gridH - edge) {
-    p.desiredX = cfg.gridW / 2 - p.x;
-    p.desiredY = cfg.gridH / 2 - p.y;
-    return true;
-  }
-  return false;
+  const hit = view.land.fenceAt(p.x, p.y);
+  if (hit.inside && hit.dist > 6) return false;
+  const pull = hit.inside ? 1.6 : 3.2;
+  const side = p.botTurnSign < 0 ? -1 : 1;
+  p.desiredX = -hit.nx * pull + hit.tx * side * 0.45;
+  p.desiredY = -hit.ny * pull + hit.ty * side * 0.45;
+  return true;
 }
 
 /**

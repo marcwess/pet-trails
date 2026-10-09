@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CONFIG } from '../src/config.ts';
 import { walkCells } from '../src/motion.ts';
+import { spawnRadius } from '../src/shape.ts';
 import { Sim } from '../src/sim.ts';
 
 function placePair(seed: number) {
@@ -17,24 +18,36 @@ function placePair(seed: number) {
   return { sim, a, b };
 }
 
-test('hitting the fence slides along the wall and does not kill', () => {
+test('hitting the fence slides along the curve and does not kill', () => {
   const sim = new Sim(
     { gridW: 40, gridH: 40, spawnSize: 4, speed: 16, turnRate: 12, tickHz: 20, pickupTarget: 0 },
     4,
   );
   const a = sim.addHuman('A', 0);
   assert.ok(a);
-  sim.debugPlace(a.id, 3, 12, Math.PI);
-  const y0 = a.y;
-  for (let i = 0; i < 24; i++) {
-    sim.setInput(a.id, -1, 1, i + 1);
-    sim.step();
+  let bx = Infinity;
+  let by = 0;
+  const ring = sim.land.mapRing;
+  for (let i = 0; i < ring.length - 1; i++) {
+    if (ring[i]![0] < bx) {
+      bx = ring[i]![0];
+      by = ring[i]![1];
+    }
   }
-  assert.equal(a.alive, true);
-  assert.equal(a.deathReason, '');
-  assert.ok(a.x <= 0.4, `x ${a.x} should sit on the fence`);
-  assert.ok(a.y > y0 + 6, `y ${a.y} should have slid north from ${y0}`);
-  assert.ok(Math.cos(a.heading) > -0.05, `heading ${a.heading} still points out through the wall`);
+  sim.debugPlace(a.id, bx + 1.1, by, Math.PI);
+  const x0 = a.x;
+  const y0 = a.y;
+  for (let i = 0; i < 30; i++) {
+    sim.setInput(a.id, -1, 0.65, i + 1);
+    sim.step();
+    assert.equal(a.alive, true, a.deathReason);
+    assert.equal(sim.land.insideMap(a.x, a.y), true, `${a.x.toFixed(2)},${a.y.toFixed(2)} left the blob`);
+  }
+  const hit = sim.land.fenceAt(a.x, a.y);
+  assert.ok(hit.dist < 1.2, `dist ${hit.dist} should sit on the fence`);
+  assert.ok(Math.hypot(a.x - x0, a.y - y0) > 4, `moved only ${Math.hypot(a.x - x0, a.y - y0).toFixed(2)}`);
+  const outward = Math.cos(a.heading) * hit.nx + Math.sin(a.heading) * hit.ny;
+  assert.ok(outward < 0.35, `heading still points out through the wall (${outward.toFixed(2)})`);
   assert.equal(
     sim.consumeEvents().some((e) => e.e === 'die'),
     false,
@@ -155,8 +168,10 @@ test('head-on: more land wins, the smaller pet joins the train', () => {
 
 test('head-on tie: both die and nobody is credited', () => {
   const { sim, a, b } = placePair(4);
-  sim.debugGiveRect(a.id, 2, 2, 4, 4);
-  sim.debugGiveRect(b.id, 20, 2, 4, 4);
+  sim.debugClear(a.id);
+  sim.debugClear(b.id);
+  sim.debugGiveRect(a.id, 8, 12, 4, 4);
+  sim.debugGiveRect(b.id, 18, 12, 4, 4);
   assert.equal(a.land, b.land);
   sim.debugPlace(a.id, 12.2, 10, 0);
   sim.debugPlace(b.id, 12.7, 10, Math.PI);
@@ -182,8 +197,9 @@ test('a fresh spawn shrugs off a head-on until invulnerability ends', () => {
   assert.ok(a && b);
   sim.debugClear(a.id);
   sim.debugClear(b.id);
-  sim.debugGiveRect(a.id, 2, 2, 4, 4);
-  sim.debugGiveRect(b.id, 40, 40, 4, 4);
+  sim.debugGiveRect(a.id, 18, 18, 4, 4);
+  sim.debugGiveRect(b.id, 26, 26, 4, 4);
+  assert.equal(a.land, b.land);
   a.invulnUntil = sim.tick + 30;
   b.invulnUntil = sim.tick + 30;
   a.frozen = true;
@@ -208,6 +224,15 @@ test('a live-rate figure-eight claims both lobes and meets the spawn', () => {
   const sim = new Sim({ ...CONFIG, pickupTarget: 0, targetPopulation: 1 }, 4);
   const p = sim.addHuman('Ada', 0);
   assert.ok(p);
+  sim.debugClear(p.id);
+  const r = spawnRadius(sim.cfg.spawnSize);
+  const cx = 100;
+  const cy = 100;
+  sim.debugGiveCircle(p.id, cx, cy, r);
+  sim.debugPlace(p.id, cx, cy, 0);
+  p.alive = true;
+  p.outside = false;
+  p.trailLen = 0;
   const start = p.land;
   const drive = (x: number, y: number, ticks: number) => {
     for (let i = 0; i < ticks; i++) {
@@ -225,11 +250,19 @@ test('a live-rate figure-eight claims both lobes and meets the spawn', () => {
   drive(0, -1, 28);
   drive(-1, 0, 50);
   assert.ok(p.land > start + 120, `land grew only ${p.land - start}, both lobes should join the spawn`);
-  assert.equal(sim.ownerAt(40, 10), p.id, 'lower lobe');
-  assert.equal(sim.ownerAt(40, 35), p.id, 'upper lobe');
-  // The strip between the spawn edge and the new lobe used to stay background.
-  assert.equal(sim.ownerAt(26.9, 16), p.id, 'seam between spawn and the new land');
-  assert.equal(sim.ownerAt(5, 5), 0, 'open map stays unclaimed');
+  let low = 0;
+  let high = 0;
+  for (let y = 60; y <= 140; y += 2) {
+    for (let x = 70; x <= 160; x += 2) {
+      if (sim.ownerAt(x + 0.2, y + 0.2) !== p.id) continue;
+      if (y < cy - 6) low++;
+      if (y > cy + 6) high++;
+    }
+  }
+  assert.ok(low > 3, `lower lobe samples ${low}`);
+  assert.ok(high > 3, `upper lobe samples ${high}`);
+  assert.equal(sim.ownerAt(cx + r + 0.55, cy), p.id, 'seam between spawn and the new land');
+  assert.equal(sim.ownerAt(8, 8), 0, 'open map stays unclaimed');
   assert.ok(sim.auditLand());
 });
 

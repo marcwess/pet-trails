@@ -1,5 +1,8 @@
 import polygonClipping from 'polygon-clipping';
 import type { MultiPolygon, Pair, Polygon, Ring } from 'polygon-clipping';
+import { fenceQuery, type FenceHit } from './shape.js';
+
+export type { FenceHit };
 
 const pc = polygonClipping;
 const SCALE = 16;
@@ -270,6 +273,60 @@ function safeInter(a: MultiPolygon, b: MultiPolygon): MultiPolygon {
 
 function rectPoly(x: number, y: number, w: number, h: number): Polygon {
   return [[[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]];
+}
+
+/** Replace sharp corners with a short quadratic fillet. Gentle turns stay put. */
+function roundCorners(ring: Ring): Ring {
+  const closed = ring.length > 1 && samePt(ring[0]!, ring[ring.length - 1]!);
+  const n = closed ? ring.length - 1 : ring.length;
+  if (n < 4) return ring;
+  const out: Pair[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = ring[(i - 1 + n) % n]!;
+    const cur = ring[i]!;
+    const next = ring[(i + 1) % n]!;
+    const ax = cur[0] - prev[0];
+    const ay = cur[1] - prev[1];
+    const bx = next[0] - cur[0];
+    const by = next[1] - cur[1];
+    const al = Math.hypot(ax, ay);
+    const bl = Math.hypot(bx, by);
+    const dot = al > 1e-5 && bl > 1e-5 ? (ax * bx + ay * by) / (al * bl) : 1;
+    const turn = Math.acos(Math.max(-1, Math.min(1, dot)));
+    if (turn < 0.55 || al < 0.9 || bl < 0.9) {
+      out.push([cur[0], cur[1]]);
+      continue;
+    }
+    const cut = Math.min(0.75, al * 0.3, bl * 0.3);
+    const a0 = cur[0] - (ax / al) * cut;
+    const a1 = cur[1] - (ay / al) * cut;
+    const b0 = cur[0] + (bx / bl) * cut;
+    const b1 = cur[1] + (by / bl) * cut;
+    out.push([a0, a1]);
+    for (const t of [0.35, 0.65]) {
+      const u = 1 - t;
+      out.push([
+        u * u * a0 + 2 * u * t * cur[0] + t * t * b0,
+        u * u * a1 + 2 * u * t * cur[1] + t * t * b1,
+      ]);
+    }
+    out.push([b0, b1]);
+  }
+  return closeRing(out) ?? ring;
+}
+
+function roundMulti(mp: MultiPolygon): MultiPolygon {
+  const out: MultiPolygon = [];
+  for (const poly of mp) {
+    if (poly.length === 0) continue;
+    const rings: Ring[] = [];
+    for (let r = 0; r < poly.length; r++) {
+      const ring = r === 0 ? roundCorners(poly[r]!) : poly[r]!;
+      if (ring.length >= 4) rings.push(ring);
+    }
+    if (rings.length > 0) out.push(rings);
+  }
+  return out.length > 0 ? out : mp;
 }
 
 interface Snap {
@@ -642,17 +699,39 @@ export class LandBook {
   private added: MultiPolygon = [];
   private pending: MultiPolygon | null = null;
   private pendingId = 0;
+  readonly mapRing: Ring;
+  readonly mapArea: number;
+  private readonly mapCx: number;
+  private readonly mapCy: number;
 
   constructor(
     private readonly maxId: number,
     readonly mapW: number,
     readonly mapH: number,
+    mapRing?: Ring,
   ) {
     this.area = new Float64Array(maxId + 1);
     this.cx = new Float64Array(maxId + 1);
     this.cy = new Float64Array(maxId + 1);
     this.multi = [];
     for (let i = 0; i <= maxId; i++) this.multi.push([]);
+    this.mapRing = mapRing && mapRing.length >= 4 ? mapRing : rectPoly(0, 0, mapW, mapH)[0]!;
+    this.mapArea = Math.abs(signedArea(this.mapRing));
+    const c = centroidOf([[this.mapRing]]);
+    this.mapCx = c?.x ?? mapW / 2;
+    this.mapCy = c?.y ?? mapH / 2;
+  }
+
+  mapCenter(): { x: number; y: number } {
+    return { x: this.mapCx, y: this.mapCy };
+  }
+
+  insideMap(x: number, y: number): boolean {
+    return ringContains(this.mapRing, x, y, true);
+  }
+
+  fenceAt(x: number, y: number): FenceHit {
+    return fenceQuery(this.mapRing, x, y);
   }
 
   beginTick(): void {
@@ -706,10 +785,16 @@ export class LandBook {
   /** Union an axis-aligned rectangle into this owner's land. */
   unionRect(id: number, x: number, y: number, w: number, h: number): void {
     if (w <= 0 || h <= 0) return;
-    const rect: MultiPolygon = [rectPoly(x, y, w, h)];
-    const next = sanitize(this.clip(safeUnion(this.multi[id]!, rect)), 0.02);
-    this.multi[id] = next.length > 0 ? next : rect;
+    this.unionPolygon(id, rectPoly(x, y, w, h));
+  }
+
+  /** Union one polygon (a circle, a fillet, a debug shape) into this owner's land. */
+  unionPolygon(id: number, poly: Polygon): void {
+    if (id < 1 || id > this.maxId || poly.length === 0 || poly[0]!.length < 4) return;
+    const next = sanitize(this.clip(safeUnion(this.multi[id]!, [poly])), 0.02);
+    this.multi[id] = next.length > 0 ? next : [poly];
     this.recompute(id);
+    this.dirty.add(id);
   }
 
   /**
@@ -847,7 +932,7 @@ export class LandBook {
 
   private clip(mp: MultiPolygon): MultiPolygon {
     if (mp.length === 0) return [];
-    const map: MultiPolygon = [rectPoly(0, 0, this.mapW, this.mapH)];
+    const map: MultiPolygon = [[this.mapRing]];
     return safeInter(mp, map);
   }
 
@@ -934,7 +1019,7 @@ export class LandBook {
     }
     const chosen = bestCross ?? bestSimple;
     if (!chosen) return null;
-    return this.weldToLand(own, chosen, box);
+    return this.weldToLand(own, roundMulti(chosen), box);
   }
 
   /** A face that contains a map corner, or is larger than the trail, is the outside of the bowtie. */

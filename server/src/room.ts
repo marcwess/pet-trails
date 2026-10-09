@@ -175,6 +175,7 @@ export class Room {
       gridH: this.sim.cfg.gridH,
       pet: conn.pet,
       tickHz: this.sim.cfg.tickHz,
+      seed: this.sim.seed,
       names,
     };
     this.send(conn, msg);

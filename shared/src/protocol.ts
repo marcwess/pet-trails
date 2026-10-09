@@ -14,6 +14,8 @@ export interface WelcomeMsg {
   gridH: number;
   pet: number;
   tickHz: number;
+  /** Room seed. The client rebuilds the same curved map outline from it. */
+  seed: number;
   names: Array<{ i: number; n: string; p: number; b: number }>;
 }
 

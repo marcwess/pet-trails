@@ -8,7 +8,9 @@ import {
   SPECIES_LABEL,
   Sim,
   applyXp,
+  mapBlob,
   randomSeed,
+  ringArea,
   integrateBody,
   lerpAngle,
   xpForLevel,
@@ -103,6 +105,7 @@ export class Game {
   private predDY = 0;
   private predPrimed = false;
   private displayName = 'You';
+  private arenaArea = ringArea(mapBlob(1, CONFIG.gridW, CONFIG.gridH));
   private readonly readPickup = (id: number, kind: number, x: number, y: number) => {
     if (this.pickupCount >= this.drawPickups.length) return;
     const slot = this.drawPickups[this.pickupCount++]!;
@@ -227,6 +230,7 @@ export class Game {
     if (!player) return;
     this.offline = sim;
     this.selfId = player.id;
+    this.applyArena(sim.seed);
     const ids: number[] = [];
     for (let id = 1; id <= sim.cfg.maxEntities; id++) if (sim.land.get(id).length > 0) ids.push(id);
     this.territory.adopt(sim.land, ids);
@@ -257,7 +261,7 @@ export class Game {
     const frame = this.hitLeft > 0 ? 0 : dt;
     for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
     const self = this.ents[this.selfId];
-    if (self) this.renderer.landPct = self.land / (CONFIG.gridW * CONFIG.gridH);
+    if (self) this.renderer.landPct = self.land / this.arenaArea;
     this.input.sample();
     const stick = this.input.stick();
     this.hud.setStick(stick.x, stick.y, stick.dx, stick.dy, stick.on && this.phase === 'playing');
@@ -385,8 +389,15 @@ export class Game {
     }
   }
 
+  private applyArena(seed: number): void {
+    const ring = mapBlob(seed >>> 0, CONFIG.gridW, CONFIG.gridH);
+    this.arenaArea = ringArea(ring);
+    this.renderer.setBoundary(ring);
+  }
+
   private onWelcome(msg: WelcomeMsg): void {
     this.selfId = msg.id;
+    if (Number.isFinite(msg.seed)) this.applyArena(msg.seed);
     for (const n of msg.names) {
       const ent = this.ents[n.i];
       if (!ent) continue;
@@ -535,7 +546,7 @@ export class Game {
         this.renderer.clearPath(ev.id);
         this.renderer.dropCoveredTrails(ev.id);
         if (ev.id === this.selfId && ev.n > 12) {
-          const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
+          const pct = (ev.n / this.arenaArea) * 100;
           const at = this.renderer.project(ev.x, 1.6, ev.y);
           this.hud.popup(at.x, at.y, `+${pct.toFixed(1)}%`, 'claim');
           this.renderer.coinBurst(ev.x, ev.y);
@@ -630,7 +641,7 @@ export class Game {
       if (ent.used && ent.alive) this.order.push(id);
     }
     this.order.sort((a, b) => this.ents[b]!.land - this.ents[a]!.land);
-    const total = CONFIG.gridW * CONFIG.gridH;
+    const total = this.arenaArea;
     const topIds: number[] = [];
     const listed = new Set<number>();
     for (const id of this.order) {
@@ -666,7 +677,7 @@ export class Game {
 
   /** HUD percent and the You leaderboard row, from the same land count. */
   private noteLand(land: number, kills: number, train = 0): void {
-    const pctNum = (land / (CONFIG.gridW * CONFIG.gridH)) * 100;
+    const pctNum = (land / this.arenaArea) * 100;
     this.shownPct = pctNum;
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     const text = `${pctNum.toFixed(1)}%`;

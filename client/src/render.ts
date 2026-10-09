@@ -1,6 +1,5 @@
-import { CONFIG, PALETTE, SPECIES } from '@pet-trails/shared';
+import { CONFIG, PALETTE, SPECIES, mapBlob } from '@pet-trails/shared';
 import {
-  BoxGeometry,
   BufferAttribute,
   BufferGeometry as BufGeo,
   CanvasTexture,
@@ -22,20 +21,19 @@ import {
   NoToneMapping,
   OctahedronGeometry,
   PerspectiveCamera,
-  PlaneGeometry,
   Quaternion,
   RepeatWrapping,
   RingGeometry,
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
+  SphereGeometry,
   TorusGeometry,
   Vector3,
   WebGLRenderer,
   type BufferGeometry,
   type Texture,
 } from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SLAB_H, buildLand } from './landmesh.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
@@ -467,6 +465,7 @@ export class Renderer {
   private lookX = 0;
   private lookZ = 0;
   private readonly fenceMeshes: Mesh[] = [];
+  private arenaBox = { minX: 0, maxX: 1, minZ: 0, maxZ: 1 };
   landPct = 0;
   private readonly landParts: Array<OwnerPart | null> = [];
   private readonly topGeo: BufGeo;
@@ -575,7 +574,7 @@ export class Renderer {
     this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
-    this.renderer.setClearColor(0x7d8b9c, 1);
+    this.renderer.setClearColor(0x62707e, 1);
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     document.body.prepend(this.renderer.domElement);
@@ -591,13 +590,14 @@ export class Renderer {
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
-    const groundGeo = new PlaneGeometry(gw, gh);
-    groundGeo.rotateX(-Math.PI / 2);
-    groundGeo.translate(gw / 2, 0, gh / 2);
-    this.ground = new Mesh(groundGeo, new MeshBasicMaterial({ map: groundPattern(), color: 0xffffff }));
+    this.ground = new Mesh(
+      new BufGeo(),
+      new MeshBasicMaterial({ map: groundPattern(), color: 0xffffff, side: DoubleSide, toneMapped: false }),
+    );
     this.ground.frustumCulled = false;
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
+    this.gridLines.visible = false;
     this.scene.add(this.gridLines);
     this.land = new Group();
     const flat = new MeshBasicMaterial({ color: 0xffffff, vertexColors: true, toneMapped: false });
@@ -616,7 +616,7 @@ export class Renderer {
     this.scene.add(this.land);
     this.riseY.fill(1);
     for (let id = 0; id <= 16; id++) this.landParts.push(null);
-    this.addFence(gw, gh);
+    this.setBoundary(mapBlob(1, territory.gridW, territory.gridH));
 
     const hero = PALETTE[0]!;
     const heroHex = (hero[0] << 16) | (hero[1] << 8) | hero[2];
@@ -665,7 +665,7 @@ export class Renderer {
     this.fxCoins = makeInstances(coinGeo, coinMat, 24);
     this.scene.add(this.fxCoins);
     this.orbs = makeInstances(new OctahedronGeometry(0.28, 0), 0x2ec8ff, PICK_CAP);
-    this.loot = makeInstances(new BoxGeometry(0.34, 0.34, 0.34), 0xff4fa3, PICK_CAP);
+    this.loot = makeInstances(new SphereGeometry(0.22, 14, 10), 0xff4fa3, PICK_CAP);
     this.scene.add(this.coins, this.orbs, this.loot);
 
     const shadowGeo = new CircleGeometry(0.46, 14);
@@ -694,7 +694,7 @@ export class Renderer {
     this.bases.renderOrder = 3;
     this.scene.add(this.bases);
 
-    this.parts = new InstancedMesh(new BoxGeometry(0.2, 0.2, 0.2), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
+    this.parts = new InstancedMesh(new SphereGeometry(0.11, 8, 6), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
     this.parts.frustumCulled = false;
     this.parts.renderOrder = 5;
@@ -1013,49 +1013,36 @@ export class Renderer {
     return out;
   }
 
-  private addFence(gw: number, gh: number): void {
-    const pad = 80;
-    const y = -0.02;
-    const pos: number[] = [];
-    const idx: number[] = [];
-    const quad = (x0: number, z0: number, x1: number, z1: number) => {
-      const b = pos.length / 3;
-      pos.push(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1);
-      idx.push(b, b + 2, b + 1, b, b + 3, b + 2);
-    };
-    quad(-pad, -pad, 0, gh + pad);
-    quad(gw, -pad, gw + pad, gh + pad);
-    quad(0, -pad, gw, 0);
-    quad(0, gh, gw, gh + pad);
-    const skirtGeo = new BufGeo();
-    skirtGeo.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
-    skirtGeo.setIndex(idx);
-    const skirt = new Mesh(skirtGeo, new MeshBasicMaterial({ color: 0x7d8b9c, toneMapped: false }));
-    skirt.frustumCulled = false;
-    this.scene.add(skirt);
-    this.fenceMeshes.push(skirt);
-
-    const lip = 0.72;
-    const height = 0.5;
-    const bars: Array<[number, number, number, number]> = [
-      [gw / 2, -lip / 2, gw + lip * 2, lip],
-      [gw / 2, gh + lip / 2, gw + lip * 2, lip],
-      [-lip / 2, gh / 2, lip, gh],
-      [gw + lip / 2, gh / 2, lip, gh],
-    ];
-    const boxes: BufferGeometry[] = [];
-    for (const [x, z, w, d] of bars) {
-      const box = new BoxGeometry(w, height, d);
-      box.translate(x, height / 2, z);
-      boxes.push(box);
+  /** Curved arena: dotted blob floor and a smooth raised lip. Outside is the clear color. */
+  setBoundary(ring: Array<[number, number]>): void {
+    const world = openWorld(ring);
+    if (world.length < 8) return;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const p of world) {
+      if (p[0] < minX) minX = p[0];
+      if (p[0] > maxX) maxX = p[0];
+      if (p[1] < minZ) minZ = p[1];
+      if (p[1] > maxZ) maxZ = p[1];
     }
-    const border = new Mesh(
-      mergeGeometries(boxes) ?? boxes[0]!,
-      new MeshBasicMaterial({ color: 0xf7f4ee, toneMapped: false }),
+    this.arenaBox = { minX, maxX, minZ, maxZ };
+    this.ground.geometry.dispose();
+    this.ground.geometry = blobFloor(world);
+    for (const mesh of this.fenceMeshes) {
+      mesh.geometry.dispose();
+      this.scene.remove(mesh);
+    }
+    this.fenceMeshes.length = 0;
+    const wall = new Mesh(
+      blobWall(world),
+      new MeshBasicMaterial({ color: 0xf7f4ee, side: DoubleSide, toneMapped: false }),
     );
-    border.frustumCulled = false;
-    this.scene.add(border);
-    this.fenceMeshes.push(border);
+    wall.frustumCulled = false;
+    wall.renderOrder = 3;
+    this.scene.add(wall);
+    this.fenceMeshes.push(wall);
   }
 
   punchClaim(): void {
@@ -1215,7 +1202,7 @@ export class Renderer {
     } else {
       this.ground.visible = true;
       this.land.visible = true;
-      this.gridLines.visible = true;
+      this.gridLines.visible = false;
       this.stage.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;
@@ -1607,17 +1594,16 @@ export class Renderer {
     const dTop = height / Math.tan(Math.max(0.12, elev - half));
     const dBot = height / Math.tan(elev + half);
     const span = Math.max(1, dTop - dBot);
-    const gw = this.territory.gridW * WORLD;
-    const gh = this.territory.gridH * WORLD;
-    const maxZ = gh - dTop + back + 0.35 * span;
-    const minZ = back - dBot - 0.35 * span;
+    const box = this.arenaBox;
+    const maxZ = box.maxZ - dTop + back + 0.35 * span;
+    const minZ = box.minZ + back - dBot - 0.35 * span;
     let cz = z;
     if (minZ < maxZ) cz = Math.min(maxZ, Math.max(minZ, z));
     const hFov = Math.atan(Math.tan(half) * Math.max(0.2, this.camera.aspect));
     const slant = height / Math.sin(Math.max(0.2, elev - half));
     const inset = slant * Math.tan(hFov) * 0.3;
     let cx = x;
-    if (inset * 2 < gw) cx = Math.min(gw - inset, Math.max(inset, x));
+    if (inset * 2 < box.maxX - box.minX) cx = Math.min(box.maxX - inset, Math.max(box.minX + inset, x));
     return { x: cx, z: cz };
   }
 
@@ -1722,6 +1708,110 @@ function flatCoin(): BufferGeometry {
   return geo;
 }
 
+function openWorld(ring: Array<[number, number]>): Array<[number, number]> {
+  const n =
+    ring.length > 1 &&
+    Math.hypot(ring[0]![0] - ring[ring.length - 1]![0], ring[0]![1] - ring[ring.length - 1]![1]) < 1e-4
+      ? ring.length - 1
+      : ring.length;
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i < n; i++) out.push([ring[i]![0] * WORLD, ring[i]![1] * WORLD]);
+  return out;
+}
+
+/** Star-shaped fan. The blob is a radius function, so the center sees every edge. */
+function blobFloor(world: Array<[number, number]>): BufGeo {
+  let cx = 0;
+  let cz = 0;
+  for (const p of world) {
+    cx += p[0];
+    cz += p[1];
+  }
+  cx /= world.length;
+  cz /= world.length;
+  const pos = new Float32Array((world.length + 1) * 3);
+  const uv = new Float32Array((world.length + 1) * 2);
+  pos[0] = cx;
+  pos[1] = 0.012;
+  pos[2] = cz;
+  uv[0] = cx / 2.2;
+  uv[1] = cz / 2.2;
+  for (let i = 0; i < world.length; i++) {
+    pos[(i + 1) * 3] = world[i]![0];
+    pos[(i + 1) * 3 + 1] = 0.012;
+    pos[(i + 1) * 3 + 2] = world[i]![1];
+    uv[(i + 1) * 2] = world[i]![0] / 2.2;
+    uv[(i + 1) * 2 + 1] = world[i]![1] / 2.2;
+  }
+  const idx = new Uint32Array(world.length * 3);
+  for (let i = 0; i < world.length; i++) {
+    idx[i * 3] = 0;
+    idx[i * 3 + 1] = i + 1;
+    idx[i * 3 + 2] = ((i + 1) % world.length) + 1;
+  }
+  const geo = new BufGeo();
+  geo.setAttribute('position', new BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new BufferAttribute(uv, 2));
+  geo.setIndex(new BufferAttribute(idx, 1));
+  return geo;
+}
+
+function blobWall(world: Array<[number, number]>): BufGeo {
+  const n = world.length;
+  const thick = 0.7;
+  const height = 0.52;
+  const outer: Array<[number, number]> = [];
+  for (let i = 0; i < n; i++) {
+    const prev = world[(i - 1 + n) % n]!;
+    const cur = world[i]!;
+    const next = world[(i + 1) % n]!;
+    const e0x = cur[0] - prev[0];
+    const e0z = cur[1] - prev[1];
+    const e1x = next[0] - cur[0];
+    const e1z = next[1] - cur[1];
+    const l0 = Math.hypot(e0x, e0z) || 1;
+    const l1 = Math.hypot(e1x, e1z) || 1;
+    let nx = e0z / l0 + e1z / l1;
+    let nz = -e0x / l0 - e1x / l1;
+    const nl = Math.hypot(nx, nz) || 1;
+    nx /= nl;
+    nz /= nl;
+    outer.push([cur[0] + nx * thick, cur[1] + nz * thick]);
+  }
+  const pos: number[] = [];
+  const idx: number[] = [];
+  const v = (x: number, y: number, z: number) => {
+    pos.push(x, y, z);
+    return pos.length / 3 - 1;
+  };
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const a = world[i]!;
+    const b = world[j]!;
+    const c = outer[i]!;
+    const d = outer[j]!;
+    const a0 = v(a[0], height, a[1]);
+    const b0 = v(b[0], height, b[1]);
+    const c0 = v(c[0], height, c[1]);
+    const d0 = v(d[0], height, d[1]);
+    idx.push(a0, b0, d0, a0, d0, c0);
+    const c1 = v(c[0], 0, c[1]);
+    const d1 = v(d[0], 0, d[1]);
+    const c2 = v(c[0], height, c[1]);
+    const d2 = v(d[0], height, d[1]);
+    idx.push(c1, d2, d1, c1, c2, d2);
+    const a1 = v(a[0], 0, a[1]);
+    const b1 = v(b[0], 0, b[1]);
+    const a2 = v(a[0], height, a[1]);
+    const b2 = v(b[0], height, b[1]);
+    idx.push(a1, b1, b2, a1, b2, a2);
+  }
+  const geo = new BufGeo();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
+  geo.setIndex(idx);
+  return geo;
+}
+
 function groundPattern(): CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
@@ -1730,17 +1820,19 @@ function groundPattern(): CanvasTexture {
   g.fillStyle = '#e7edf3';
   g.fillRect(0, 0, 128, 128);
   g.fillStyle = 'rgba(148, 166, 184, 0.55)';
-  for (let y = 8; y < 128; y += 16) {
-    for (let x = 8; x < 128; x += 16) {
+  for (let row = 0; row < 8; row++) {
+    const y = 10 + row * 14;
+    const shift = row % 2 === 0 ? 8 : 15;
+    for (let x = shift; x < 128; x += 14) {
       g.beginPath();
-      g.arc(x, y, 1.2, 0, Math.PI * 2);
+      g.arc(x, y, 1.15, 0, Math.PI * 2);
       g.fill();
     }
   }
   const tex = new CanvasTexture(canvas);
   tex.wrapS = RepeatWrapping;
   tex.wrapT = RepeatWrapping;
-  tex.repeat.set(26, 26);
+  tex.repeat.set(1, 1);
   tex.colorSpace = SRGBColorSpace;
   return tex;
 }
