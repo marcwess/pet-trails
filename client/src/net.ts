@@ -36,27 +36,38 @@ export class NetClient {
       }
       ws.binaryType = 'arraybuffer';
       let opened = false;
+      let finished = false;
+      const retry = () => {
+        if (finished || opened || this.mode !== 'connecting') return;
+        finished = true;
+        window.clearTimeout(giveUp);
+        window.setTimeout(attempt, 160);
+      };
       const giveUp = window.setTimeout(() => {
-        if (!opened) {
+        if (opened) return;
+        try {
           ws.close();
-          window.setTimeout(attempt, 180);
+        } catch {
+          /* already closed */
         }
-      }, Math.min(800, left));
+        retry();
+      }, Math.min(800, Math.max(40, left)));
       ws.onopen = () => {
         opened = true;
+        finished = true;
         window.clearTimeout(giveUp);
         this.ws = ws;
         this.setMode('online');
         this.pingTimer = window.setInterval(() => this.sendPing(), 1000);
       };
       ws.onerror = () => {
-        if (!opened) {
-          window.clearTimeout(giveUp);
-          ws.close();
-        }
+        if (!opened) retry();
       };
       ws.onclose = () => {
-        if (!opened) return;
+        if (!opened) {
+          retry();
+          return;
+        }
         window.clearInterval(this.pingTimer);
         this.ws = null;
         if (this.mode === 'online') this.setMode('offline');

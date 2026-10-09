@@ -387,7 +387,7 @@ export class Renderer {
         const roll = Math.sin(this.time * 9 + pet.id) * 0.07;
         const mesh = this.pets[pet.pet];
         if (mesh && mesh.count < PET_CAP) {
-          this.place(mesh, mesh.count, pet.x, bob, pet.z, Math.PI / 2 - pet.h, roll, pet.self ? 1.08 : 1);
+          this.place(mesh, mesh.count, pet.x, bob, pet.z, Math.PI / 2 - pet.h, roll, pet.self ? 1.18 : 1);
           mesh.count++;
         }
         if (shadowN < SHADOW_CAP) this.place(this.shadows, shadowN++, pet.x, 0.03, pet.z, 0, 0, pet.self ? 1.15 : 1);
@@ -436,8 +436,8 @@ export class Renderer {
 
       this.punch *= Math.exp(-dt * 4);
       this.shake *= Math.exp(-dt * 6);
-      const height = 25 - this.punch * 1.6;
-      const back = 16.5;
+      const height = 17.5 - this.punch * 1.2;
+      const back = 11.5;
       if (!this.camInit || snapCam) {
         this.camX = selfX;
         this.camY = height;

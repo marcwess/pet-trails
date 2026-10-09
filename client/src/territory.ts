@@ -191,9 +191,9 @@ export class Territory {
       b = c[2];
     } else {
       const alt = ((cx + cy) & 1) === 0;
-      r = alt ? 188 : 174;
-      g = alt ? 228 : 214;
-      b = alt ? 196 : 184;
+      r = alt ? 184 : 176;
+      g = alt ? 224 : 216;
+      b = alt ? 194 : 186;
     }
     const filled = owner !== 0 || trail !== 0;
     // Plane rotateX(-90) puts texture v=1 at world Z=0, and WebGL puts the last
