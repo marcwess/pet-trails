@@ -84,6 +84,9 @@ export class Game {
   private hitLeft = 0;
   private boardAcc = 0;
   private shownKills = 0;
+  /** Land percent last written to the HUD. The death sheet uses this same number. */
+  private shownPct = 0;
+  private peakPct = 0;
   private died = false;
   private readonly board: BoardRow[] = [];
   private readonly order: number[] = [];
@@ -180,6 +183,8 @@ export class Game {
   private async play(): Promise<void> {
     this.died = false;
     this.shownKills = 0;
+    this.shownPct = 0;
+    this.peakPct = 0;
     this.hud.showDeath(null);
     this.hud.setYou('0.0%', 0);
     const mode = await this.net.whenSettled();
@@ -193,6 +198,15 @@ export class Game {
       this.net.send({ t: 'hello', name: 'You', pet: this.profile.pet.species });
       this.net.send({ t: 'play' });
       this.phase = 'playing';
+    } else if (this.offline) {
+      this.offline.grid.beginTick();
+      this.offline.respawn(this.selfId);
+      this.consume(this.offline.consumeEvents(), this.offline.cellRuns());
+      this.syncOffline(this.offline, false);
+      this.phase = 'playing';
+      this.snapCam = true;
+      this.alpha = 1;
+      this.acc = 0;
     } else {
       this.startOffline();
     }
@@ -317,6 +331,10 @@ export class Game {
       if (!ent.alive && p.alive) {
         this.renderer.clearPath(p.id);
         ent.blinkUntil = performance.now() + 2000;
+        if (p.id === this.selfId) {
+          this.shownPct = 0;
+          this.peakPct = 0;
+        }
       }
       ent.alive = p.alive;
       ent.land = p.land;
@@ -324,6 +342,7 @@ export class Game {
         if (!prevAlive && p.alive) this.shownKills = p.kills;
         else if (p.kills > this.shownKills) this.shownKills = p.kills;
         ent.kills = Math.max(p.kills, this.shownKills);
+        if (this.phase === 'playing' && p.alive) this.noteLand(ent.land, ent.kills);
       } else {
         ent.kills = p.kills;
       }
@@ -433,7 +452,13 @@ export class Game {
     const alive = (snap.f & FLAG_ALIVE) !== 0;
     const prevAlive = ent.alive;
     if (ent.alive && !alive) this.renderer.clearPath(ent.id);
-    if (!ent.alive && alive) ent.blinkUntil = performance.now() + 2000;
+    if (!ent.alive && alive) {
+      ent.blinkUntil = performance.now() + 2000;
+      if (snap.i === this.selfId) {
+        this.shownPct = 0;
+        this.peakPct = 0;
+      }
+    }
     ent.alive = alive;
     ent.outside = (snap.f & FLAG_OUTSIDE) !== 0;
     ent.land = snap.l;
@@ -441,10 +466,7 @@ export class Game {
       if (!prevAlive && alive) this.shownKills = snap.k;
       else if (snap.k > this.shownKills) this.shownKills = snap.k;
       ent.kills = Math.max(snap.k, this.shownKills);
-      if (this.phase === 'playing') {
-        const pct = (ent.land / (CONFIG.gridW * CONFIG.gridH)) * 100;
-        this.hud.setYou(`${pct.toFixed(1)}%`, ent.kills);
-      }
+      if (this.phase === 'playing' && alive) this.noteLand(ent.land, ent.kills);
     } else {
       ent.kills = snap.k;
     }
@@ -494,6 +516,7 @@ export class Game {
         const ent = this.ents[ev.id];
         if (ent) ent.used = false;
       } else if (ev.e === 'kill') {
+        this.renderer.clearPath(ev.victim);
         const mine = ev.killer === this.selfId || ev.victim === this.selfId;
         this.renderer.burst(ev.x, ev.y, ev.victim, mine);
         if (mine) this.hitLeft = 0.06;
@@ -503,8 +526,7 @@ export class Game {
           if (me) {
             this.shownKills = Math.max(this.shownKills + 1, me.kills + 1);
             me.kills = this.shownKills;
-            const pct = (me.land / (CONFIG.gridW * CONFIG.gridH)) * 100;
-            this.hud.setYou(`${pct.toFixed(1)}%`, me.kills);
+            this.noteLand(me.land, me.kills);
           }
           this.hud.toast(`Caught ${victim?.name || 'a pet'}!`);
           buzz(14);
@@ -512,6 +534,7 @@ export class Game {
       } else if (ev.e === 'claim') {
         const loop = this.renderer.exportTrail(ev.id);
         if (loop.n >= 2) this.territory.offerLoop(ev.id, loop.x, loop.y, loop.n);
+        this.renderer.clearPath(ev.id);
         if (ev.id === this.selfId && ev.n > 12) {
           const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
           const at = this.renderer.project(ev.x, 1.6, ev.y);
@@ -540,8 +563,11 @@ export class Game {
     const levels = applyXp(this.profile.pet, Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
+    const pctNum = Math.max(ev.pct, this.shownPct, this.peakPct);
+    this.shownPct = pctNum;
+    this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills);
     const rows: DeathView['rows'] = [
-      { k: 'Territory', v: `${ev.pct.toFixed(1)}%` },
+      { k: 'Territory', v: `${pctNum.toFixed(1)}%` },
       { k: 'Rank', v: `#${ev.rank}` },
       { k: 'Kills', v: String(ev.kills) },
       { k: 'Train', v: String(ev.train) },
@@ -625,14 +651,29 @@ export class Game {
       row.show = true;
       row.me = ent.id === this.selfId;
       row.name = row.me ? 'You' : ent.name;
-      row.pct = `${((ent.land / total) * 100).toFixed(1)}%`;
+      row.pct = ent.id === this.selfId ? `${this.shownPct.toFixed(1)}%` : `${((ent.land / total) * 100).toFixed(1)}%`;
       row.color = cssColor(ent.id);
     }
     this.hud.setBoard(this.board);
-    if (me && me.used) {
-      const pct = (me.land / total) * 100;
-      this.hud.setYou(`${pct.toFixed(1)}%`, Math.max(me.kills, this.shownKills));
+    if (me && me.used && me.alive && this.phase === 'playing') {
+      this.noteLand(me.land, Math.max(me.kills, this.shownKills));
     }
+  }
+
+  /** HUD percent and the You leaderboard row, from the same land count. */
+  private noteLand(land: number, kills: number): void {
+    const pctNum = (land / (CONFIG.gridW * CONFIG.gridH)) * 100;
+    this.shownPct = pctNum;
+    if (pctNum > this.peakPct) this.peakPct = pctNum;
+    const text = `${pctNum.toFixed(1)}%`;
+    this.hud.setYou(text, kills);
+    let patched = false;
+    for (const row of this.board) {
+      if (!row.me || !row.show) continue;
+      row.pct = text;
+      patched = true;
+    }
+    if (patched) this.hud.setBoard(this.board);
   }
 
   private landCheck(): {

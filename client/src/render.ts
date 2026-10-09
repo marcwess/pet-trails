@@ -196,7 +196,7 @@ class Ribbon {
     });
     this.mesh = new Mesh(this.geo, mat);
     this.mesh.frustumCulled = false;
-    this.mesh.renderOrder = 2;
+    this.mesh.renderOrder = 3;
   }
 
   setColor(r: number, g: number, b: number): void {
@@ -274,10 +274,10 @@ class Ribbon {
       const o = count * 6;
       const s = count * 2;
       this.pos[o] = cx + nx * half;
-      this.pos[o + 1] = 0.09;
+      this.pos[o + 1] = 0.14;
       this.pos[o + 2] = cz + nz * half;
       this.pos[o + 3] = cx - nx * half;
-      this.pos[o + 4] = 0.09;
+      this.pos[o + 4] = 0.14;
       this.pos[o + 5] = cz - nz * half;
       this.side[s] = 1;
       this.side[s + 1] = -1;
@@ -483,12 +483,14 @@ export class Renderer {
     for (let i = 0; i < quads; i++) {
       const v = i * 4;
       const o = i * 6;
+      // (x0,z0), (x1,z0), (x0,z1), (x1,z1). This winding faces +Y so the
+      // camera above sees the front. The opposite order is culled.
       index[o] = v;
-      index[o + 1] = v + 1;
-      index[o + 2] = v + 2;
+      index[o + 1] = v + 2;
+      index[o + 2] = v + 1;
       index[o + 3] = v + 1;
-      index[o + 4] = v + 3;
-      index[o + 5] = v + 2;
+      index[o + 4] = v + 2;
+      index[o + 5] = v + 3;
     }
     this.landPos = new BufferAttribute(posArr, 3);
     this.landUv = new BufferAttribute(uvArr, 2);
@@ -552,9 +554,10 @@ export class Renderer {
     this.shadows.count = 0;
     this.scene.add(this.shadows);
 
-    this.parts = new InstancedMesh(new BoxGeometry(0.55, 0.55, 0.55), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
+    this.parts = new InstancedMesh(new BoxGeometry(0.42, 0.42, 0.42), new MeshBasicMaterial({ color: 0xffffff }), PART_CAP);
     this.parts.instanceColor = new InstancedBufferAttribute(new Float32Array(PART_CAP * 3), 3);
     this.parts.frustumCulled = false;
+    this.parts.renderOrder = 5;
     this.parts.instanceMatrix.setUsage(DynamicDrawUsage);
     this.parts.count = 0;
     this.scene.add(this.parts);
@@ -650,10 +653,11 @@ export class Renderer {
       if (this.partCount >= PART_CAP) break;
       const i = this.partCount++;
       const ang = (k / 40) * Math.PI * 2 + (k % 3) * 0.17;
-      const sp = 2.4 + (k % 5) * 0.55;
-      this.px[i] = wx;
-      this.py[i] = 0.55;
-      this.pz[i] = wz;
+      const sp = 2.6 + (k % 5) * 0.7;
+      const spread = 0.28 + (k % 6) * 0.16;
+      this.px[i] = wx + Math.cos(ang) * spread;
+      this.py[i] = 0.35 + (k % 5) * 0.16;
+      this.pz[i] = wz + Math.sin(ang) * spread;
       this.vx[i] = Math.cos(ang) * sp;
       this.vy[i] = 2.6 + (k % 4) * 0.55;
       this.vz[i] = Math.sin(ang) * sp;
@@ -691,16 +695,16 @@ export class Renderer {
       const x = (i / n) * gw;
       const z = (i / n) * gh;
       positions[o++] = x;
-      positions[o++] = 0.05;
+      positions[o++] = 0.01;
       positions[o++] = 0;
       positions[o++] = x;
-      positions[o++] = 0.05;
+      positions[o++] = 0.01;
       positions[o++] = gh;
       positions[o++] = 0;
-      positions[o++] = 0.05;
+      positions[o++] = 0.01;
       positions[o++] = z;
       positions[o++] = gw;
-      positions[o++] = 0.05;
+      positions[o++] = 0.01;
       positions[o++] = z;
     }
     const geo = new BufGeo();
@@ -728,7 +732,7 @@ export class Renderer {
     const pos = this.landPos.array as Float32Array;
     const uv = this.landUv.array as Float32Array;
     const pad = 1.65;
-    const y = 0.02;
+    const y = 0.07;
     for (let i = 0; i < n; i++) {
       const o = i * 5;
       let x0 = (this.spans[o + 1]! - pad) * WORLD;
@@ -883,6 +887,23 @@ export class Renderer {
     this.ribbons[id]?.clear();
   }
 
+  /** True when a stored trail sample now sits on someone else's land. */
+  private trailStolen(id: number, path: PathBuf): boolean {
+    const owner = this.territory.owner;
+    const w = this.territory.gridW;
+    const h = this.territory.gridH;
+    const n = Math.min(path.n, 80);
+    for (let k = 0; k < n; k++) {
+      const i = (path.head - 1 - k + PATH_N * 8) % PATH_N;
+      const cx = path.xs[i]! | 0;
+      const cy = path.zs[i]! | 0;
+      if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+      const o = owner[cy * w + cx]!;
+      if (o !== 0 && o !== id) return true;
+    }
+    return false;
+  }
+
   private readonly trailX = new Float32Array(PATH_N);
   private readonly trailY = new Float32Array(PATH_N);
 
@@ -995,19 +1016,23 @@ export class Renderer {
         const wz = pet.z * WORLD;
         const bob = Math.sin(this.time * 9 + pet.id) * 0.05;
         const roll = Math.sin(this.time * 9 + pet.id) * 0.05;
-        const blinkOff = pet.blink && ((this.time * 8) | 0) % 2 === 0;
         const mesh = this.pets[pet.pet];
-        if (mesh && mesh.count < PET_CAP && !blinkOff) {
-          this.placePet(mesh, mesh.count, wx, bob, wz, pet.h, roll, pet.self ? 1.05 : 1, 1);
+        const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
+        if (mesh && mesh.count < PET_CAP) {
+          this.placePet(mesh, mesh.count, wx, bob, wz, pet.h, roll, (pet.self ? 1.05 : 1) * shimmer, 1);
           mesh.count++;
         }
         if (shadowN < SHADOW_CAP) this.place(this.shadows, shadowN++, wx, 0.06, wz, 0, 0, pet.self ? 1.05 : 0.9);
         const path = this.paths[pet.id];
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
+        if (pet.outside && trail && this.trailStolen(pet.id, trail)) {
+          trail.clear();
+          ribbon?.clear();
+        }
         if (pet.outside) {
           trail?.push(pet.x, pet.z, pet.h, 0.12);
-          if (ribbon && trail && trail.n >= 1) {
+          if (ribbon && trail && trail.n >= 1 && !this.trailStolen(pet.id, trail)) {
             const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
             ribbon.setColor(
               (col[0] + (255 - col[0]) * 0.38) / 255,
@@ -1064,8 +1089,10 @@ export class Renderer {
           this.holdX = pet.x;
           this.holdZ = pet.z;
           this.holdH = pet.h;
-          this.ring.visible = !blinkOff;
-          this.ring.position.set(wx, 0.03, wz);
+          this.ring.visible = true;
+          this.ring.position.set(wx, 0.04, wz);
+          const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
+          this.ring.scale.set(ringScale, 1, ringScale);
           const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
           (this.ring.material as MeshBasicMaterial).color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
           const screen = this.project(pet.x, 0.7, pet.z);
@@ -1269,7 +1296,7 @@ export class Renderer {
       this.pr[w] = nr;
       this.pg[w] = ng;
       this.pb[w] = nb;
-      this.place(this.parts, w, nx, ny, nz, life * 8, life * 4, 1.25 + life * 2.7);
+      this.place(this.parts, w, nx, ny, nz, life * 9 + i, life * 5, 0.95 + life * 1.15);
       this.parts.instanceColor?.setXYZ(w, nr, ng, nb);
       w++;
     }

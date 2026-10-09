@@ -852,8 +852,13 @@ export class Territory {
     return count;
   }
 
+  /**
+   * Solid fill plus a darker rim from the smoothed signed distance.
+   * Alpha is 0 or 255 so the alpha test cannot punch a dotted edge.
+   * There is no offset shadow: that stamp stair-stepped and slid with the camera.
+   */
   private commitRaster(owner: number): void {
-    const rim = 0.22;
+    const rim = 0.2;
     for (let k = 0; k < this.touchN; k++) {
       const idx = this.touch[k]!;
       if (this.sdStamp[idx] !== this.sid) continue;
@@ -865,58 +870,27 @@ export class Territory {
       const cy = Math.floor(sim.y);
       const cell = this.shownOwner(cx, cy);
       if (cell > 0 && cell !== owner) continue;
-      const rgb = this.rgb(owner, cx, cy);
-      const fill = cell === owner ? rgb.fade : signed > 0 ? 1 : 0;
-      let shade = 1;
-      if (signed > 0.015 && signed < rim) {
-        const t = 1 - signed / rim;
-        shade = 1 - 0.42 * t;
-      }
-      let coverage = 0;
-      if (signed >= 0.08) coverage = fill;
-      else if (signed > -0.1) coverage = fill * Math.max(0, (signed + 0.1) / 0.18);
-      const a = Math.round(Math.max(0, Math.min(1, coverage)) * 255);
       const p = idx * 4;
+      if (signed < 0.02) {
+        if (cell !== owner) {
+          this.data[p] = 0;
+          this.data[p + 1] = 0;
+          this.data[p + 2] = 0;
+          this.data[p + 3] = 0;
+          this.markSpan(ty, tx, tx);
+        }
+        continue;
+      }
+      const rgb = this.rgb(owner, cx, cy);
+      const shade = signed < rim ? 0.68 : 1;
+      const fade = cell === owner ? rgb.fade : 1;
+      const a = fade > 0.5 ? 255 : 0;
       this.data[p] = a ? Math.round(rgb.r * shade) : 0;
       this.data[p + 1] = a ? Math.round(rgb.g * shade) : 0;
       this.data[p + 2] = a ? Math.round(rgb.b * shade) : 0;
       this.data[p + 3] = a;
       this.markSpan(ty, tx, tx);
     }
-    this.bakeShadow();
-  }
-
-  /** One texel outside the fill, toward +x / +texture-y, mixed onto the mint ground. */
-  private bakeShadow(): void {
-    const n = this.touchN;
-    for (let k = 0; k < n; k++) {
-      const idx = this.touch[k]!;
-      if (!this.isFill(idx)) continue;
-      const tx = (idx % this.texW) + 1;
-      const ty = ((idx / this.texW) | 0) + 1;
-      if (tx < 0 || ty < 0 || tx >= this.texW || ty >= this.texH) continue;
-      const sidx = ty * this.texW + tx;
-      if (this.data[sidx * 4 + 3]! > 28) continue;
-      const sim = this.simOf(tx, ty);
-      const cell = this.shownOwner(Math.floor(sim.x), Math.floor(sim.y));
-      if (cell > 0) continue;
-      const p = sidx * 4;
-      const strength = 0.58;
-      this.data[p] = Math.round(140 * (1 - strength) + 18 * strength);
-      this.data[p + 1] = Math.round(214 * (1 - strength) + 42 * strength);
-      this.data[p + 2] = Math.round(182 * (1 - strength) + 36 * strength);
-      this.data[p + 3] = 230;
-      this.markSpan(ty, tx, tx);
-      if (this.sdStamp[sidx] !== this.sid && this.touchN < this.touch.length) {
-        this.touch[this.touchN++] = sidx;
-        this.sdStamp[sidx] = this.sid;
-        this.sd[sidx] = -0.3;
-      }
-    }
-  }
-
-  private isFill(idx: number): boolean {
-    return this.data[idx * 4 + 3]! > 190;
   }
 
   /** Buffer texel to continuous cell position. Linear and matches paintCell. */

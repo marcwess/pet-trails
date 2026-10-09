@@ -86,16 +86,19 @@ export class Room {
         return;
       }
       conn.id = p.id;
-    } else {
-      const existing = this.sim.players[conn.id];
-      if (existing) existing.pet = pet;
-      this.sim.respawn(conn.id);
+      // First look at the room. The client has no grid yet.
+      this.sendWelcome(conn);
+      this.sendGrid(conn);
+      this.sendDelta(conn, this.sim.consumeEvents(), []);
+      return;
     }
-    // Spawn painted the grid outside the tick. Ship the whole map once;
-    // later ticks only send cells that change after the next beginTick.
+    const existing = this.sim.players[conn.id];
+    if (existing) existing.pet = pet;
+    // The client already has the map. Send only the cleared land and the new square.
+    this.sim.grid.beginTick();
+    this.sim.respawn(conn.id);
     this.sendWelcome(conn);
-    this.sendGrid(conn);
-    this.sendDelta(conn, this.sim.consumeEvents(), []);
+    this.sendDelta(conn, this.sim.consumeEvents(), this.sim.cellRuns());
   }
 
   private drop(conn: Conn): void {

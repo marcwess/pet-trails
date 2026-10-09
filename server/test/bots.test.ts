@@ -48,6 +48,14 @@ test('websocket join receives a welcome, the grid, and deltas', async () => {
     assert.ok(delta, 'missing delta');
     ws.send(JSON.stringify({ t: 'input', seq: 1, x: 1, y: 0 }));
     srv.room.step();
+    const gridsBefore = messages.filter((m) => Buffer.isBuffer(m) && m[0] === 1).length;
+    ws.send(JSON.stringify({ t: 'play' }));
+    await new Promise((r) => setTimeout(r, 30));
+    const gridsAfter = messages.filter((m) => Buffer.isBuffer(m) && m[0] === 1).length;
+    assert.equal(gridsAfter, gridsBefore, 'respawn must not resend the whole grid');
+    const deltas = messages.filter((m) => typeof m === 'string' && m.includes('"delta"')) as string[];
+    const last = JSON.parse(deltas[deltas.length - 1]!) as { cells?: number[] };
+    assert.ok(last.cells && last.cells.length > 0, 'respawn delta should carry the cleared and new cells');
     ws.close();
   } finally {
     await srv.close();

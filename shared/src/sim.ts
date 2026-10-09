@@ -326,125 +326,59 @@ export class Sim {
     return null;
   }
 
-  private botsNear(x: number, y: number, range: number): number {
-    let n = 0;
-    for (const o of this.roster) {
-      if (!o.active || !o.alive || !o.bot) continue;
-      if (Math.hypot(o.x - x, o.y - y) <= range) n++;
-    }
-    return n;
-  }
-
+  /**
+   * Pick a spawn square that keeps a gap from existing land and from every
+   * living head. The last resort still refuses to overlap land.
+   */
   private findSpawn(bot: boolean): { x: number; y: number } {
     const size = this.cfg.spawnSize;
     const { gridW: w, gridH: h } = this.cfg;
-    const margin = 26;
-    const cx0 = w / 2;
-    const cy0 = h / 2;
-    const human = this.livingAnchor(true);
-
-    if (!bot) {
-      const x = Math.round(cx0 - size / 2);
-      const y = Math.round(cy0 - size / 2);
-      const px = x + size / 2;
-      const py = y + size / 2;
-      if (
-        x >= margin &&
-        y >= margin &&
-        x + size < w - margin &&
-        y + size < h - margin &&
-        this.areaClear(x, y, size) &&
-        this.nearestLiving(px, py) >= 30
-      ) {
-        return { x, y };
-      }
-      for (let attempt = 0; attempt < 36; attempt++) {
-        const ang = this.rng() * Math.PI * 2;
-        const dist = 22 + this.rng() * 20;
-        const sx = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
-        const sy = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
-        if (sx < margin || sy < margin || sx + size >= w - margin || sy + size >= h - margin) continue;
-        if (!this.areaClear(sx, sy, size)) continue;
-        const gap = this.nearestLiving(sx + size / 2, sy + size / 2);
-        if (gap < 28 || gap > 58) continue;
-        return { x: sx, y: sy };
-      }
-      for (let attempt = 0; attempt < 24; attempt++) {
-        const ang = this.rng() * Math.PI * 2;
-        const dist = 30 + this.rng() * 36;
-        const sx = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
-        const sy = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
-        if (sx < margin || sy < margin || sx + size >= w - margin || sy + size >= h - margin) continue;
-        if (!this.areaClear(sx, sy, size)) continue;
-        if (this.nearestLiving(sx + size / 2, sy + size / 2) < 28) continue;
-        return { x: sx, y: sy };
-      }
+    const margin = Math.min(8, Math.max(1, Math.floor((Math.min(w, h) - size) / 4)));
+    const anchor = this.livingAnchor(true) ?? this.livingAnchor(false) ?? { x: w / 2, y: h / 2 };
+    const want = bot ? 50 : 0;
+    for (const gap of [14, 8, 4, 1]) {
+      const spot = this.bestSpawn(size, margin, gap, anchor.x, anchor.y, want, size + gap);
+      if (spot) return spot;
     }
+    const spot = this.bestSpawn(size, margin, 0, anchor.x, anchor.y, want, 1);
+    if (spot) return spot;
+    return { x: margin, y: margin };
+  }
 
-    const minCenter = size + 14;
-    if (bot && !human && this.botsNear(cx0, cy0, 90) < 4) {
-      const slot = this.botsNear(cx0, cy0, 90);
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const ang = (slot / 4) * Math.PI * 2 + 0.4 + attempt * 0.45;
-        const dist = 48 + attempt * 6;
-        const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
-        const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
-        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
-        if (!this.areaClear(x, y, size)) continue;
-        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
-        return { x, y };
-      }
-    }
-
-    const anchor = bot ? human : this.livingAnchor(false);
-    const wantNear = bot ? !!human && this.botsNear(human!.x, human!.y, 70) < 5 : !!anchor;
-    if (wantNear && anchor) {
-      for (let attempt = 0; attempt < 40; attempt++) {
-        const ang = this.rng() * Math.PI * 2;
-        const dist = 36 + this.rng() * 18;
-        const x = Math.round(anchor.x + Math.cos(ang) * dist - size / 2);
-        const y = Math.round(anchor.y + Math.sin(ang) * dist - size / 2);
-        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
-        if (!this.areaClear(x, y, size)) continue;
-        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
-        return { x, y };
-      }
-    }
-
-    if (bot && !human) {
-      for (let attempt = 0; attempt < 28; attempt++) {
-        const ang = this.rng() * Math.PI * 2;
-        const dist = 62 + this.rng() * 28;
-        const x = Math.round(cx0 + Math.cos(ang) * dist - size / 2);
-        const y = Math.round(cy0 + Math.sin(ang) * dist - size / 2);
-        if (x < margin || y < margin || x + size >= w - margin || y + size >= h - margin) continue;
-        if (!this.areaClear(x, y, size)) continue;
-        if (this.nearestLiving(x + size / 2, y + size / 2) < minCenter) continue;
-        return { x, y };
-      }
-    }
-
-    const span = Math.max(1, w - size - margin * 2);
-    for (let attempt = 0; attempt < 48; attempt++) {
-      const x = margin + rngInt(this.rng, span);
-      const y = margin + rngInt(this.rng, Math.max(1, h - size - margin * 2));
-      if (!this.areaClear(x, y, size)) continue;
-      const px = x + size / 2;
-      const py = y + size / 2;
-      let crowded = false;
-      for (const o of this.roster) {
-        if (!o.active || !o.alive) continue;
-        if (Math.hypot(o.x - px, o.y - py) < (bot ? size + 14 : 28)) {
-          crowded = true;
-          break;
+  private bestSpawn(
+    size: number,
+    margin: number,
+    gap: number,
+    ax: number,
+    ay: number,
+    wantDist: number,
+    headMin: number,
+  ): { x: number; y: number } | null {
+    const { gridW: w, gridH: h } = this.cfg;
+    const step = Math.max(4, Math.floor(size / 3));
+    let bestX = 0;
+    let bestY = 0;
+    let bestScore = -Infinity;
+    let found = 0;
+    for (let y = margin; y + size < h - margin; y += step) {
+      for (let x = margin; x + size < w - margin; x += step) {
+        if (!this.areaClear(x - gap, y - gap, size + gap * 2)) continue;
+        const px = x + size / 2;
+        const py = y + size / 2;
+        const head = this.nearestLiving(px, py);
+        if (head < headMin) continue;
+        const dist = Math.hypot(px - ax, py - ay);
+        const score = head * 0.2 - Math.abs(dist - wantDist) + this.rng() * 6;
+        found++;
+        if (score > bestScore) {
+          bestScore = score;
+          bestX = x;
+          bestY = y;
         }
       }
-      if (!crowded) return { x, y };
     }
-    return {
-      x: margin + rngInt(this.rng, span),
-      y: margin + rngInt(this.rng, Math.max(1, h - size - margin * 2)),
-    };
+    if (found === 0) return null;
+    return { x: bestX, y: bestY };
   }
 
   private nearestLiving(x: number, y: number): number {
@@ -458,10 +392,13 @@ export class Sim {
   }
 
   private areaClear(x0: number, y0: number, size: number): boolean {
+    const xa = Math.max(0, x0);
+    const ya = Math.max(0, y0);
     const x1 = Math.min(this.grid.w, x0 + size);
     const y1 = Math.min(this.grid.h, y0 + size);
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
+    if (x1 <= xa || y1 <= ya) return false;
+    for (let y = ya; y < y1; y++) {
+      for (let x = xa; x < x1; x++) {
         const i = this.grid.idx(x, y);
         if (this.grid.owner[i] !== 0 || this.grid.trail[i] !== 0) return false;
       }
