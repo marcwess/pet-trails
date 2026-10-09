@@ -263,6 +263,31 @@ test('a live-rate figure-eight claims both lobes and meets the spawn', () => {
   assert.ok(high > 3, `upper lobe samples ${high}`);
   assert.equal(sim.ownerAt(cx + r + 0.55, cy), p.id, 'seam between spawn and the new land');
   assert.equal(sim.ownerAt(8, 8), 0, 'open map stays unclaimed');
+  const owned = sim.land.get(p.id);
+  assert.equal(owned.length, 1, `lobes stayed split (${owned.length})`);
+  let sharp = 0;
+  let worst = 0;
+  for (const poly of owned) {
+    for (const ring of poly) {
+      const n = ring.length > 1 ? ring.length - 1 : ring.length;
+      for (let i = 0; i < n; i++) {
+        const prev = ring[(i - 1 + n) % n]!;
+        const cur = ring[i]!;
+        const next = ring[(i + 1) % n]!;
+        const ax = cur[0] - prev[0];
+        const ay = cur[1] - prev[1];
+        const bx = next[0] - cur[0];
+        const by = next[1] - cur[1];
+        const al = Math.hypot(ax, ay);
+        const bl = Math.hypot(bx, by);
+        if (al < 1e-4 || bl < 1e-4) continue;
+        const turn = Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / (al * bl))));
+        if (turn > worst) worst = turn;
+        if (turn > 0.7) sharp++;
+      }
+    }
+  }
+  assert.equal(sharp, 0, `${sharp} corners, worst ${(worst * 180) / Math.PI} deg`);
   assert.ok(sim.auditLand());
 });
 

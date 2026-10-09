@@ -72,3 +72,22 @@ test('a fresh spawn is a circle inside the blob', () => {
   }
   assert.ok(maxTurn < 0.45, `spawn corner ${maxTurn.toFixed(2)} rad`);
 });
+
+test('a claim that covers the square map is clipped to the blob', () => {
+  const sim = new Sim({ gridW: 200, gridH: 200, targetPopulation: 0, pickupTarget: 0 }, 9);
+  const p = sim.addHuman('Ada', 0);
+  assert.ok(p);
+  sim.debugClear(p.id);
+  sim.debugGiveRect(p.id, 0, 0, 200, 200);
+  assert.equal(sim.land.contains(p.id, 0.4, 0.4), false);
+  assert.equal(sim.land.contains(p.id, 199.6, 0.4), false);
+  assert.equal(sim.land.contains(p.id, 100, 100), true);
+  for (const poly of sim.land.get(p.id)) {
+    for (const ring of poly) {
+      for (const pt of ring) {
+        assert.equal(sim.land.insideMap(pt[0], pt[1]), true, `vertex ${pt[0]},${pt[1]} is outside the blob`);
+      }
+    }
+  }
+  assert.ok(sim.land.areaOf(p.id) < sim.land.mapArea + 0.5);
+});

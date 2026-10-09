@@ -9,6 +9,10 @@ const SCALE = 16;
 const MIN_AREA = 0.75;
 const SIMPLIFY = 0.1;
 const MAX_RING = 240;
+/** Turning angle that still reads as a corner, about 35 degrees. */
+const SHARP = 0.61;
+/** Separate lobes closer than this get a round bridge so a self-cross cannot leave a gap. */
+const BRIDGE_GAP = 1.6;
 
 export type { MultiPolygon, Pair, Polygon, Ring };
 
@@ -128,7 +132,7 @@ function dropCollinear(ring: Ring): Ring | null {
 /** Remove vertices where the path reverses on itself (boolean spikes). */
 function despike(ring: Ring): Ring | null {
   let cur = ring;
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < 8; pass++) {
     const n = cur.length - 1;
     if (n < 4) break;
     const kept: Pair[] = [];
@@ -234,8 +238,11 @@ function sanitize(mp: MultiPolygon, eps = SIMPLIFY): MultiPolygon {
         tol *= 1.6;
         ring = simplifyRing(ring, tol) ?? ring;
       }
+      // Simplifying a thin finger drops the sides and leaves a needle tip.
+      ring = despike(ring) ?? ring;
+      ring = dropCollinear(ring) ?? ring;
       const area = Math.abs(signedArea(ring));
-      if (area < MIN_AREA) continue;
+      if (area < MIN_AREA || slender(ring)) continue;
       rings.push(orient(ring, r === 0));
     }
     if (rings.length > 0 && Math.abs(signedArea(rings[0]!)) >= MIN_AREA) out.push(rings);
@@ -293,7 +300,8 @@ function roundCorners(ring: Ring): Ring {
     const bl = Math.hypot(bx, by);
     const dot = al > 1e-5 && bl > 1e-5 ? (ax * bx + ay * by) / (al * bl) : 1;
     const turn = Math.acos(Math.max(-1, Math.min(1, dot)));
-    if (turn < 0.55 || al < 0.9 || bl < 0.9) {
+    // ~35 degrees. Gentler bends are already the curve the pet drove.
+    if (turn < SHARP || al < 0.2 || bl < 0.2) {
       out.push([cur[0], cur[1]]);
       continue;
     }
@@ -327,6 +335,279 @@ function roundMulti(mp: MultiPolygon): MultiPolygon {
     if (rings.length > 0) out.push(rings);
   }
   return out.length > 0 ? out : mp;
+}
+
+function ringCount(ring: Ring): number {
+  return ring.length > 1 && samePt(ring[0]!, ring[ring.length - 1]!) ? ring.length - 1 : ring.length;
+}
+
+function turnOf(ring: Ring, i: number, n: number): number {
+  const prev = ring[(i - 1 + n) % n]!;
+  const cur = ring[i]!;
+  const next = ring[(i + 1) % n]!;
+  const ax = cur[0] - prev[0];
+  const ay = cur[1] - prev[1];
+  const bx = next[0] - cur[0];
+  const by = next[1] - cur[1];
+  const al = Math.hypot(ax, ay);
+  const bl = Math.hypot(bx, by);
+  if (al < 1e-5 || bl < 1e-5) return 0;
+  const dot = (ax * bx + ay * by) / (al * bl);
+  return Math.acos(Math.max(-1, Math.min(1, dot)));
+}
+
+function countSharp(ring: Ring): number {
+  const n = ringCount(ring);
+  let c = 0;
+  for (let i = 0; i < n; i++) if (turnOf(ring, i, n) >= SHARP) c++;
+  return c;
+}
+
+/** Corner-cutting. One pass replaces each edge with a quarter and three-quarter point. */
+function chaikinRing(ring: Ring): Ring {
+  const n = ringCount(ring);
+  if (n < 4) return ring;
+  const out: Pair[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = ring[i]!;
+    const b = ring[(i + 1) % n]!;
+    out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+    out.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+  }
+  return closeRing(out) ?? ring;
+}
+
+/**
+ * Chaikin only when the ring is jagged (a sawtooth has many corners; a circle has none).
+ * Then fillet whatever corners remain.
+ */
+function smoothRing(ring: Ring): Ring {
+  let cur = despike(ring) ?? ring;
+  if (countSharp(cur) >= 3) {
+    cur = chaikinRing(cur);
+    if (countSharp(cur) >= 3) cur = chaikinRing(cur);
+    cur = simplifyRing(cur, 0.16) ?? cur;
+  }
+  if (countSharp(cur) > 0) cur = roundCorners(cur);
+  return cur;
+}
+
+/** A short edge with a hard turn is a notch left by clipping. Drop that vertex. */
+function collapseShort(ring: Ring, minLen: number): Ring {
+  let cur = ring;
+  for (let pass = 0; pass < 6; pass++) {
+    const n = ringCount(cur);
+    if (n < 4) break;
+    const kept: Pair[] = [];
+    let removed = false;
+    for (let i = 0; i < n; i++) {
+      const prev = cur[(i - 1 + n) % n]!;
+      const p = cur[i]!;
+      const next = cur[(i + 1) % n]!;
+      const la = Math.hypot(p[0] - prev[0], p[1] - prev[1]);
+      const lb = Math.hypot(next[0] - p[0], next[1] - p[1]);
+      if ((la < minLen || lb < minLen) && turnOf(cur, i, n) >= SHARP) {
+        removed = true;
+        continue;
+      }
+      kept.push([p[0], p[1]]);
+    }
+    const next = closeRing(kept);
+    if (!next) return cur;
+    cur = next;
+    if (!removed) break;
+  }
+  return cur;
+}
+
+function filletMulti(mp: MultiPolygon): MultiPolygon {
+  const out: MultiPolygon = [];
+  for (const poly of mp) {
+    const rings: Ring[] = [];
+    for (let r = 0; r < poly.length; r++) {
+      let ring = collapseShort(poly[r]!, 0.5);
+      if (countSharp(ring) > 0) ring = roundCorners(ring);
+      ring = collapseShort(despike(ring) ?? ring, 0.5);
+      if (countSharp(ring) > 0) ring = roundCorners(ring);
+      if (Math.abs(signedArea(ring)) < MIN_AREA || slender(ring)) continue;
+      rings.push(orient(ring, rings.length === 0));
+    }
+    if (rings.length > 0 && Math.abs(signedArea(rings[0]!)) >= MIN_AREA) out.push(rings);
+  }
+  return out.length > 0 ? out : mp;
+}
+
+function smoothMulti(mp: MultiPolygon): MultiPolygon {
+  const out: MultiPolygon = [];
+  for (const poly of mp) {
+    const rings: Ring[] = [];
+    for (let r = 0; r < poly.length; r++) {
+      const ring = smoothRing(poly[r]!);
+      if (ring.length >= 4) rings.push(orient(ring, r === 0));
+    }
+    if (rings.length > 0 && Math.abs(signedArea(rings[0]!)) >= MIN_AREA) out.push(rings);
+  }
+  return out.length > 0 ? out : mp;
+}
+
+/** Mean width of a long shape is about twice its narrow side. */
+function slender(ring: Ring): boolean {
+  const area = Math.abs(signedArea(ring));
+  if (area >= 80) return false;
+  const n = ringCount(ring);
+  let per = 0;
+  for (let i = 0; i < n; i++) {
+    const a = ring[i]!;
+    const b = ring[(i + 1) % n]!;
+    per += Math.hypot(b[0] - a[0], b[1] - a[1]);
+  }
+  if (per < 1e-3) return true;
+  return (4 * area) / per < 0.95;
+}
+
+function dropSlivers(mp: MultiPolygon): MultiPolygon {
+  const out: MultiPolygon = [];
+  for (const poly of mp) {
+    const rings: Ring[] = [];
+    for (const ring of poly) {
+      const closed = closeRing(ring.slice(0, ringCount(ring))) ?? ring;
+      if (Math.abs(signedArea(closed)) < MIN_AREA) continue;
+      if (slender(closed)) continue;
+      rings.push(closed);
+    }
+    if (rings.length > 0 && Math.abs(signedArea(rings[0]!)) >= MIN_AREA) out.push(rings);
+  }
+  return out;
+}
+
+/** Negative then positive buffer. Drops needles; keeps the shape when the offset folds. */
+function morphOpen(mp: MultiPolygon, r: number): MultiPolygon {
+  if (mp.length === 0 || r <= 0) return mp;
+  const before = multiArea(mp);
+  if (before < 2) return mp;
+  const inner = offsetMulti(mp, -r);
+  if (multiArea(inner) < before * 0.25) return mp;
+  const grown = offsetMulti(inner, r);
+  const opened = safeInter(mp, grown);
+  const after = multiArea(opened);
+  if (after < before * 0.72 || after < 0.5) return mp;
+  return opened;
+}
+
+function ringBounds(ring: Ring): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const n = ringCount(ring);
+  for (let i = 0; i < n; i++) {
+    const p = ring[i]!;
+    if (p[0] < minX) minX = p[0];
+    if (p[1] < minY) minY = p[1];
+    if (p[0] > maxX) maxX = p[0];
+    if (p[1] > maxY) maxY = p[1];
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function segClosest(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  dx: number,
+  dy: number,
+): { ax: number; ay: number; bx: number; by: number; dist: number } {
+  const ux = bx - ax;
+  const uy = by - ay;
+  const vx = dx - cx;
+  const vy = dy - cy;
+  const wx = ax - cx;
+  const wy = ay - cy;
+  const uu = ux * ux + uy * uy;
+  const vv = vx * vx + vy * vy;
+  const uv = ux * vx + uy * vy;
+  const uw = ux * wx + uy * wy;
+  const vw = vx * wx + vy * wy;
+  const den = uu * vv - uv * uv;
+  let s = 0;
+  let t = 0;
+  if (den > 1e-8) {
+    s = Math.max(0, Math.min(1, (uv * vw - vv * uw) / den));
+    t = Math.max(0, Math.min(1, (uu * vw - uv * uw) / den));
+  } else if (uu > 1e-8) {
+    s = Math.max(0, Math.min(1, -uw / uu));
+  }
+  const px = ax + ux * s;
+  const py = ay + uy * s;
+  const qx = cx + vx * t;
+  const qy = cy + vy * t;
+  return { ax: px, ay: py, bx: qx, by: qy, dist: Math.hypot(px - qx, py - qy) };
+}
+
+function nearestRings(a: Ring, b: Ring): { ax: number; ay: number; bx: number; by: number; dist: number } | null {
+  const na = ringCount(a);
+  const nb = ringCount(b);
+  if (na < 2 || nb < 2) return null;
+  let best: { ax: number; ay: number; bx: number; by: number; dist: number } | null = null;
+  for (let i = 0; i < na; i++) {
+    const a0 = a[i]!;
+    const a1 = a[(i + 1) % na]!;
+    for (let j = 0; j < nb; j++) {
+      const b0 = b[j]!;
+      const b1 = b[(j + 1) % nb]!;
+      const hit = segClosest(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1], b1[0], b1[1]);
+      if (!best || hit.dist < best.dist) best = hit;
+      if (best && best.dist < 0.02) return best;
+    }
+  }
+  return best;
+}
+
+function capsule(x0: number, y0: number, x1: number, y1: number, r: number): Polygon | null {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  const ux = len > 1e-4 ? dx / len : 1;
+  const uy = len > 1e-4 ? dy / len : 0;
+  const px = -uy * r;
+  const py = ux * r;
+  const ex = ux * r;
+  const ey = uy * r;
+  const ring = closeRing([
+    [x0 - ex + px, y0 - ey + py],
+    [x1 + ex + px, y1 + ey + py],
+    [x1 + ex - px, y1 + ey - py],
+    [x0 - ex - px, y0 - ey - py],
+  ]);
+  return ring ? [ring] : null;
+}
+
+/** Weld separate components that only meet at a vertex or leave a hairline of background. */
+function closeGaps(mp: MultiPolygon, gap: number): MultiPolygon {
+  if (mp.length < 2) return mp;
+  let acc = mp;
+  for (let i = 0; i < mp.length; i++) {
+    const a = mp[i]![0];
+    if (!a) continue;
+    const ba = ringBounds(a);
+    for (let j = i + 1; j < mp.length; j++) {
+      const b = mp[j]![0];
+      if (!b) continue;
+      const bb = ringBounds(b);
+      const dx = Math.max(0, ba.minX - bb.maxX, bb.minX - ba.maxX);
+      const dy = Math.max(0, ba.minY - bb.maxY, bb.minY - ba.maxY);
+      if (Math.hypot(dx, dy) > gap) continue;
+      const hit = nearestRings(a, b);
+      if (!hit || hit.dist > gap) continue;
+      const poly = capsule(hit.ax, hit.ay, hit.bx, hit.by, 0.72);
+      if (!poly) continue;
+      acc = safeUnion(acc, [poly]);
+    }
+  }
+  return acc.length > 0 ? acc : mp;
 }
 
 interface Snap {
@@ -791,8 +1072,9 @@ export class LandBook {
   /** Union one polygon (a circle, a fillet, a debug shape) into this owner's land. */
   unionPolygon(id: number, poly: Polygon): void {
     if (id < 1 || id > this.maxId || poly.length === 0 || poly[0]!.length < 4) return;
+    // Never keep the unclipped polygon. A shape that misses the blob contributes nothing.
     const next = sanitize(this.clip(safeUnion(this.multi[id]!, [poly])), 0.02);
-    this.multi[id] = next.length > 0 ? next : [poly];
+    this.multi[id] = next;
     this.recompute(id);
     this.dirty.add(id);
   }
@@ -822,7 +1104,7 @@ export class LandBook {
     if (this.pendingId !== id || !this.pending) return 0;
     const before = this.area[id] ?? 0;
     const loop = this.pending;
-    const next = sanitize(this.clip(safeUnion(this.multi[id]!, loop)));
+    const next = this.finish(safeUnion(this.multi[id]!, loop), true);
     this.multi[id] = next.length > 0 ? next : this.multi[id]!;
     this.recompute(id);
     const box = boundsOf(loop);
@@ -830,9 +1112,9 @@ export class LandBook {
       if (o === id || this.multi[o]!.length === 0) continue;
       if (box && !boxesOverlap(box, boundsOf(this.multi[o]!), 0.5)) continue;
       const prev = this.area[o] ?? 0;
-      const diff = sanitize(this.clip(safeDiff(this.multi[o]!, loop)));
-      const nextArea = multiArea(diff);
-      if (Math.abs(nextArea - prev) < 0.05) continue;
+      const raw = this.clip(safeDiff(this.multi[o]!, loop));
+      if (Math.abs(multiArea(raw) - prev) < 0.05) continue;
+      const diff = this.finish(raw, false);
       this.multi[o] = diff;
       this.recompute(o);
     }
@@ -934,6 +1216,31 @@ export class LandBook {
     if (mp.length === 0) return [];
     const map: MultiPolygon = [[this.mapRing]];
     return safeInter(mp, map);
+  }
+
+  /**
+   * Shared by the server and the offline sim. Clip to the blob, drop needles,
+   * smooth sawteeth, and clip again so a fillet cannot leave the map.
+   * `bridge` welds a self-cross onto itself. Victims of a steal skip that,
+   * or the stolen corridor would be filled back in.
+   */
+  private finish(mp: MultiPolygon, bridge: boolean): MultiPolygon {
+    const clipped = this.clip(mp);
+    if (clipped.length === 0) return [];
+    let cur = clipped;
+    if (bridge && cur.length > 1) {
+      const joined = this.clip(closeGaps(cur, BRIDGE_GAP));
+      if (joined.length > 0) cur = joined;
+    }
+    const opened = morphOpen(dropSlivers(cur), 0.36);
+    const base = opened.length > 0 ? opened : cur;
+    let smoothed = this.clip(smoothMulti(base));
+    if (smoothed.length === 0) smoothed = this.clip(base);
+    // Fillet after simplify, then again after the clip that can add a notch on the blob.
+    const shaped = filletMulti(sanitize(smoothed, 0.14));
+    const bounded = this.clip(shaped);
+    const out = this.clip(filletMulti(bounded.length > 0 ? bounded : shaped));
+    return out.length > 0 ? out : sanitize(clipped, 0.12);
   }
 
   private recompute(id: number): void {

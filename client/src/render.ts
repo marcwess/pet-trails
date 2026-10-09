@@ -8,10 +8,13 @@ import {
   DirectionalLight,
   DoubleSide,
   DynamicDrawUsage,
+  FrontSide,
   Group,
   HemisphereLight,
   InstancedBufferAttribute,
   InstancedMesh,
+  LinearFilter,
+  LinearMipmapLinearFilter,
   LineBasicMaterial,
   LineSegments,
   Matrix4,
@@ -34,6 +37,7 @@ import {
   type BufferGeometry,
   type Texture,
 } from 'three';
+import { gfx } from './gfx.js';
 import { SLAB_H, buildLand } from './landmesh.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
@@ -249,7 +253,7 @@ class RibbonBatch {
       this.colAttr.needsUpdate = true;
     }
     this.geo.setDrawRange(0, n);
-    this.mesh.visible = any;
+    this.mesh.visible = any && gfx.over;
   }
 }
 
@@ -260,6 +264,7 @@ class Ribbon {
   private cb = 1;
   private readonly sx = new Float32Array(PATH_N + 2);
   private readonly sz = new Float32Array(PATH_N + 2);
+  private readonly keep = new Uint8Array(PATH_N + 2);
 
   constructor(
     private readonly slot: number,
@@ -322,6 +327,7 @@ class Ribbon {
         this.sz[n - 1] = headZ;
       }
     }
+    n = decimateRibbon(this.sx, this.sz, this.keep, n, 0.32);
     if (n < 2) {
       this.clear();
       return;
@@ -563,7 +569,7 @@ export class Renderer {
   ) {
     this.territory = territory;
     this.perf = perf;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(Math.max(0.5, gfx.dpr), 2);
     this.renderer = new WebGLRenderer({
       antialias: false,
       alpha: false,
@@ -574,7 +580,10 @@ export class Renderer {
     this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
+    this.renderer.shadowMap.enabled = gfx.shadow;
     this.renderer.setClearColor(0x62707e, 1);
+    const veil = document.getElementById('vignette');
+    if (veil) veil.hidden = !gfx.vignette;
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     document.body.prepend(this.renderer.domElement);
@@ -586,14 +595,12 @@ export class Renderer {
     this.scene.add(new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.05));
     const key = new DirectionalLight(0xfffaf4, 0.72);
     key.position.set(26, 42, 18);
+    key.castShadow = gfx.shadow;
     this.scene.add(key);
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
-    this.ground = new Mesh(
-      new BufGeo(),
-      new MeshBasicMaterial({ map: groundPattern(), color: 0xffffff, side: DoubleSide, toneMapped: false }),
-    );
+    this.ground = new Mesh(new BufGeo(), groundMaterial());
     this.ground.frustumCulled = false;
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
@@ -640,8 +647,11 @@ export class Renderer {
     this.stage.add(backdrop, this.platform, this.podium);
     this.scene.add(this.stage);
 
+    const petMat = gfx.basic
+      ? new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false })
+      : material;
     for (let i = 0; i < geos.length; i++) {
-      const mesh = new InstancedMesh(geos[i]!, material, PET_CAP);
+      const mesh = new InstancedMesh(geos[i]!, petMat, PET_CAP);
       mesh.frustumCulled = false;
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
       mesh.count = 0;
@@ -1032,7 +1042,9 @@ export class Renderer {
     this.ground.geometry = blobFloor(world);
     for (const mesh of this.fenceMeshes) {
       mesh.geometry.dispose();
-      this.scene.remove(mesh);
+      const mat = mesh.material;
+      if (!Array.isArray(mat)) mat.dispose();
+      mesh.removeFromParent();
     }
     this.fenceMeshes.length = 0;
     const wall = new Mesh(
@@ -1041,7 +1053,9 @@ export class Renderer {
     );
     wall.frustumCulled = false;
     wall.renderOrder = 3;
-    this.scene.add(wall);
+    // Same parent as the floor. After the X mirror, that is the world group;
+    // scene.add would leave a second rim that only lines up on x = 0.
+    (this.ground.parent ?? this.scene).add(wall);
     this.fenceMeshes.push(wall);
   }
 
@@ -1158,7 +1172,7 @@ export class Renderer {
       this.stepCoins(dt);
       this.stepPops(dt);
       this.ribbonBatch.flush();
-      this.renderer.render(this.scene, this.camera);
+      this.present();
       this.finishMeasure();
       this.perf.endFrame(performance.now(), this.renderer.info.render.calls, petCount);
       return;
@@ -1237,7 +1251,7 @@ export class Renderer {
         }
         const wx = pet.x * WORLD;
         const wz = pet.z * WORLD;
-        const feet = this.surfaceAt(pet.id, pet.x, pet.z);
+        const feet = gfx.cpu ? this.surfaceAt(pet.id, pet.x, pet.z) : 0;
         const wave = Math.sin(this.time * 8 + pet.id * 1.7);
         const bob = Math.max(0, wave) * 0.1;
         const squash = wave > 0 ? 1.07 : 0.9;
@@ -1257,8 +1271,8 @@ export class Renderer {
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
         const covered =
-          !!trail && (this.trailStolen(pet.id, trail) || this.headOnOwnLand(pet.id, trail));
-        if (pet.outside && trail && !covered) {
+          gfx.cpu && !!trail && (this.trailStolen(pet.id, trail) || this.headOnOwnLand(pet.id, trail));
+        if (gfx.cpu && pet.outside && trail && !covered) {
           trail.push(pet.x, pet.z, pet.h, 0.12);
           if (ribbon && trail.n >= 1) {
             const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
@@ -1286,7 +1300,7 @@ export class Renderer {
           const lift = hop > 0 ? Math.sin(hopT * Math.PI) * 1.35 : 0;
           const fw = Math.sin(this.time * 8 + t * 1.7);
           const fb = Math.max(0, fw) * 0.08;
-          const fFeet = this.surfaceAt(pet.id, this.sample.x, this.sample.z);
+          const fFeet = gfx.cpu ? this.surfaceAt(pet.id, this.sample.x, this.sample.z) : 0;
           this.placePet(
             follower,
             follower.count,
@@ -1414,7 +1428,7 @@ export class Renderer {
     this.stepCoins(dt);
     this.stepPops(dt);
     this.ribbonBatch.flush();
-    this.renderer.render(this.scene, this.camera);
+    this.present();
     this.finishMeasure();
     this.perf.endFrame(performance.now(), this.renderer.info.render.calls, phase === 'play' ? petCount : SPECIES.length);
   }
@@ -1690,6 +1704,20 @@ export class Renderer {
     mesh.setMatrixAt(index, this.mat);
   }
 
+  private present(): void {
+    if (!gfx.over) {
+      this.ribbonBatch.mesh.visible = false;
+      this.shadows.visible = false;
+      this.bases.visible = false;
+      this.ring.visible = false;
+      this.flashRing.visible = false;
+      this.claimRing.visible = false;
+      this.parts.visible = false;
+      this.fxCoins.visible = false;
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
+
   private applySize(): void {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -1731,17 +1759,26 @@ function blobFloor(world: Array<[number, number]>): BufGeo {
   cz /= world.length;
   const pos = new Float32Array((world.length + 1) * 3);
   const uv = new Float32Array((world.length + 1) * 2);
+  const col = new Float32Array((world.length + 1) * 3);
   pos[0] = cx;
   pos[1] = 0.012;
   pos[2] = cz;
   uv[0] = cx / 2.2;
   uv[1] = cz / 2.2;
+  col[0] = 1;
+  col[1] = 1;
+  col[2] = 1;
   for (let i = 0; i < world.length; i++) {
     pos[(i + 1) * 3] = world[i]![0];
     pos[(i + 1) * 3 + 1] = 0.012;
     pos[(i + 1) * 3 + 2] = world[i]![1];
     uv[(i + 1) * 2] = world[i]![0] / 2.2;
     uv[(i + 1) * 2 + 1] = world[i]![1] / 2.2;
+    // Screen-space vignette was a full-frame composite. Darken the rim in the mesh instead.
+    const o = (i + 1) * 3;
+    col[o] = 0.78;
+    col[o + 1] = 0.82;
+    col[o + 2] = 0.88;
   }
   const idx = new Uint32Array(world.length * 3);
   for (let i = 0; i < world.length; i++) {
@@ -1752,6 +1789,7 @@ function blobFloor(world: Array<[number, number]>): BufGeo {
   const geo = new BufGeo();
   geo.setAttribute('position', new BufferAttribute(pos, 3));
   geo.setAttribute('uv', new BufferAttribute(uv, 2));
+  geo.setAttribute('color', new BufferAttribute(col, 3));
   geo.setIndex(new BufferAttribute(idx, 1));
   return geo;
 }
@@ -1812,20 +1850,43 @@ function blobWall(world: Array<[number, number]>): BufGeo {
   return geo;
 }
 
-function groundPattern(): CanvasTexture {
+function groundMaterial(): MeshBasicMaterial {
+  if (gfx.floor === '0') {
+    return new MeshBasicMaterial({
+      color: 0xe7edf3,
+      vertexColors: true,
+      side: FrontSide,
+      toneMapped: false,
+    });
+  }
+  const mip = gfx.floor !== 'nomip';
+  return new MeshBasicMaterial({
+    map: groundPattern(mip),
+    color: 0xffffff,
+    vertexColors: true,
+    side: FrontSide,
+    toneMapped: false,
+  });
+}
+
+function groundPattern(mip: boolean): CanvasTexture {
+  const size = mip ? 32 : 128;
   const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
+  canvas.width = size;
+  canvas.height = size;
   const g = canvas.getContext('2d')!;
   g.fillStyle = '#e7edf3';
-  g.fillRect(0, 0, 128, 128);
+  g.fillRect(0, 0, size, size);
   g.fillStyle = 'rgba(148, 166, 184, 0.55)';
-  for (let row = 0; row < 8; row++) {
-    const y = 10 + row * 14;
-    const shift = row % 2 === 0 ? 8 : 15;
-    for (let x = shift; x < 128; x += 14) {
+  const step = mip ? 8 : 14;
+  const rad = mip ? 0.7 : 1.15;
+  const rows = Math.ceil(size / step);
+  for (let row = 0; row < rows; row++) {
+    const y = step * 0.5 + row * step;
+    const shift = row % 2 === 0 ? step * 0.5 : step;
+    for (let x = shift; x < size + step; x += step) {
       g.beginPath();
-      g.arc(x, y, 1.15, 0, Math.PI * 2);
+      g.arc(x, y, rad, 0, Math.PI * 2);
       g.fill();
     }
   }
@@ -1834,7 +1895,63 @@ function groundPattern(): CanvasTexture {
   tex.wrapT = RepeatWrapping;
   tex.repeat.set(1, 1);
   tex.colorSpace = SRGBColorSpace;
+  tex.generateMipmaps = mip;
+  tex.minFilter = mip ? LinearMipmapLinearFilter : LinearFilter;
+  tex.magFilter = LinearFilter;
+  tex.anisotropy = 1;
+  tex.needsUpdate = true;
   return tex;
+}
+
+/** Drop fence-scrape jitter. The live head and the land end stay put. */
+function decimateRibbon(sx: Float32Array, sz: Float32Array, keep: Uint8Array, n: number, eps: number): number {
+  if (n < 4) return n;
+  keep.fill(0, 0, n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+  const stack: number[] = [0, n - 1];
+  const eps2 = eps * eps;
+  while (stack.length) {
+    const b = stack.pop()!;
+    const a = stack.pop()!;
+    const ax = sx[a]!;
+    const az = sz[a]!;
+    const bx = sx[b]!;
+    const bz = sz[b]!;
+    const vx = bx - ax;
+    const vz = bz - az;
+    const len2 = vx * vx + vz * vz;
+    let best = -1;
+    let bestD = 0;
+    for (let i = a + 1; i < b; i++) {
+      const px = sx[i]!;
+      const pz = sz[i]!;
+      let d = 0;
+      if (len2 < 1e-8) d = (px - ax) * (px - ax) + (pz - az) * (pz - az);
+      else {
+        const t = Math.max(0, Math.min(1, ((px - ax) * vx + (pz - az) * vz) / len2));
+        const cx = ax + vx * t;
+        const cz = az + vz * t;
+        d = (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
+      }
+      if (d > bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best >= 0 && bestD > eps2) {
+      keep[best] = 1;
+      stack.push(a, best, best, b);
+    }
+  }
+  let w = 0;
+  for (let i = 0; i < n; i++) {
+    if (!keep[i]) continue;
+    sx[w] = sx[i]!;
+    sz[w] = sz[i]!;
+    w++;
+  }
+  return w;
 }
 
 function titleBackdrop(): CanvasTexture {

@@ -25,6 +25,7 @@ import { Input } from './input.js';
 import { NetClient } from './net.js';
 import { saveProfile } from './profileStore.js';
 import { Renderer, type DrawPet, type DrawPickup } from './render.js';
+import { gfx } from './gfx.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
@@ -274,7 +275,7 @@ export class Game {
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
     this.renderer.update(frame || dt * 0.15, view, this.profile.pet.species, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
     if (this.phase !== 'title') this.snapCam = false;
-    this.hud.setLabels(this.renderer.labels);
+    if (gfx.cpu) this.hud.setLabels(this.renderer.labels);
     this.boardAcc += dt;
     if (this.boardAcc > 0.2 && this.phase === 'playing') {
       this.boardAcc = 0;
