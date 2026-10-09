@@ -13,8 +13,6 @@ import {
   HemisphereLight,
   InstancedBufferAttribute,
   InstancedMesh,
-  LinearFilter,
-  LinearMipmapLinearFilter,
   LineBasicMaterial,
   LineSegments,
   Matrix4,
@@ -25,7 +23,6 @@ import {
   OctahedronGeometry,
   PerspectiveCamera,
   Quaternion,
-  RepeatWrapping,
   RingGeometry,
   SRGBColorSpace,
   Scene,
@@ -43,6 +40,10 @@ import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
 const WORLD = CONFIG.worldScale;
+/** Pale playable ground. Inside the blob this is the clear color, so it costs no fragments. */
+const FLOOR_COLOR = 0xe7edf3;
+/** Dark surround. Drawn only as the ring outside the blob. */
+const OUTSIDE_COLOR = 0x62707e;
 const PAL_CSS = PALETTE.map((c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`);
 const PET_CAP = 64;
 const PICK_CAP = 72;
@@ -581,7 +582,7 @@ export class Renderer {
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
     this.renderer.shadowMap.enabled = gfx.shadow;
-    this.renderer.setClearColor(0x62707e, 1);
+    this.renderer.setClearColor(OUTSIDE_COLOR, 1);
     const veil = document.getElementById('vignette');
     if (veil) veil.hidden = !gfx.vignette;
     this.renderer.domElement.style.width = '100%';
@@ -600,7 +601,7 @@ export class Renderer {
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
-    this.ground = new Mesh(new BufGeo(), groundMaterial());
+    this.ground = new Mesh(new BufGeo(), outsideMaterial());
     this.ground.frustumCulled = false;
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
@@ -1023,7 +1024,7 @@ export class Renderer {
     return out;
   }
 
-  /** Curved arena: dotted blob floor and a smooth raised lip. Outside is the clear color. */
+  /** Curved arena: the pale floor is the clear color. A dark ring covers everything outside the blob. */
   setBoundary(ring: Array<[number, number]>): void {
     const world = openWorld(ring);
     if (world.length < 8) return;
@@ -1039,7 +1040,7 @@ export class Renderer {
     }
     this.arenaBox = { minX, maxX, minZ, maxZ };
     this.ground.geometry.dispose();
-    this.ground.geometry = blobFloor(world);
+    this.ground.geometry = outsideRing(world);
     for (const mesh of this.fenceMeshes) {
       mesh.geometry.dispose();
       const mat = mesh.material;
@@ -1161,6 +1162,7 @@ export class Renderer {
     snapCam: boolean,
   ): void {
     this.time += dt;
+    this.renderer.setClearColor(phase === 'title' ? OUTSIDE_COLOR : FLOOR_COLOR, 1);
     this.territory.update(dt);
     this.syncLand();
     this.riseSlabs();
@@ -1747,50 +1749,64 @@ function openWorld(ring: Array<[number, number]>): Array<[number, number]> {
   return out;
 }
 
-/** Star-shaped fan. The blob is a radius function, so the center sees every edge. */
-function blobFloor(world: Array<[number, number]>): BufGeo {
+/** Star-shaped hole is the blob. Triangles face +Y so FrontSide survives the X-mirror flip. */
+function outsideRing(world: Array<[number, number]>): BufGeo {
+  const n = world.length;
   let cx = 0;
   let cz = 0;
   for (const p of world) {
     cx += p[0];
     cz += p[1];
   }
-  cx /= world.length;
-  cz /= world.length;
-  const pos = new Float32Array((world.length + 1) * 3);
-  const uv = new Float32Array((world.length + 1) * 2);
-  const col = new Float32Array((world.length + 1) * 3);
-  pos[0] = cx;
-  pos[1] = 0.012;
-  pos[2] = cz;
-  uv[0] = cx / 2.2;
-  uv[1] = cz / 2.2;
-  col[0] = 1;
-  col[1] = 1;
-  col[2] = 1;
-  for (let i = 0; i < world.length; i++) {
-    pos[(i + 1) * 3] = world[i]![0];
-    pos[(i + 1) * 3 + 1] = 0.012;
-    pos[(i + 1) * 3 + 2] = world[i]![1];
-    uv[(i + 1) * 2] = world[i]![0] / 2.2;
-    uv[(i + 1) * 2 + 1] = world[i]![1] / 2.2;
-    const o = (i + 1) * 3;
-    col[o] = 1;
-    col[o + 1] = 1;
-    col[o + 2] = 1;
+  cx /= n;
+  cz /= n;
+  // Far enough that the tilted camera still lands on this ring past the fence.
+  const reach = 120;
+  const y = -0.03;
+  const pos = new Float32Array(n * 2 * 3);
+  for (let i = 0; i < n; i++) {
+    const x = world[i]![0];
+    const z = world[i]![1];
+    pos[i * 3] = x;
+    pos[i * 3 + 1] = y;
+    pos[i * 3 + 2] = z;
+    const dx = x - cx;
+    const dz = z - cz;
+    const len = Math.hypot(dx, dz) || 1;
+    const o = (n + i) * 3;
+    pos[o] = cx + (dx / len) * reach;
+    pos[o + 1] = y;
+    pos[o + 2] = cz + (dz / len) * reach;
   }
-  const idx = new Uint32Array(world.length * 3);
-  for (let i = 0; i < world.length; i++) {
-    idx[i * 3] = 0;
-    idx[i * 3 + 1] = i + 1;
-    idx[i * 3 + 2] = ((i + 1) % world.length) + 1;
+  const idx = new Uint32Array(n * 6);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const innerA = i;
+    const innerB = j;
+    const outerA = n + i;
+    const outerB = n + j;
+    // (center, boundary i, boundary i+1) points down and was culled. This is the opposite.
+    const t = i * 6;
+    idx[t] = innerA;
+    idx[t + 1] = outerB;
+    idx[t + 2] = innerB;
+    idx[t + 3] = innerA;
+    idx[t + 4] = outerB;
+    idx[t + 5] = outerA;
   }
   const geo = new BufGeo();
   geo.setAttribute('position', new BufferAttribute(pos, 3));
-  geo.setAttribute('uv', new BufferAttribute(uv, 2));
-  geo.setAttribute('color', new BufferAttribute(col, 3));
   geo.setIndex(new BufferAttribute(idx, 1));
   return geo;
+}
+
+function outsideMaterial(): MeshBasicMaterial {
+  return new MeshBasicMaterial({
+    color: OUTSIDE_COLOR,
+    side: FrontSide,
+    toneMapped: false,
+    depthWrite: true,
+  });
 }
 
 function blobWall(world: Array<[number, number]>): BufGeo {
@@ -1847,59 +1863,6 @@ function blobWall(world: Array<[number, number]>): BufGeo {
   geo.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
   geo.setIndex(idx);
   return geo;
-}
-
-function groundMaterial(): MeshBasicMaterial {
-  if (gfx.floor === '0') {
-    return new MeshBasicMaterial({
-      color: 0xe7edf3,
-      vertexColors: true,
-      side: FrontSide,
-      toneMapped: false,
-    });
-  }
-  const mip = gfx.floor !== 'nomip';
-  return new MeshBasicMaterial({
-    map: groundPattern(mip),
-    color: 0xffffff,
-    vertexColors: true,
-    side: FrontSide,
-    toneMapped: false,
-  });
-}
-
-function groundPattern(mip: boolean): CanvasTexture {
-  const size = mip ? 32 : 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const g = canvas.getContext('2d')!;
-  g.fillStyle = '#e7edf3';
-  g.fillRect(0, 0, size, size);
-  g.fillStyle = 'rgba(148, 166, 184, 0.55)';
-  const step = mip ? 8 : 14;
-  const rad = mip ? 0.7 : 1.15;
-  const rows = Math.ceil(size / step);
-  for (let row = 0; row < rows; row++) {
-    const y = step * 0.5 + row * step;
-    const shift = row % 2 === 0 ? step * 0.5 : step;
-    for (let x = shift; x < size + step; x += step) {
-      g.beginPath();
-      g.arc(x, y, rad, 0, Math.PI * 2);
-      g.fill();
-    }
-  }
-  const tex = new CanvasTexture(canvas);
-  tex.wrapS = RepeatWrapping;
-  tex.wrapT = RepeatWrapping;
-  tex.repeat.set(1, 1);
-  tex.colorSpace = SRGBColorSpace;
-  tex.generateMipmaps = mip;
-  tex.minFilter = mip ? LinearMipmapLinearFilter : LinearFilter;
-  tex.magFilter = LinearFilter;
-  tex.anisotropy = 1;
-  tex.needsUpdate = true;
-  return tex;
 }
 
 /** Drop fence-scrape jitter. The live head and the land end stay put. */

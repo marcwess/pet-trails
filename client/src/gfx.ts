@@ -10,10 +10,10 @@ function num(key: string, fallback: number): number {
 /**
  * Frame-time switches. The defaults are the shipped path. The profile turns
  * one cost back on (or off) at a time:
- * `floor=nomip|0`, `basic=0`, `shadow=1`, `over=0`, `cpu=0`, `vignette=1`, `dpr=1`.
+ * `basic=1`, `shadow=1`, `over=0`, `cpu=0`, `vignette=1`, `dpr=1`.
+ * The playable floor is the clear color. Nothing samples a floor texture.
  */
 export const gfx = {
-  floor: q.get('floor') ?? 'mip',
   basic: q.get('basic') === '1',
   shadow: q.get('shadow') === '1',
   over: q.get('over') !== '0',
