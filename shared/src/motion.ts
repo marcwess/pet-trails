@@ -1,4 +1,6 @@
 import type { GameConfig } from './config.js';
+import type { Ring } from './land.js';
+import { containBody } from './shape.js';
 
 export interface Body {
   x: number;
@@ -32,6 +34,7 @@ export function integrateBody(
   dt: number,
   cfg: Pick<GameConfig, 'speed' | 'turnRate' | 'gridW' | 'gridH'>,
   onCell?: (cx: number, cy: number) => boolean,
+  bounds?: Ring,
 ): void {
   if (body.desiredX !== 0 || body.desiredY !== 0) {
     const target = Math.atan2(body.desiredY, body.desiredX);
@@ -46,16 +49,25 @@ export function integrateBody(
   const y0 = body.y;
   let nx = x0 + Math.cos(body.heading) * cfg.speed * dt;
   let ny = y0 + Math.sin(body.heading) * cfg.speed * dt;
-  const m = 0.35;
-  const hitL = nx < m;
-  const hitR = nx > cfg.gridW - m;
-  const hitB = ny < m;
-  const hitT = ny > cfg.gridH - m;
-  if (hitL) nx = m;
-  if (hitR) nx = cfg.gridW - m;
-  if (hitB) ny = m;
-  if (hitT) ny = cfg.gridH - m;
-  if (hitL || hitR || hitB || hitT) slideAlongWall(body, hitL, hitR, hitB, hitT);
+  if (bounds && bounds.length >= 4) {
+    const probe = { x: nx, y: ny, heading: body.heading, desiredX: body.desiredX, desiredY: body.desiredY };
+    if (containBody(probe, bounds)) {
+      nx = probe.x;
+      ny = probe.y;
+      body.heading = probe.heading;
+    }
+  } else {
+    const m = 0.35;
+    const hitL = nx < m;
+    const hitR = nx > cfg.gridW - m;
+    const hitB = ny < m;
+    const hitT = ny > cfg.gridH - m;
+    if (hitL) nx = m;
+    if (hitR) nx = cfg.gridW - m;
+    if (hitB) ny = m;
+    if (hitT) ny = cfg.gridH - m;
+    if (hitL || hitR || hitB || hitT) slideAlongWall(body, hitL, hitR, hitB, hitT);
+  }
 
   if (!onCell) {
     body.x = nx;

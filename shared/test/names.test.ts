@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnRadius } from '../src/shape.ts';
 import { Sim } from '../src/sim.ts';
 
 test('freed bot names are reused and never gain a number suffix', () => {
@@ -37,10 +38,11 @@ test('freed bot names are reused and never gain a number suffix', () => {
   }
 });
 
-test('bot spawn squares are not packed against the player', () => {
+test('bot spawn circles are not packed against the player', () => {
   const sim = new Sim({ targetPopulation: 0, pickupTarget: 0, spawnSize: 18 }, 5);
   const human = sim.addHuman('You', 0);
   assert.ok(human);
+  const radius = spawnRadius(18);
   const centers: Array<[number, number]> = [[human.x, human.y]];
   for (let i = 0; i < 6; i++) {
     const bot = sim.addBot();
@@ -51,53 +53,28 @@ test('bot spawn squares are not packed against the player', () => {
     for (let j = i + 1; j < centers.length; j++) {
       const d = Math.hypot(centers[i]![0] - centers[j]![0], centers[i]![1] - centers[j]![1]);
       assert.ok(d > 30, `spawns ${i} and ${j} are ${d.toFixed(1)} apart`);
-      assert.ok(squareGap(centers[i]!, centers[j]!, 18) >= 8, `squares ${i} and ${j} are ${squareGap(centers[i]!, centers[j]!, 18).toFixed(1)} apart`);
+      assert.ok(d - radius * 2 >= 8, `circles ${i} and ${j} are ${(d - radius * 2).toFixed(1)} apart`);
     }
   }
 });
 
-test('a spawn square stays off existing land, not only off heads', () => {
+test('a spawn circle stays off existing land and inside the blob', () => {
   const sim = new Sim({ targetPopulation: 0, pickupTarget: 0, spawnSize: 18, gridW: 200, gridH: 200 }, 11);
   const human = sim.addHuman('You', 0);
   assert.ok(human);
   sim.debugGiveRect(human.id, 70, 70, 60, 60);
   const bot = sim.addBot();
   assert.ok(bot);
-  const size = 18;
-  const x0 = Math.floor(bot.x - size / 2);
-  const y0 = Math.floor(bot.y - size / 2);
-  let nearest = Infinity;
-  for (let y = y0; y < y0 + size; y++) {
-    for (let x = x0; x < x0 + size; x++) {
-      for (let dy = -14; dy <= 14; dy++) {
-        for (let dx = -14; dx <= 14; dx++) {
-          const cx = x + dx;
-          const cy = y + dy;
-          if (cx < 0 || cy < 0 || cx >= 200 || cy >= 200) continue;
-          if (sim.grid.owner[cy * 200 + cx] === 0) continue;
-          if (sim.grid.owner[cy * 200 + cx] === bot.id) continue;
-          const dist = Math.max(Math.abs(dx), Math.abs(dy));
-          if (dist < nearest) nearest = dist;
-        }
-      }
-    }
-  }
-  assert.ok(nearest >= 4, `spawn square comes within ${nearest} cells of existing land`);
+  const radius = spawnRadius(18);
+  const x0 = bot.x - radius;
+  const y0 = bot.y - radius;
+  assert.equal(sim.land.hitsExcept(bot.id, x0, y0, radius * 2, radius * 2), false, 'spawn circle overlaps land');
+  assert.equal(
+    sim.land.hitsExcept(bot.id, x0 - 4, y0 - 4, radius * 2 + 8, radius * 2 + 8),
+    false,
+    'spawn circle comes within 4 cells of existing land',
+  );
+  const room = sim.land.fenceAt(bot.x, bot.y);
+  assert.equal(room.inside, true);
+  assert.ok(room.dist > radius, `spawn sits ${room.dist.toFixed(2)} from the fence, radius ${radius.toFixed(2)}`);
 });
-
-function squareGap(a: [number, number], b: [number, number], size: number): number {
-  const ax0 = a[0] - size / 2;
-  const ax1 = a[0] + size / 2;
-  const ay0 = a[1] - size / 2;
-  const ay1 = a[1] + size / 2;
-  const bx0 = b[0] - size / 2;
-  const bx1 = b[0] + size / 2;
-  const by0 = b[1] - size / 2;
-  const by1 = b[1] + size / 2;
-  const ox = ax1 > bx0 && bx1 > ax0;
-  const oy = ay1 > by0 && by1 > ay0;
-  if (ox && oy) return 0;
-  const dx = ox ? 0 : Math.max(bx0 - ax1, ax0 - bx1);
-  const dy = oy ? 0 : Math.max(by0 - ay1, ay0 - by1);
-  return Math.hypot(dx, dy);
-}

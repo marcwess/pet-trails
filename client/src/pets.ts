@@ -1,5 +1,13 @@
 import { SPECIES } from '@pet-trails/shared';
-import { FrontSide, MeshLambertMaterial, SRGBColorSpace, type BufferGeometry, type Mesh, type MeshStandardMaterial } from 'three';
+import {
+  FrontSide,
+  MeshLambertMaterial,
+  SRGBColorSpace,
+  type BufferGeometry,
+  type Mesh,
+  type MeshStandardMaterial,
+  type Texture,
+} from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -43,7 +51,7 @@ export async function loadPetGeometries(
     const bb = merged.boundingBox!;
     const height = Math.max(0.001, bb.max.y - bb.min.y);
     // Pets are the focus. The ground-color check starts outside this body.
-    const scale = 1.22 / height;
+    const scale = 1.32 / height;
     merged.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
     merged.scale(scale, scale, scale);
     merged.computeVertexNormals();
@@ -52,4 +60,45 @@ export async function loadPetGeometries(
   }
   if (!material) throw new Error('Pet colormap missing');
   return { geos, material };
+}
+
+/** Kenney Platformer Kit coin (CC0). Null if the file is missing. */
+export async function loadCoinGeometry(base: string): Promise<{ geometry: BufferGeometry; map: Texture | null } | null> {
+  try {
+    const loader = new GLTFLoader();
+    const gltf = await loader.loadAsync(`${base}assets/coins/coin-gold.glb`);
+    gltf.scene.updateWorldMatrix(true, true);
+    const parts: BufferGeometry[] = [];
+    let map: Texture | null = null;
+    gltf.scene.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!mesh.isMesh) return;
+      const g = mesh.geometry.clone();
+      g.applyMatrix4(mesh.matrixWorld);
+      g.deleteAttribute('tangent');
+      g.deleteAttribute('color');
+      parts.push(g);
+      mesh.geometry.dispose();
+      const srcMat = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as MeshStandardMaterial;
+      if (!map && srcMat?.map) {
+        map = srcMat.map;
+        map.colorSpace = SRGBColorSpace;
+        map.needsUpdate = true;
+        srcMat.map = null;
+      }
+      srcMat?.dispose();
+    });
+    const merged = mergeGeometries(parts, false);
+    for (const part of parts) part.dispose();
+    if (!merged) return null;
+    merged.computeBoundingBox();
+    const bb = merged.boundingBox!;
+    const width = Math.max(0.001, bb.max.x - bb.min.x);
+    const scale = 0.58 / width;
+    merged.translate(-(bb.min.x + bb.max.x) / 2, -(bb.min.y + bb.max.y) / 2, -(bb.min.z + bb.max.z) / 2);
+    merged.scale(scale, scale, scale);
+    return { geometry: merged, map };
+  } catch {
+    return null;
+  }
 }

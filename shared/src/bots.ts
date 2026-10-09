@@ -1,12 +1,12 @@
 import type { GameConfig } from './config.js';
-import type { Grid } from './grid.js';
+import type { LandBook } from './land.js';
 import { angleDelta } from './motion.js';
 import type { Player } from './player.js';
 
 export interface BotView {
   tick: number;
   cfg: GameConfig;
-  grid: Grid;
+  land: LandBook;
   players: Array<Player | null>;
   rng: () => number;
   dt: number;
@@ -20,15 +20,13 @@ function steer(p: Player, angle: number): void {
 function goHome(p: Player, view: BotView): void {
   p.botPhase = 3;
   p.botMoved = 0;
-  const land = view.grid.landCount[p.id] ?? 0;
-  if (land <= 0) {
+  const home = view.land.home(p.id);
+  if (!home) {
     steer(p, view.rng() * Math.PI * 2);
     return;
   }
-  const cx = view.grid.sumX[p.id]! / land;
-  const cy = view.grid.sumY[p.id]! / land;
-  p.desiredX = cx - p.x;
-  p.desiredY = cy - p.y;
+  p.desiredX = home.x - p.x;
+  p.desiredY = home.y - p.y;
 }
 
 function legLength(p: Player, view: BotView): number {
@@ -40,7 +38,6 @@ function legLength(p: Player, view: BotView): number {
 }
 
 function nearestTrail(p: Player, view: BotView): { x: number; y: number; dist: number; land: number } | null {
-  const { w } = view.grid;
   const range = view.cfg.botHuntRange;
   let bestD = range;
   let best: { x: number; y: number; dist: number; land: number } | null = null;
@@ -49,13 +46,12 @@ function nearestTrail(p: Player, view: BotView): { x: number; y: number; dist: n
     if (!e || !e.active || !e.alive || e.id === p.id || e.trailLen < 4) continue;
     const step = Math.max(1, (e.trailLen / 24) | 0);
     for (let t = 0; t < e.trailLen; t += step) {
-      const i = e.trail[t]!;
-      const x = (i % w) + 0.5;
-      const y = ((i / w) | 0) + 0.5;
+      const x = e.trailX[t]!;
+      const y = e.trailY[t]!;
       const d = Math.hypot(x - p.x, y - p.y);
       if (d < bestD) {
         bestD = d;
-        best = { x, y, dist: d, land: view.grid.landCount[e.id] ?? 0 };
+        best = { x, y, dist: d, land: view.land.areaOf(e.id) };
       }
     }
   }
@@ -64,12 +60,10 @@ function nearestTrail(p: Player, view: BotView): { x: number; y: number; dist: n
 
 function trailThreatened(p: Player, view: BotView): boolean {
   if (p.trailLen < 4) return false;
-  const { w } = view.grid;
   const step = Math.max(1, (p.trailLen / 10) | 0);
   for (let t = 0; t < p.trailLen; t += step) {
-    const i = p.trail[t]!;
-    const x = (i % w) + 0.5;
-    const y = ((i / w) | 0) + 0.5;
+    const x = p.trailX[t]!;
+    const y = p.trailY[t]!;
     for (let id = 1; id < view.players.length; id++) {
       const e = view.players[id];
       if (!e || !e.active || !e.alive || e.id === p.id) continue;
@@ -79,16 +73,15 @@ function trailThreatened(p: Player, view: BotView): boolean {
   return false;
 }
 
-/** Steer back toward mid-map near the fence. A bot's own trail is safe to cross. */
+/** Steer back inside when the curved fence is close. A bot's own trail is safe to cross. */
 function avoid(p: Player, view: BotView): boolean {
-  const { cfg } = view;
-  const edge = 6;
-  if (p.x < edge || p.x > cfg.gridW - edge || p.y < edge || p.y > cfg.gridH - edge) {
-    p.desiredX = cfg.gridW / 2 - p.x;
-    p.desiredY = cfg.gridH / 2 - p.y;
-    return true;
-  }
-  return false;
+  const hit = view.land.fenceAt(p.x, p.y);
+  if (hit.inside && hit.dist > 6) return false;
+  const pull = hit.inside ? 1.6 : 3.2;
+  const side = p.botTurnSign < 0 ? -1 : 1;
+  p.desiredX = -hit.nx * pull + hit.tx * side * 0.45;
+  p.desiredY = -hit.ny * pull + hit.ty * side * 0.45;
+  return true;
 }
 
 /**

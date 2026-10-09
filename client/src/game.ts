@@ -8,20 +8,24 @@ import {
   SPECIES_LABEL,
   Sim,
   applyXp,
+  mapBlob,
   randomSeed,
+  ringArea,
   integrateBody,
   lerpAngle,
+  xpForLevel,
   type DeltaMsg,
   type EntSnap,
   type Profile,
   type WelcomeMsg,
   type WireEvent,
 } from '@pet-trails/shared';
-import { Hud, cssColor, deathTitle, type BoardRow, type DeathView } from './hud.js';
+import { Hud, cssColor, deathIcon, deathTitle, type BoardRow, type DeathView } from './hud.js';
 import { Input } from './input.js';
 import { NetClient } from './net.js';
 import { saveProfile } from './profileStore.js';
 import { Renderer, type DrawPet, type DrawPickup } from './render.js';
+import { gfx } from './gfx.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
@@ -101,6 +105,8 @@ export class Game {
   private predDX = 0;
   private predDY = 0;
   private predPrimed = false;
+  private displayName = 'You';
+  private arenaArea = ringArea(mapBlob(1, CONFIG.gridW, CONFIG.gridH));
   private readonly readPickup = (id: number, kind: number, x: number, y: number) => {
     if (this.pickupCount >= this.drawPickups.length) return;
     const slot = this.drawPickups[this.pickupCount++]!;
@@ -135,6 +141,7 @@ export class Game {
         outside: false,
         hop: 0,
         blink: false,
+        name: '',
       });
     }
     for (let i = 0; i < 72; i++) this.drawPickups.push({ x: 0, z: 0, kind: 0 });
@@ -144,10 +151,6 @@ export class Game {
       if (mode === 'offline' && this.phase === 'playing' && !this.offline) this.onDisconnect();
     };
     this.net.onWelcome = (msg) => this.onWelcome(msg);
-    this.net.onGrid = (owner, trail) => {
-      this.territory.applySnapshot(owner, trail);
-      this.renderer.clearPaths();
-    };
     this.net.onDelta = (msg) => this.onDelta(msg);
     this.net.onFull = () => {
       if (this.phase !== 'title') this.startOffline();
@@ -165,15 +168,11 @@ export class Game {
       sampleOwnTrail: (limit = 80) => this.sampleTrails(limit, true),
       entities: () => this.entityList(),
       landCheck: () => this.landCheck(),
+      landVerts: () => this.territory.vertexCount(),
+      landPoly: (id?: number) => this.territory.polygon(id ?? this.selfId),
       steer: (x: number, y: number) => {
         this.input.desiredX = x;
         this.input.desiredY = y;
-      },
-      cell: (x: number, y: number) => {
-        const cx = Math.floor(x);
-        const cy = Math.floor(y);
-        if (cx < 0 || cy < 0 || cx >= CONFIG.gridW || cy >= CONFIG.gridH) return 0;
-        return this.territory.owner[cy * CONFIG.gridW + cx] ?? 0;
       },
       project: (x: number, y: number) => this.renderer.project(x, 0, y),
     };
@@ -198,7 +197,8 @@ export class Game {
     this.shownPct = 0;
     this.peakPct = 0;
     this.hud.showDeath(null);
-    this.hud.setYou('0.0%', 0);
+    this.hud.setYou('0.0%', 0, 0);
+    this.displayName = readName();
     const mode = await this.net.whenSettled();
     this.hud.showTitle(false);
     this.hud.showHud(true);
@@ -207,13 +207,13 @@ export class Game {
     this.predPrimed = false;
     if (mode === 'online') {
       this.offline = null;
-      this.net.send({ t: 'hello', name: 'You', pet: this.profile.pet.species });
+      this.net.send({ t: 'hello', name: this.displayName, pet: this.profile.pet.species });
       this.net.send({ t: 'play' });
       this.phase = 'playing';
     } else if (this.offline) {
-      this.offline.grid.beginTick();
+      this.offline.land.beginTick();
       this.offline.respawn(this.selfId);
-      this.consume(this.offline.consumeEvents(), this.offline.cellRuns());
+      this.consume(this.offline.consumeEvents());
       this.syncOffline(this.offline, false);
       this.phase = 'playing';
       this.snapCam = true;
@@ -225,13 +225,24 @@ export class Game {
   }
 
   private startOffline(): void {
-    const solo = new URLSearchParams(location.search).has('solo');
-    const sim = new Sim(solo ? { targetPopulation: 1, pickupTarget: 0 } : {}, randomSeed());
-    const player = sim.addHuman('You', this.profile.pet.species);
+    const params = new URLSearchParams(location.search);
+    const pop = Number(params.get('pop'));
+    const sim = new Sim(
+      params.has('solo')
+        ? { targetPopulation: 1, pickupTarget: 0 }
+        : Number.isFinite(pop) && pop >= 1
+          ? { targetPopulation: Math.min(11, Math.floor(pop)), pickupTarget: 0 }
+          : {},
+      randomSeed(),
+    );
+    const player = sim.addHuman(this.displayName, this.profile.pet.species);
     if (!player) return;
     this.offline = sim;
     this.selfId = player.id;
-    this.territory.applySnapshot(sim.grid.owner, sim.grid.trail);
+    this.applyArena(sim.seed);
+    const ids: number[] = [];
+    for (let id = 1; id <= sim.cfg.maxEntities; id++) if (sim.land.get(id).length > 0) ids.push(id);
+    this.territory.adopt(sim.land, ids);
     this.renderer.clearPaths();
     for (const ent of this.ents) ent.used = false;
     this.syncOffline(sim, true);
@@ -246,9 +257,10 @@ export class Game {
     this.hud.showHud(false);
     this.hud.showDeath({
       title: 'Connection lost',
+      icon: '⚡',
       rows: [
-        { k: 'Status', v: 'Offline' },
-        { k: 'Next', v: 'Play again' },
+        { k: 'Status', v: 'Offline', icon: '●' },
+        { k: 'Next', v: 'Play again', icon: '▶' },
       ],
     });
   }
@@ -258,8 +270,10 @@ export class Game {
     const frame = this.hitLeft > 0 ? 0 : dt;
     for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
     const self = this.ents[this.selfId];
-    if (self) this.renderer.landPct = self.land / (CONFIG.gridW * CONFIG.gridH);
+    if (self) this.renderer.landPct = self.land / this.arenaArea;
     this.input.sample();
+    const stick = this.input.stick();
+    this.hud.setStick(stick.x, stick.y, stick.dx, stick.dy, stick.on && this.phase === 'playing');
     if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
     if (this.phase === 'playing') {
       if (this.offline) this.stepOffline(frame);
@@ -269,7 +283,7 @@ export class Game {
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
     this.renderer.update(frame || dt * 0.15, view, this.profile.pet.species, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
     if (this.phase !== 'title') this.snapCam = false;
-    this.hud.setLabels(this.renderer.labels);
+    if (gfx.cpu) this.hud.setLabels(this.renderer.labels);
     this.boardAcc += dt;
     if (this.boardAcc > 0.2 && this.phase === 'playing') {
       this.boardAcc = 0;
@@ -293,7 +307,7 @@ export class Game {
       const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
       if (mag > 0.15) sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, this.seq++);
       sim.step({ humans: 1 });
-      this.consume(sim.consumeEvents(), sim.cellRuns());
+      this.consume(sim.consumeEvents());
       this.syncOffline(sim, false);
       this.pickupCount = 0;
       sim.forEachActivePickup(this.readPickup);
@@ -354,14 +368,14 @@ export class Game {
         if (!prevAlive && p.alive) this.shownKills = p.kills;
         else if (p.kills > this.shownKills) this.shownKills = p.kills;
         ent.kills = Math.max(p.kills, this.shownKills);
-        if (this.phase === 'playing' && p.alive) this.noteLand(ent.land, ent.kills);
+        if (this.phase === 'playing' && p.alive) this.noteLand(ent.land, ent.kills, p.trainLen);
       } else {
         ent.kills = p.kills;
       }
       ent.coins = p.coins;
       ent.xp = p.xp;
       ent.outside = p.outside;
-      if (p.trainLen > ent.trainLen) ent.hop = 0.42;
+      if (p.trainLen > ent.trainLen) ent.hop = 0.72;
       ent.trainShown = Math.min(CONFIG.maxTrainVisible, p.trainLen);
       ent.trainLen = p.trainLen;
       for (let i = 0; i < ent.trainShown; i++) ent.train[i] = p.train[i]!;
@@ -384,8 +398,15 @@ export class Game {
     }
   }
 
+  private applyArena(seed: number): void {
+    const ring = mapBlob(seed >>> 0, CONFIG.gridW, CONFIG.gridH);
+    this.arenaArea = ringArea(ring);
+    this.renderer.setBoundary(ring);
+  }
+
   private onWelcome(msg: WelcomeMsg): void {
     this.selfId = msg.id;
+    if (Number.isFinite(msg.seed)) this.applyArena(msg.seed);
     for (const n of msg.names) {
       const ent = this.ents[n.i];
       if (!ent) continue;
@@ -400,17 +421,8 @@ export class Game {
   private onDelta(msg: DeltaMsg): void {
     this.serverTick = msg.tick;
     this.serverTickAt = performance.now();
-    let claim: { n: number; x: number; y: number } | null = null;
-    if (msg.events) {
-      for (const ev of msg.events) {
-        if (ev.e === 'claim' && (!claim || ev.n > claim.n)) claim = ev;
-      }
-      this.applyEvents(msg.events);
-    }
-    if (msg.cells && msg.cells.length > 0) {
-      const animate = !!claim && claim.n > 28;
-      this.territory.applyRuns(msg.cells, animate, claim ? claim.x : 0, claim ? claim.y : 0);
-    }
+    if (msg.lands && msg.lands.length > 0) this.territory.applyEncoded(msg.lands);
+    if (msg.events) this.applyEvents(msg.events);
     for (const snap of msg.ents) this.applySnap(snap);
     if (msg.pickups) {
       this.pickupCount = 0;
@@ -478,13 +490,13 @@ export class Game {
       if (!prevAlive && alive) this.shownKills = snap.k;
       else if (snap.k > this.shownKills) this.shownKills = snap.k;
       ent.kills = Math.max(snap.k, this.shownKills);
-      if (this.phase === 'playing' && alive) this.noteLand(ent.land, ent.kills);
+      if (this.phase === 'playing' && alive) this.noteLand(ent.land, ent.kills, snap.tn);
     } else {
       ent.kills = snap.k;
     }
     ent.coins = snap.c;
     ent.xp = snap.xp;
-    if (snap.tn > ent.trainLen) ent.hop = 0.42;
+    if (snap.tn > ent.trainLen) ent.hop = 0.72;
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
     for (let i = 0; i < ent.trainShown; i++) ent.train[i] = snap.tr[i] ?? 0;
@@ -501,13 +513,8 @@ export class Game {
     if (snap.i === this.selfId) ent.name = 'You';
   }
 
-  private consume(events: WireEvent[], cells: number[]): void {
-    let claim: { n: number; x: number; y: number } | null = null;
-    for (const ev of events) if (ev.e === 'claim' && (!claim || ev.n > claim.n)) claim = ev;
-    if (cells.length > 0) {
-      const animate = !!claim && claim.n > 28;
-      this.territory.applyRuns(cells, animate, claim ? claim.x : 0, claim ? claim.y : 0);
-    }
+  private consume(events: WireEvent[]): void {
+    if (this.offline) this.territory.adopt(this.offline.land, this.offline.land.changedIds());
     this.applyEvents(events);
   }
 
@@ -530,7 +537,8 @@ export class Game {
       } else if (ev.e === 'kill') {
         this.renderer.clearPath(ev.victim);
         const mine = ev.killer === this.selfId || ev.victim === this.selfId;
-        this.renderer.burst(ev.x, ev.y, ev.victim, mine);
+        const killer = this.ents[ev.killer];
+        this.renderer.burst(ev.x, ev.y, ev.victim, mine, killer?.x, killer?.z);
         if (mine) this.hitLeft = 0.06;
         if (ev.killer === this.selfId) {
           const victim = this.ents[ev.victim];
@@ -538,20 +546,19 @@ export class Game {
           if (me) {
             this.shownKills = Math.max(this.shownKills + 1, me.kills + 1);
             me.kills = this.shownKills;
-            this.noteLand(me.land, me.kills);
+            this.noteLand(me.land, me.kills, me.trainLen);
           }
-          this.hud.toast(`Caught ${victim?.name || 'a pet'}!`);
+          this.hud.killBanner(victim?.name || 'a pet');
           buzz(14);
         }
       } else if (ev.e === 'claim') {
-        const loop = this.renderer.exportTrail(ev.id);
-        if (loop.n >= 2) this.territory.offerLoop(ev.id, loop.x, loop.y, loop.n);
         this.renderer.clearPath(ev.id);
         this.renderer.dropCoveredTrails(ev.id);
         if (ev.id === this.selfId && ev.n > 12) {
-          const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
+          const pct = (ev.n / this.arenaArea) * 100;
           const at = this.renderer.project(ev.x, 1.6, ev.y);
           this.hud.popup(at.x, at.y, `+${pct.toFixed(1)}%`, 'claim');
+          this.renderer.coinBurst(ev.x, ev.y);
           if (ev.n > 40) this.renderer.punchClaim();
           if (ev.n > 180) buzz(10);
         }
@@ -579,19 +586,20 @@ export class Game {
     const levels = applyXp(this.profile.pet, Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
-    this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills);
+    this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills, ev.train);
+    const need = xpForLevel(this.profile.pet.level);
     const rows: DeathView['rows'] = [
-      { k: 'Territory', v: `${pctNum.toFixed(1)}%` },
-      { k: 'Rank', v: `#${ev.rank}` },
-      { k: 'Kills', v: String(ev.kills) },
-      { k: 'Train', v: String(ev.train) },
-      { k: 'Coins', v: `+${ev.coins}` },
-      { k: 'XP', v: `+${Math.round(ev.xp)}` },
-      { k: 'Time', v: formatTime(ev.time) },
+      { k: 'Territory', v: `${pctNum.toFixed(1)}%`, icon: '▣' },
+      { k: 'Rank', v: `#${ev.rank}`, icon: '#' },
+      { k: 'Kills', v: String(ev.kills), icon: '⚔' },
+      { k: 'Train', v: String(ev.train), icon: '🐾' },
+      { k: 'Coins', v: `+${ev.coins}`, icon: '🪙' },
+      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.profile.pet.xp / need : 1 },
+      { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
     ];
-    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.profile.pet.level}`, up: true });
+    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.profile.pet.level}`, icon: '▲', up: true });
     this.hud.hideSteer();
-    this.hud.showDeath({ title: deathTitle(ev.reason), rows });
+    this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows });
     buzz(20);
   }
 
@@ -612,6 +620,7 @@ export class Game {
       draw.outside = ent.outside;
       draw.hop = ent.hop;
       draw.blink = ent.blinkUntil > performance.now();
+      draw.name = ent.name;
       if (!ent.alive) {
         draw.x = ent.x;
         draw.z = ent.z;
@@ -641,7 +650,7 @@ export class Game {
       if (ent.used && ent.alive) this.order.push(id);
     }
     this.order.sort((a, b) => this.ents[b]!.land - this.ents[a]!.land);
-    const total = CONFIG.gridW * CONFIG.gridH;
+    const total = this.arenaArea;
     const topIds: number[] = [];
     const listed = new Set<number>();
     for (const id of this.order) {
@@ -670,18 +679,18 @@ export class Game {
       row.color = cssColor(ent.id);
     }
     this.hud.setBoard(this.board);
-    if (me && me.used && me.alive && this.phase === 'playing') {
-      this.noteLand(me.land, Math.max(me.kills, this.shownKills));
+      if (me && me.used && me.alive && this.phase === 'playing') {
+      this.noteLand(me.land, Math.max(me.kills, this.shownKills), me.trainLen);
     }
   }
 
   /** HUD percent and the You leaderboard row, from the same land count. */
-  private noteLand(land: number, kills: number): void {
-    const pctNum = (land / (CONFIG.gridW * CONFIG.gridH)) * 100;
+  private noteLand(land: number, kills: number, train = 0): void {
+    const pctNum = (land / this.arenaArea) * 100;
     this.shownPct = pctNum;
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     const text = `${pctNum.toFixed(1)}%`;
-    this.hud.setYou(text, kills);
+    this.hud.setYou(text, kills, train);
     let patched = false;
     for (const row of this.board) {
       if (!row.me || !row.show) continue;
@@ -774,12 +783,26 @@ export class Game {
 
   private sampleTrails(limit: number, own: boolean) {
     const out: Array<{ x: number; y: number; owner: number }> = [];
-    const { trail, gridW, gridH } = this.territory;
     const mine = this.selfId;
-    for (let i = 0; i < gridW * gridH && out.length < limit; i++) {
-      const owner = trail[i]!;
-      if (owner === 0) continue;
-      if (own ? owner === mine : owner !== mine) out.push({ x: (i % gridW) + 0.5, y: ((i / gridW) | 0) + 0.5, owner });
+    if (this.offline) {
+      for (const p of this.offline.roster) {
+        if (!p.active || p.trailLen === 0) continue;
+        if (own ? p.id !== mine : p.id === mine) continue;
+        const step = Math.max(1, Math.ceil(p.trailLen / Math.max(1, limit)));
+        for (let i = 0; i < p.trailLen && out.length < limit; i += step) {
+          out.push({ x: p.trailX[i]!, y: p.trailY[i]!, owner: p.id });
+        }
+      }
+      return out;
+    }
+    for (let id = 1; id < this.ents.length && out.length < limit; id++) {
+      if (own ? id !== mine : id === mine) continue;
+      const loop = this.renderer.exportTrail(id);
+      if (loop.n < 1) continue;
+      const step = Math.max(1, Math.ceil(loop.n / Math.max(1, limit)));
+      for (let i = 0; i < loop.n && out.length < limit; i += step) {
+        out.push({ x: loop.x[i]!, y: loop.y[i]!, owner: id });
+      }
     }
     return out;
   }
@@ -861,6 +884,12 @@ function sampleEnt(ent: Ent, tick: number, draw: DrawPet): void {
   draw.h = lerpAngle(ent.sh[prev]!, ent.sh[next]!, t);
 }
 
+function readName(): string {
+  const el = document.getElementById('name') as HTMLInputElement | null;
+  const name = (el?.value ?? 'You').trim().slice(0, 16);
+  return name || 'You';
+}
+
 function formatTime(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`;
@@ -910,8 +939,9 @@ declare global {
         } | null;
         screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
       };
+      landVerts: () => number;
+      landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
       steer: (x: number, y: number) => void;
-      cell: (x: number, y: number) => number;
       project: (x: number, y: number) => { x: number; y: number; ok: boolean };
     };
   }

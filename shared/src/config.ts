@@ -131,24 +131,24 @@ export function makeConfig(over: Partial<GameConfig> = {}): GameConfig {
   };
 }
 
-/** Bright, distinct player colors. Index 0 is player id 1. */
+/** Saturated paper.io-style owner colors. Index 0 is player id 1. */
 export const PALETTE: ReadonlyArray<readonly [number, number, number]> = [
-  [255, 79, 94],
-  [255, 159, 28],
-  [255, 209, 0],
-  [126, 217, 60],
-  [14, 196, 142],
-  [0, 190, 255],
-  [70, 120, 255],
-  [150, 92, 255],
-  [255, 82, 196],
-  [255, 122, 140],
-  [255, 112, 64],
-  [176, 220, 48],
-  [0, 200, 186],
-  [88, 154, 255],
-  [196, 92, 255],
-  [255, 96, 160],
+  [255, 45, 125],
+  [255, 122, 0],
+  [255, 214, 0],
+  [150, 230, 15],
+  [28, 200, 62],
+  [0, 200, 168],
+  [0, 188, 255],
+  [48, 92, 255],
+  [142, 52, 255],
+  [255, 36, 198],
+  [255, 42, 58],
+  [255, 112, 92],
+  [255, 156, 32],
+  [64, 220, 130],
+  [0, 132, 255],
+  [255, 72, 168],
 ];
 
 export const SPECIES = [

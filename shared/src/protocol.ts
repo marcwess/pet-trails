@@ -14,6 +14,8 @@ export interface WelcomeMsg {
   gridH: number;
   pet: number;
   tickHz: number;
+  /** Room seed. The client rebuilds the same curved map outline from it. */
+  seed: number;
   names: Array<{ i: number; n: string; p: number; b: number }>;
 }
 
@@ -39,8 +41,12 @@ export interface DeltaMsg {
   ack: number;
   you: [number, number, number];
   ents: EntSnap[];
-  /** RLE [start, owner, trail, length, ...] */
-  cells?: number[];
+  /**
+   * Polygons for owners that changed this tick. Flat integers:
+   * [id, polyCount, (ringCount, (n, x, y, ...))...]. Coordinates are cell units × 16.
+   * polyCount 0 clears that owner.
+   */
+  lands?: number[];
   /** Flat [id, kind, x, y, ...] */
   pickups?: number[];
   events?: WireEvent[];

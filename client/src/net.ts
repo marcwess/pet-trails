@@ -20,7 +20,6 @@ export class NetClient {
 
   onWelcome: ((msg: WelcomeMsg) => void) | null = null;
   onDelta: ((msg: DeltaMsg) => void) | null = null;
-  onGrid: ((owner: Uint8Array, trail: Uint8Array, tick: number) => void) | null = null;
   onMode: ((mode: NetMode) => void) | null = null;
   onFull: (() => void) | null = null;
 
@@ -109,17 +108,7 @@ export class NetClient {
   }
 
   private onMessage(data: unknown): void {
-    if (data instanceof ArrayBuffer) {
-      const view = new DataView(data);
-      if (view.byteLength < 5 || view.getUint8(0) !== 1) return;
-      const tick = view.getUint32(1, true);
-      const n = (view.byteLength - 5) / 2;
-      const bytes = new Uint8Array(data);
-      const owner = bytes.subarray(5, 5 + n);
-      const trail = bytes.subarray(5 + n, 5 + n * 2);
-      this.onGrid?.(owner, trail, tick);
-      return;
-    }
+    if (data instanceof ArrayBuffer) return;
     const text = typeof data === 'string' ? data : String(data);
     let msg: unknown;
     try {

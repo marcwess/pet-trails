@@ -6,7 +6,7 @@ import { Game } from './game.js';
 import { Hud } from './hud.js';
 import { Input } from './input.js';
 import { NetClient } from './net.js';
-import { loadPetGeometries } from './pets.js';
+import { loadCoinGeometry, loadPetGeometries } from './pets.js';
 import { Perf } from './perf.js';
 import { loadProfile } from './profileStore.js';
 import { Renderer } from './render.js';
@@ -38,10 +38,13 @@ async function main(): Promise<void> {
   hud.setPetLine(`Loading pets…`);
   hud.setPlayEnabled(false);
   const territory = new Territory(CONFIG.gridW, CONFIG.gridH);
-  const loaded = await loadPetGeometries(import.meta.env.BASE_URL, (done, total) => {
-    hud.setPetLine(`Loading pets ${done}/${total}`);
-  });
-  const renderer = new Renderer(territory, loaded.geos, loaded.material, perf);
+  const [loaded, coin] = await Promise.all([
+    loadPetGeometries(import.meta.env.BASE_URL, (done, total) => {
+      hud.setPetLine(`Loading pets ${done}/${total}`);
+    }),
+    loadCoinGeometry(import.meta.env.BASE_URL),
+  ]);
+  const renderer = new Renderer(territory, loaded.geos, loaded.material, perf, coin);
   renderer.warmup();
   hud.setPetLine(`Your pet · ${SPECIES_LABEL[species]} · Lv ${profile.pet.level}`);
   hud.setPlayEnabled(true);

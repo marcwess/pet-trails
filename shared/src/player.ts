@@ -18,7 +18,9 @@ export class Player {
   coins = 0;
   xp = 0;
   outside = false;
-  trail: Int32Array;
+  /** Trail polyline in cell coordinates, recorded while outside owned land. */
+  trailX: Float64Array;
+  trailY: Float64Array;
   trailLen = 0;
   train: Uint8Array;
   trainLen = 0;
@@ -45,7 +47,8 @@ export class Player {
 
   constructor(id: number, maxTrail: number, maxTrain: number) {
     this.id = id;
-    this.trail = new Int32Array(maxTrail);
+    this.trailX = new Float64Array(maxTrail);
+    this.trailY = new Float64Array(maxTrail);
     this.train = new Uint8Array(maxTrain);
   }
 

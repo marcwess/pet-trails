@@ -14,8 +14,8 @@ export class Input {
   private mouseValid = false;
   private readonly fine = window.matchMedia('(pointer: fine)').matches;
   private readonly keysOnly = new URLSearchParams(location.search).has('keys');
-  private readonly stick = document.getElementById('stick');
-  private readonly knob = document.getElementById('stick-knob');
+  private readonly stickEl = document.getElementById('stick');
+  private readonly knobEl = document.getElementById('stick-knob');
 
   constructor(private readonly playerScreen: () => { x: number; y: number } | null) {
     window.addEventListener('pointerdown', this.onDown, { passive: false });
@@ -68,6 +68,19 @@ export class Input {
     this.keys.delete(ev.key.toLowerCase());
   };
 
+  private readonly stickOut = { x: 0, y: 0, dx: 0, dy: 0, on: false };
+
+  /** Where the finger is, for the on-screen ring. Steering math is unchanged. */
+  stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
+    const out = this.stickOut;
+    out.x = this.originX;
+    out.y = this.originY;
+    out.dx = this.lastX - this.originX;
+    out.dy = this.lastY - this.originY;
+    out.on = this.active;
+    return out;
+  }
+
   /**
    * Absolute stick. Screen up is world +Y and screen right is world +X.
    * Drag is measured from the touch-down point, keys are those axes, and the
@@ -114,8 +127,8 @@ export class Input {
 
   /** Knob sits along the drag, which is the world direction (screen up = north). */
   private placeStick(): void {
-    const stick = this.stick;
-    const knob = this.knob;
+    const stick = this.stickEl;
+    const knob = this.knobEl;
     if (!stick || !knob) return;
     if (!this.active) {
       stick.hidden = true;
