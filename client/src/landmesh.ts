@@ -6,7 +6,7 @@ import { ShapeUtils, Vector2 } from 'three';
  * pixels under the play camera, so the wall is tall enough to read as a
  * paper.io slab while the flat top stays the exact owner color.
  */
-export const SLAB_H = 0.36;
+export const SLAB_H = 0.62;
 
 export interface LandBuffers {
   fillPos: Float32Array;

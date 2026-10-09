@@ -513,13 +513,17 @@ export class Renderer {
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
     // Walls are lit Lambert. The hemisphere keeps the shaded face in the owner
     // hue, and the two directions give the slab a light side and a dark side.
-    this.scene.add(new HemisphereLight(0xfff6ec, 0xb9c8d8, 0.9));
-    const key = new DirectionalLight(0xfffaf4, 0.72);
+    this.scene.add(new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.05));
+    const key = new DirectionalLight(0xfffaf4, 0.55);
     key.position.set(26, 42, 18);
     this.scene.add(key);
-    const fillLight = new DirectionalLight(0xd7e4f4, 0.38);
-    fillLight.position.set(-22, 30, -16);
+    const fillLight = new DirectionalLight(0xe7eef6, 0.42);
+    fillLight.position.set(-18, 28, -8);
     this.scene.add(fillLight);
+    // From the south, so the camera-facing slab wall stays in the owner hue.
+    const rimLight = new DirectionalLight(0xfff6ee, 0.7);
+    rimLight.position.set(0, 22, -36);
+    this.scene.add(rimLight);
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
@@ -555,7 +559,7 @@ export class Renderer {
       fill.frustumCulled = false;
       fill.renderOrder = 2;
       fill.visible = false;
-      const shade = 0.7;
+      const shade = 0.78;
       const wall = (Math.round(col[0] * shade) << 16) | (Math.round(col[1] * shade) << 8) | Math.round(col[2] * shade);
       const rim = new Mesh(rimGeo, new MeshLambertMaterial({ color: wall, toneMapped: false }));
       rim.frustumCulled = false;
