@@ -4,6 +4,8 @@ export { mulberry32 } from './rng.js';
 export { integrateBody, angleDelta, lerpAngle, walkCells } from './motion.js';
 export type { Body } from './motion.js';
 export { Grid, encodeCellRuns } from './grid.js';
+export { LandBook, cloneMulti, multiArea, multiContains } from './land.js';
+export type { MultiPolygon, Polygon, Ring, Pair } from './land.js';
 export { Player } from './player.js';
 export type { DeathReason } from './player.js';
 export { Sim } from './sim.js';

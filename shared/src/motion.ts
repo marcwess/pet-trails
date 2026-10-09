@@ -56,6 +56,7 @@ export function integrateBody(
   if (!onCell) {
     body.x = nx;
     body.y = ny;
+    if (hitBorder && onBorder) onBorder();
     return;
   }
 

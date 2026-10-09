@@ -143,10 +143,6 @@ export class Game {
       if (mode === 'offline' && this.phase === 'playing' && !this.offline) this.onDisconnect();
     };
     this.net.onWelcome = (msg) => this.onWelcome(msg);
-    this.net.onGrid = (owner, trail) => {
-      this.territory.applySnapshot(owner, trail);
-      this.renderer.clearPaths();
-    };
     this.net.onDelta = (msg) => this.onDelta(msg);
     this.net.onFull = () => {
       if (this.phase !== 'title') this.startOffline();
@@ -164,6 +160,7 @@ export class Game {
       sampleOwnTrail: (limit = 80) => this.sampleTrails(limit, true),
       entities: () => this.entityList(),
       landCheck: () => this.landCheck(),
+      landVerts: () => this.territory.vertexCount(),
     };
   }
 
@@ -199,9 +196,9 @@ export class Game {
       this.net.send({ t: 'play' });
       this.phase = 'playing';
     } else if (this.offline) {
-      this.offline.grid.beginTick();
+      this.offline.land.beginTick();
       this.offline.respawn(this.selfId);
-      this.consume(this.offline.consumeEvents(), this.offline.cellRuns());
+      this.consume(this.offline.consumeEvents());
       this.syncOffline(this.offline, false);
       this.phase = 'playing';
       this.snapCam = true;
@@ -218,7 +215,9 @@ export class Game {
     if (!player) return;
     this.offline = sim;
     this.selfId = player.id;
-    this.territory.applySnapshot(sim.grid.owner, sim.grid.trail);
+    const ids: number[] = [];
+    for (let id = 1; id <= sim.cfg.maxEntities; id++) if (sim.land.get(id).length > 0) ids.push(id);
+    this.territory.adopt(sim.land, ids);
     this.renderer.clearPaths();
     for (const ent of this.ents) ent.used = false;
     this.syncOffline(sim, true);
@@ -281,7 +280,7 @@ export class Game {
       const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
       if (mag > 0.15) sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, this.seq++);
       sim.step({ humans: 1 });
-      this.consume(sim.consumeEvents(), sim.cellRuns());
+      this.consume(sim.consumeEvents());
       this.syncOffline(sim, false);
       this.pickupCount = 0;
       sim.forEachActivePickup(this.readPickup);
@@ -388,17 +387,8 @@ export class Game {
   private onDelta(msg: DeltaMsg): void {
     this.serverTick = msg.tick;
     this.serverTickAt = performance.now();
-    let claim: { n: number; x: number; y: number } | null = null;
-    if (msg.events) {
-      for (const ev of msg.events) {
-        if (ev.e === 'claim' && (!claim || ev.n > claim.n)) claim = ev;
-      }
-      this.applyEvents(msg.events);
-    }
-    if (msg.cells && msg.cells.length > 0) {
-      const animate = !!claim && claim.n > 28;
-      this.territory.applyRuns(msg.cells, animate, claim ? claim.x : 0, claim ? claim.y : 0);
-    }
+    if (msg.lands && msg.lands.length > 0) this.territory.applyEncoded(msg.lands);
+    if (msg.events) this.applyEvents(msg.events);
     for (const snap of msg.ents) this.applySnap(snap);
     if (msg.pickups) {
       this.pickupCount = 0;
@@ -489,13 +479,8 @@ export class Game {
     if (snap.i === this.selfId) ent.name = 'You';
   }
 
-  private consume(events: WireEvent[], cells: number[]): void {
-    let claim: { n: number; x: number; y: number } | null = null;
-    for (const ev of events) if (ev.e === 'claim' && (!claim || ev.n > claim.n)) claim = ev;
-    if (cells.length > 0) {
-      const animate = !!claim && claim.n > 28;
-      this.territory.applyRuns(cells, animate, claim ? claim.x : 0, claim ? claim.y : 0);
-    }
+  private consume(events: WireEvent[]): void {
+    if (this.offline) this.territory.adopt(this.offline.land, this.offline.land.changedIds());
     this.applyEvents(events);
   }
 
@@ -532,8 +517,6 @@ export class Game {
           buzz(14);
         }
       } else if (ev.e === 'claim') {
-        const loop = this.renderer.exportTrail(ev.id);
-        if (loop.n >= 2) this.territory.offerLoop(ev.id, loop.x, loop.y, loop.n);
         this.renderer.clearPath(ev.id);
         this.renderer.dropCoveredTrails(ev.id);
         if (ev.id === this.selfId && ev.n > 12) {
@@ -762,12 +745,26 @@ export class Game {
 
   private sampleTrails(limit: number, own: boolean) {
     const out: Array<{ x: number; y: number; owner: number }> = [];
-    const { trail, gridW, gridH } = this.territory;
     const mine = this.selfId;
-    for (let i = 0; i < gridW * gridH && out.length < limit; i++) {
-      const owner = trail[i]!;
-      if (owner === 0) continue;
-      if (own ? owner === mine : owner !== mine) out.push({ x: (i % gridW) + 0.5, y: ((i / gridW) | 0) + 0.5, owner });
+    if (this.offline) {
+      for (const p of this.offline.roster) {
+        if (!p.active || p.trailLen === 0) continue;
+        if (own ? p.id !== mine : p.id === mine) continue;
+        const step = Math.max(1, Math.ceil(p.trailLen / Math.max(1, limit)));
+        for (let i = 0; i < p.trailLen && out.length < limit; i += step) {
+          out.push({ x: p.trailX[i]!, y: p.trailY[i]!, owner: p.id });
+        }
+      }
+      return out;
+    }
+    for (let id = 1; id < this.ents.length && out.length < limit; id++) {
+      if (own ? id !== mine : id === mine) continue;
+      const loop = this.renderer.exportTrail(id);
+      if (loop.n < 1) continue;
+      const step = Math.max(1, Math.ceil(loop.n / Math.max(1, limit)));
+      for (let i = 0; i < loop.n && out.length < limit; i += step) {
+        out.push({ x: loop.x[i]!, y: loop.y[i]!, owner: id });
+      }
     }
     return out;
   }
@@ -898,6 +895,7 @@ declare global {
         } | null;
         screen: { x0: number; y0: number; x1: number; y1: number; dpr: number } | null;
       };
+      landVerts: () => number;
     };
   }
 }

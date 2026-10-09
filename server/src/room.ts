@@ -86,19 +86,18 @@ export class Room {
         return;
       }
       conn.id = p.id;
-      // First look at the room. The client has no grid yet.
+      // First look at the room. Send every current polygon, not a cell snapshot.
       this.sendWelcome(conn);
-      this.sendGrid(conn);
-      this.sendDelta(conn, this.sim.consumeEvents(), []);
+      this.sendDelta(conn, this.sim.consumeEvents(), this.sim.land.encodeAll());
       return;
     }
     const existing = this.sim.players[conn.id];
     if (existing) existing.pet = pet;
-    // The client already has the map. Send only the cleared land and the new square.
-    this.sim.grid.beginTick();
+    // The client already has the map. Send only this owner's new square.
+    this.sim.land.beginTick();
     this.sim.respawn(conn.id);
     this.sendWelcome(conn);
-    this.sendDelta(conn, this.sim.consumeEvents(), this.sim.cellRuns());
+    this.sendDelta(conn, this.sim.consumeEvents(), this.sim.landPatch());
   }
 
   private drop(conn: Conn): void {
@@ -112,14 +111,14 @@ export class Room {
 
   private broadcast(): void {
     const events = this.sim.consumeEvents() as WireEvent[];
-    const cells = this.sim.cellRuns();
+    const lands = this.sim.landPatch();
     for (const conn of this.conns) {
       if (conn.id === null || conn.ws.readyState !== conn.ws.OPEN) continue;
-      this.sendDelta(conn, events, cells);
+      this.sendDelta(conn, events, lands);
     }
   }
 
-  private sendDelta(conn: Conn, events: WireEvent[], cells: number[]): void {
+  private sendDelta(conn: Conn, events: WireEvent[], lands: number[]): void {
     const id = conn.id;
     if (id === null) return;
     const self = this.sim.players[id];
@@ -157,7 +156,7 @@ export class Room {
       ents,
       events,
     };
-    if (cells.length > 0) delta.cells = cells;
+    if (lands.length > 0) delta.lands = lands;
     delta.pickups = this.encodePickups();
     this.send(conn, delta);
   }
@@ -179,17 +178,6 @@ export class Room {
       names,
     };
     this.send(conn, msg);
-  }
-
-  private sendGrid(conn: Conn): void {
-    const { owner, trail, w, h } = this.sim.grid;
-    const n = w * h;
-    const buf = Buffer.allocUnsafe(5 + n * 2);
-    buf[0] = 1;
-    buf.writeUInt32LE(this.sim.tick >>> 0, 1);
-    buf.set(owner.subarray(0, n), 5);
-    buf.set(trail.subarray(0, n), 5 + n);
-    if (conn.ws.readyState === conn.ws.OPEN) conn.ws.send(buf);
   }
 
   private encodePickups(): number[] {

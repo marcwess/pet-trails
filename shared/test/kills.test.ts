@@ -11,8 +11,8 @@ function placePair(seed: number) {
   const a = sim.addHuman('A', 1);
   const b = sim.addHuman('B', 5);
   assert.ok(a && b);
-  sim.grid.clearPlayer(a.id);
-  sim.grid.clearPlayer(b.id);
+  sim.debugClear(a.id);
+  sim.debugClear(b.id);
   return { sim, a, b };
 }
 
@@ -38,7 +38,7 @@ test('cutting a trail kills the owner and credits the cutter', () => {
   const { sim, a, b } = placePair(1);
   sim.debugGiveRect(a.id, 2, 2, 4, 4);
   sim.debugGiveRect(b.id, 20, 20, 4, 4);
-  const trailCell = sim.grid.idx(12, 12);
+  const trailCell = sim.idx(12, 12);
   sim.debugSetTrail(a.id, [trailCell]);
   sim.debugPlace(a.id, 3.5, 3.5, 0);
   a.outside = true;
@@ -54,7 +54,7 @@ test('cutting a trail kills the owner and credits the cutter', () => {
   assert.equal(b.kills, 1);
   assert.equal(b.trainLen, 1);
   assert.equal(b.train[0], a.pet);
-  assert.equal(sim.grid.landCount[a.id], 0);
+  assert.equal(sim.land.areaOf(a.id), 0);
   assert.ok(b.coins >= sim.cfg.killCoins);
   assert.ok(sim.auditLand());
 });
@@ -62,7 +62,7 @@ test('cutting a trail kills the owner and credits the cutter', () => {
 test('hitting your own trail is a death with no kill credit', () => {
   const { sim, a, b } = placePair(2);
   sim.debugGiveRect(a.id, 2, 2, 4, 4);
-  const trailCell = sim.grid.idx(14, 14);
+  const trailCell = sim.idx(14, 14);
   sim.debugSetTrail(a.id, [trailCell]);
   sim.debugPlace(a.id, 14.5, 12.2, Math.PI / 2);
   b.frozen = true;
@@ -75,7 +75,7 @@ test('hitting your own trail is a death with no kill credit', () => {
   assert.equal(a.deathReason, 'self');
   assert.equal(b.kills, killsBefore);
   assert.equal(sim.stats.kills, 0);
-  assert.equal(sim.grid.landCount[a.id], 0);
+  assert.equal(sim.land.areaOf(a.id), 0);
 });
 
 test('head-on: more land wins, the smaller pet joins the train', () => {
@@ -95,7 +95,7 @@ test('head-on: more land wins, the smaller pet joins the train', () => {
   assert.equal(b.deathReason, 'headon');
   assert.equal(a.kills, 1);
   assert.equal(a.train[0], b.pet);
-  assert.equal(sim.grid.landCount[b.id], 0);
+  assert.equal(sim.land.areaOf(b.id), 0);
   assert.ok(a.land > 0);
 });
 
@@ -126,8 +126,8 @@ test('a fresh spawn shrugs off a head-on until invulnerability ends', () => {
   const a = sim.addHuman('A', 0);
   const b = sim.addHuman('B', 1);
   assert.ok(a && b);
-  sim.grid.clearPlayer(a.id);
-  sim.grid.clearPlayer(b.id);
+  sim.debugClear(a.id);
+  sim.debugClear(b.id);
   sim.debugGiveRect(a.id, 2, 2, 4, 4);
   sim.debugGiveRect(b.id, 40, 40, 4, 4);
   a.invulnUntil = sim.tick + 30;

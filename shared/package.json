@@ -14,5 +14,8 @@
   },
   "devDependencies": {
     "tsx": "^4.20.3"
+  },
+  "dependencies": {
+    "polygon-clipping": "^0.15.7"
   }
 }

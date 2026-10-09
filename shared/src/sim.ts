@@ -1,6 +1,6 @@
 import { updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
-import { encodeCellRuns, Grid } from './grid.js';
+import { LandBook, distPointSeg, polylineNearSegment } from './land.js';
 import { integrateBody } from './motion.js';
 import { Player, type DeathReason } from './player.js';
 import { mulberry32, rngInt } from './rng.js';
@@ -15,15 +15,15 @@ interface Pickup {
 }
 
 const PICKUP_POOL = 72;
+const TRAIL_CAP = 8192;
 
 /**
- * Authoritative paper.io-style simulation. One instance runs on the server,
- * the same class runs offline in the browser. No per-tick allocations on the
- * hot path besides the event objects the server is about to serialize.
+ * Authoritative paper.io-style simulation. Territory is a multi-polygon per
+ * owner. One instance runs on the server and the same class runs offline.
  */
 export class Sim {
   readonly cfg: GameConfig;
-  readonly grid: Grid;
+  readonly land: LandBook;
   readonly players: Array<Player | null>;
   readonly roster: Player[];
   readonly tickDt: number;
@@ -39,20 +39,14 @@ export class Sim {
   private readonly freeNames: string[] = [];
   private readonly aliveBuf: Player[] = [];
   private botView: BotView;
-  /** Scratch for claim-edge trim. Not used on the per-tick path. */
-  private readonly fringe: Int32Array;
-  private fringeN = 0;
-  private readonly fringeMark: Uint8Array;
-  private fringeStamp = 1;
 
   constructor(over: Partial<GameConfig> = {}, seed = 1) {
     this.cfg = makeConfig(over);
-    const maxTrail = this.cfg.gridW * this.cfg.gridH;
-    this.grid = new Grid(this.cfg.gridW, this.cfg.gridH, this.cfg.maxEntities);
+    this.land = new LandBook(this.cfg.maxEntities, this.cfg.gridW, this.cfg.gridH);
     this.players = new Array(this.cfg.maxEntities + 1).fill(null);
     this.roster = [];
     for (let id = 1; id <= this.cfg.maxEntities; id++) {
-      const p = new Player(id, maxTrail, this.cfg.maxTrainStored);
+      const p = new Player(id, TRAIL_CAP, this.cfg.maxTrainStored);
       this.roster.push(p);
       this.players[id] = p;
     }
@@ -65,14 +59,11 @@ export class Sim {
     this.botView = {
       tick: 0,
       cfg: this.cfg,
-      grid: this.grid,
+      land: this.land,
       players: this.players,
       rng: this.rng,
       dt: this.tickDt,
     };
-    const cells = this.cfg.gridW * this.cfg.gridH;
-    this.fringe = new Int32Array(cells);
-    this.fringeMark = new Uint8Array(cells);
   }
 
   addHuman(name: string, pet: number): Player | null {
@@ -102,7 +93,7 @@ export class Sim {
   remove(id: number): void {
     const p = this.players[id];
     if (!p || !p.active) return;
-    if (p.alive) this.grid.clearPlayer(id);
+    if (p.alive) this.land.clear(id);
     if (p.bot) this.releaseBotName(p.name);
     p.alive = false;
     p.active = false;
@@ -139,7 +130,7 @@ export class Sim {
   respawn(id: number): void {
     const p = this.players[id];
     if (!p || !p.active) return;
-    if (p.alive) this.grid.clearPlayer(id);
+    if (p.alive) this.land.clear(id);
     this.spawn(p);
     this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: p.bot });
   }
@@ -173,7 +164,7 @@ export class Sim {
 
   step(opts?: { humans?: number }): void {
     this.tick++;
-    this.grid.beginTick();
+    this.land.beginTick();
     if (opts && opts.humans !== undefined) this.maintainBots(opts.humans);
     this.botView.tick = this.tick;
     const dt = this.tickDt;
@@ -186,9 +177,13 @@ export class Sim {
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
       p.aliveMs += dt * 1000;
-      integrateBody(p, dt, this.cfg, (cx, cy) => this.enterCell(p, cx, cy), () => {
+      const x0 = p.x;
+      const y0 = p.y;
+      integrateBody(p, dt, this.cfg, undefined, () => {
         if (p.alive) this.kill(p, null, 'border');
       });
+      if (!p.alive) continue;
+      this.followSegment(p, x0, y0, p.x, p.y);
     }
 
     this.resolveHeadOns();
@@ -198,7 +193,7 @@ export class Sim {
 
     for (const p of this.roster) {
       if (!p.active) continue;
-      p.land = this.grid.landCount[p.id] ?? 0;
+      p.land = this.land.areaOf(p.id);
     }
   }
 
@@ -208,8 +203,9 @@ export class Sim {
     return out;
   }
 
-  cellRuns(): number[] {
-    return encodeCellRuns(this.grid);
+  /** Quantized polygons for owners dirtied since the last beginTick. */
+  landPatch(): number[] {
+    return this.land.encode(this.land.changedIds());
   }
 
   activePickups(): Pickup[] {
@@ -222,11 +218,28 @@ export class Sim {
     }
   }
 
-  /** Test helper: wipe the grid and stamp a rectangle of land. Does not move the player. */
-  debugGiveRect(id: number, x: number, y: number, w: number, h: number): void {
-    this.grid.fillRect(id, x, y, w, h);
+  idx(x: number, y: number): number {
+    return y * this.cfg.gridW + x;
+  }
+
+  ownerAt(x: number, y: number): number {
+    return this.land.ownerAt(x, y);
+  }
+
+  /** Wipe one owner's polygon and trail without killing them. */
+  debugClear(id: number): void {
+    this.land.clear(id);
     const p = this.players[id];
-    if (p) p.land = this.grid.landCount[id] ?? 0;
+    if (!p) return;
+    p.trailLen = 0;
+    p.land = 0;
+  }
+
+  /** Test helper: union a rectangle of land. Does not move the player. */
+  debugGiveRect(id: number, x: number, y: number, w: number, h: number): void {
+    this.land.unionRect(id, x, y, w, h);
+    const p = this.players[id];
+    if (p) p.land = this.land.areaOf(id);
   }
 
   debugPlace(id: number, x: number, y: number, heading = 0): void {
@@ -238,18 +251,17 @@ export class Sim {
     p.desiredX = Math.cos(heading);
     p.desiredY = Math.sin(heading);
     p.invulnUntil = 0;
-    const cx = Math.floor(x);
-    const cy = Math.floor(y);
-    p.outside = this.grid.owner[this.grid.idx(cx, cy)] !== id;
+    p.outside = !this.land.contains(id, x, y);
   }
 
+  /** Cell indices become trail points at cell centers. */
   debugSetTrail(id: number, cells: number[]): void {
     const p = this.players[id];
     if (!p) return;
     p.trailLen = 0;
+    const w = this.cfg.gridW;
     for (const i of cells) {
-      this.grid.setTrail(i, id);
-      p.trail[p.trailLen++] = i;
+      this.pushTrail(p, (i % w) + 0.5, ((i / w) | 0) + 0.5, 0);
     }
     p.outside = true;
   }
@@ -258,20 +270,14 @@ export class Sim {
   debugClaim(id: number): number {
     const p = this.players[id];
     if (!p) return 0;
-    const before = this.grid.landCount[id] ?? 0;
+    const before = this.land.areaOf(id);
     this.finishClaim(p);
-    p.land = this.grid.landCount[id] ?? 0;
+    p.land = this.land.areaOf(id);
     return p.land - before;
   }
 
   auditLand(): boolean {
-    const counts = new Int32Array(this.cfg.maxEntities + 1);
-    const n = this.grid.w * this.grid.h;
-    for (let i = 0; i < n; i++) counts[this.grid.owner[i]!]!++;
-    for (let id = 1; id <= this.cfg.maxEntities; id++) {
-      if ((counts[id] ?? 0) !== (this.grid.landCount[id] ?? 0)) return false;
-    }
-    return true;
+    return this.land.audit();
   }
 
   private alloc(): Player | null {
@@ -291,11 +297,11 @@ export class Sim {
   }
 
   private spawn(p: Player): void {
-    if (p.alive) this.grid.clearPlayer(p.id);
+    if (p.alive) this.land.clear(p.id);
     p.resetRun();
     const spot = this.findSpawn(p.bot);
     const size = this.cfg.spawnSize;
-    this.grid.fillRect(p.id, spot.x, spot.y, size, size);
+    this.land.unionRect(p.id, spot.x, spot.y, size, size);
     p.x = spot.x + size / 2;
     p.y = spot.y + size / 2;
     const { gridW: w, gridH: h } = this.cfg;
@@ -316,7 +322,7 @@ export class Sim {
     p.desiredY = Math.sin(p.heading);
     p.alive = true;
     p.outside = false;
-    p.land = this.grid.landCount[p.id] ?? 0;
+    p.land = this.land.areaOf(p.id);
     p.respawnTick = 0;
     p.invulnUntil = this.tick + Math.round(this.cfg.tickHz * 2);
     p.botPhase = 0;
@@ -400,208 +406,169 @@ export class Sim {
   }
 
   private areaClear(x0: number, y0: number, size: number): boolean {
-    const xa = Math.max(0, x0);
-    const ya = Math.max(0, y0);
-    const x1 = Math.min(this.grid.w, x0 + size);
-    const y1 = Math.min(this.grid.h, y0 + size);
-    if (x1 <= xa || y1 <= ya) return false;
-    for (let y = ya; y < y1; y++) {
-      for (let x = xa; x < x1; x++) {
-        const i = this.grid.idx(x, y);
-        if (this.grid.owner[i] !== 0 || this.grid.trail[i] !== 0) return false;
+    if (this.land.hitsExcept(0, x0, y0, size, size)) return false;
+    const x1 = x0 + size;
+    const y1 = y0 + size;
+    for (const p of this.roster) {
+      if (!p.active || p.trailLen === 0) continue;
+      for (let i = 0; i < p.trailLen; i += 2) {
+        const x = p.trailX[i]!;
+        const y = p.trailY[i]!;
+        if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return false;
       }
     }
     return true;
   }
 
-  /** @returns false when the mover died on this cell and the walk should stop. */
-  private enterCell(p: Player, cx: number, cy: number): boolean {
-    if (!p.alive) return false;
-    if (cx < 0 || cy < 0 || cx >= this.grid.w || cy >= this.grid.h) return false;
-    const i = this.grid.idx(cx, cy);
-    const tr = this.grid.trail[i]!;
-    const own = this.grid.owner[i]!;
+  private followSegment(p: Player, x0: number, y0: number, x1: number, y1: number): void {
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.max(1, Math.ceil(dist / 0.22));
+    let px = x0;
+    let py = y0;
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps;
+      const x = x0 + (x1 - x0) * t;
+      const y = y0 + (y1 - y0) * t;
+      if (!this.consumeStep(p, px, py, x, y)) {
+        p.x = x;
+        p.y = y;
+        return;
+      }
+      px = x;
+      py = y;
+    }
+  }
 
-    if (tr === p.id && own !== p.id) {
+  /** @returns false when the mover died on this step. */
+  private consumeStep(p: Player, ax: number, ay: number, bx: number, by: number): boolean {
+    if (!p.alive) return false;
+    const radius = this.cfg.headRadius;
+    const tail = p.trailLen > 6 ? 4 : p.trailLen > 1 ? 1 : 0;
+    const selfEnd = p.trailLen - tail;
+    if (selfEnd > 0 && this.hitsOwnTrail(p, ax, ay, bx, by, selfEnd, radius)) {
       this.kill(p, null, 'self');
       return false;
     }
-    if (tr !== 0 && tr !== p.id) {
-      const victim = this.players[tr];
-      if (victim && victim.alive) this.kill(victim, p, 'trail');
+    for (const o of this.roster) {
+      if (!o.active || !o.alive || o.id === p.id || o.trailLen === 0) continue;
+      if (polylineNearSegment(ax, ay, bx, by, o.trailX, o.trailY, 0, o.trailLen, radius)) {
+        this.kill(o, p, 'trail');
+      }
     }
     if (!p.alive) return false;
 
-    if (this.grid.owner[i] === p.id) {
-      if (p.outside && p.trailLen > 0) this.finishClaim(p);
-      if (!p.alive) return false;
+    const inside = this.land.contains(p.id, bx, by);
+    if (inside) {
+      if (p.outside && p.trailLen > 0) {
+        const hit = this.boundaryPoint(p.id, ax, ay, bx, by, true);
+        this.pushTrail(p, hit[0], hit[1], 0.04);
+        if (p.trailLen >= 3) this.finishClaim(p);
+        else p.trailLen = 0;
+        if (!p.alive) return false;
+      }
       p.outside = false;
       return true;
     }
 
-    if (this.grid.trail[i] !== p.id && p.trailLen < p.trail.length) {
-      this.grid.setTrail(i, p.id);
-      p.trail[p.trailLen++] = i;
+    if (!p.outside) {
+      const hit = this.boundaryPoint(p.id, ax, ay, bx, by, false);
+      this.pushTrail(p, hit[0], hit[1], 0.02);
+      p.outside = true;
     }
+    this.pushTrail(p, bx, by, 0.28);
     p.outside = true;
-    return p.alive;
+    return true;
+  }
+
+  private hitsOwnTrail(p: Player, ax: number, ay: number, bx: number, by: number, end: number, radius: number): boolean {
+    // The fresh tail sits on the segment we just travelled. Only an older
+    // point that this step actually moves toward counts as a cross.
+    const vx = bx - ax;
+    const vy = by - ay;
+    const len2 = vx * vx + vy * vy;
+    let cut = end;
+    let acc = 0;
+    const keep = Math.max(1.2, radius * 1.4);
+    for (let i = p.trailLen - 1; i > 0; i--) {
+      acc += Math.hypot(p.trailX[i]! - p.trailX[i - 1]!, p.trailY[i]! - p.trailY[i - 1]!);
+      if (acc >= keep) {
+        cut = Math.min(end, i);
+        break;
+      }
+    }
+    for (let i = 0; i < cut; i++) {
+      const x = p.trailX[i]!;
+      const y = p.trailY[i]!;
+      if (this.land.contains(p.id, x, y)) continue;
+      let t = 1;
+      if (len2 > 1e-12) t = ((x - ax) * vx + (y - ay) * vy) / len2;
+      if (t < 0.08) continue;
+      if (distPointSeg(x, y, ax, ay, bx, by) <= radius) return true;
+    }
+    return false;
+  }
+
+  /** Binary search the segment for the land boundary. `endInside` is the state at (bx, by). */
+  private boundaryPoint(id: number, ax: number, ay: number, bx: number, by: number, endInside: boolean): [number, number] {
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 12; i++) {
+      const m = (lo + hi) * 0.5;
+      const x = ax + (bx - ax) * m;
+      const y = ay + (by - ay) * m;
+      if (this.land.contains(id, x, y) === endInside) hi = m;
+      else lo = m;
+    }
+    const m = (lo + hi) * 0.5;
+    return [ax + (bx - ax) * m, ay + (by - ay) * m];
+  }
+
+  private pushTrail(p: Player, x: number, y: number, min: number): void {
+    if (p.trailLen > 0) {
+      const dx = x - p.trailX[p.trailLen - 1]!;
+      const dy = y - p.trailY[p.trailLen - 1]!;
+      if (dx * dx + dy * dy < min * min) return;
+    }
+    if (p.trailLen >= p.trailX.length) return;
+    p.trailX[p.trailLen] = x;
+    p.trailY[p.trailLen] = y;
+    p.trailLen++;
   }
 
   private finishClaim(p: Player): void {
-    this.grid.floodOutside(p.id);
+    const ok = this.land.prepareClaim(p.id, p.trailX, p.trailY, p.trailLen);
     const victims: Array<{ p: Player; reason: DeathReason }> = [];
-    for (const o of this.roster) {
-      if (!o.active || !o.alive || o.id === p.id) continue;
-      const cx = Math.floor(o.x);
-      const cy = Math.floor(o.y);
-      if (cx >= 0 && cy >= 0 && cx < this.grid.w && cy < this.grid.h) {
-        const hi = this.grid.idx(cx, cy);
-        if (this.grid.inNewRegion(hi, p.id)) {
+    if (ok) {
+      for (const o of this.roster) {
+        if (!o.active || !o.alive || o.id === p.id) continue;
+        if (this.land.pointInAdded(o.x, o.y)) {
           victims.push({ p: o, reason: 'enclosed' });
           continue;
         }
-      }
-      for (let t = 0; t < o.trailLen; t++) {
-        const j = o.trail[t]!;
-        if (this.grid.inNewRegion(j, p.id)) {
-          victims.push({ p: o, reason: 'trail' });
-          break;
+        for (let t = 0; t < o.trailLen; t++) {
+          if (this.land.pointInAdded(o.trailX[t]!, o.trailY[t]!)) {
+            victims.push({ p: o, reason: 'trail' });
+            break;
+          }
         }
       }
-    }
-    this.collectFringe(p);
-    const before = this.grid.landCount[p.id] ?? 0;
-    this.grid.applyClaim(p.id);
-    this.trimFringe(p);
-    const n = (this.grid.landCount[p.id] ?? 0) - before;
-    p.trailLen = 0;
-    p.outside = false;
-    p.land = this.grid.landCount[p.id] ?? 0;
-    if (n > 0) {
-      p.xp += n * this.cfg.claimXpPerCell;
-      this.stats.claims++;
-      this.stats.claimedCells += n;
-      this.events.push({ e: 'claim', id: p.id, n, x: p.x, y: p.y });
+      const n = this.land.commitClaim(p.id);
+      p.trailLen = 0;
+      p.outside = false;
+      p.land = this.land.areaOf(p.id);
+      if (n > 0.5) {
+        p.xp += n * this.cfg.claimXpPerCell;
+        this.stats.claims++;
+        this.stats.claimedCells += n;
+        this.events.push({ e: 'claim', id: p.id, n, x: p.x, y: p.y });
+      }
+    } else {
+      p.trailLen = 0;
+      p.outside = false;
     }
     for (const v of victims) {
       if (v.p.alive) this.kill(v.p, p, v.reason);
     }
-  }
-
-  /**
-   * Cells the flood is about to claim that sit next to the trail. Trimmed
-   * after applyClaim when their centers fall outside the trail polyline.
-   */
-  private collectFringe(p: Player): void {
-    this.fringeStamp = this.fringeStamp >= 255 ? 1 : this.fringeStamp + 1;
-    if (this.fringeStamp === 1) this.fringeMark.fill(0);
-    const stamp = this.fringeStamp;
-    const w = this.grid.w;
-    const h = this.grid.h;
-    this.fringeN = 0;
-    for (let t = 0; t < p.trailLen; t++) {
-      const i = p.trail[t]!;
-      const cx = i % w;
-      const cy = (i / w) | 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const x = cx + dx;
-          const y = cy + dy;
-          if (x < 0 || y < 0 || x >= w || y >= h) continue;
-          const j = y * w + x;
-          if (this.fringeMark[j] === stamp) continue;
-          if (this.grid.owner[j] === p.id) continue;
-          if (this.grid.visited[j] !== 0) continue;
-          this.fringeMark[j] = stamp;
-          this.fringe[this.fringeN++] = j;
-        }
-      }
-    }
-  }
-
-  /** Drop newly claimed cells whose centers lie outside the trail centerline. */
-  private trimFringe(p: Player): void {
-    const n = p.trailLen;
-    if (n < 2 || this.fringeN === 0) return;
-    const w = this.grid.w;
-    const xs = new Float64Array(n);
-    const ys = new Float64Array(n);
-    for (let t = 0; t < n; t++) {
-      const i = p.trail[t]!;
-      xs[t] = (i % w) + 0.5;
-      ys[t] = ((i / w) | 0) + 0.5;
-    }
-    const leftOutside = this.leftIsOutside(xs, ys, n);
-    for (let k = 0; k < this.fringeN; k++) {
-      const j = this.fringe[k]!;
-      if (this.grid.owner[j] !== p.id) continue;
-      const px = (j % w) + 0.5;
-      const py = ((j / w) | 0) + 0.5;
-      const hit = this.distToTrail(px, py, xs, ys, n);
-      const outside = hit.left === leftOutside;
-      if (hit.dist > 0.5 && outside) this.grid.setOwner(j, 0);
-    }
-  }
-
-  private leftIsOutside(xs: Float64Array, ys: Float64Array, n: number): boolean {
-    let left = 0;
-    let right = 0;
-    const step = Math.max(1, (n / 16) | 0);
-    for (let s = 0; s < n - 1; s += step) {
-      const ax = xs[s]!;
-      const ay = ys[s]!;
-      const bx = xs[s + 1]!;
-      const by = ys[s + 1]!;
-      const vx = bx - ax;
-      const vy = by - ay;
-      const len = Math.hypot(vx, vy);
-      if (len < 0.2) continue;
-      const nx = -vy / len;
-      const ny = vx / len;
-      const mx = (ax + bx) * 0.5;
-      const my = (ay + by) * 0.5;
-      if (this.cellOutside(mx + nx * 0.75, my + ny * 0.75)) left++;
-      if (this.cellOutside(mx - nx * 0.75, my - ny * 0.75)) right++;
-    }
-    return left >= right;
-  }
-
-  private cellOutside(x: number, y: number): boolean {
-    const cx = Math.floor(x);
-    const cy = Math.floor(y);
-    if (cx < 0 || cy < 0 || cx >= this.grid.w || cy >= this.grid.h) return true;
-    return this.grid.visited[this.grid.idx(cx, cy)] === 1;
-  }
-
-  private distToTrail(
-    px: number,
-    py: number,
-    xs: Float64Array,
-    ys: Float64Array,
-    n: number,
-  ): { dist: number; left: boolean } {
-    let best = 1e9;
-    let left = false;
-    for (let s = 0; s < n - 1; s++) {
-      const ax = xs[s]!;
-      const ay = ys[s]!;
-      const bx = xs[s + 1]!;
-      const by = ys[s + 1]!;
-      const vx = bx - ax;
-      const vy = by - ay;
-      const len2 = vx * vx + vy * vy;
-      let t = 0;
-      if (len2 > 1e-8) t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
-      const cx = ax + vx * t;
-      const cy = ay + vy * t;
-      const dist = Math.hypot(px - cx, py - cy);
-      if (dist < best) {
-        best = dist;
-        const cross = vx * (py - ay) - vy * (px - ax);
-        left = cross >= 0;
-      }
-    }
-    return { dist: best, left };
   }
 
   private kill(victim: Player, killer: Player | null, reason: DeathReason): void {
@@ -613,7 +580,7 @@ export class Sim {
       return;
     }
     const total = this.cfg.gridW * this.cfg.gridH;
-    const land = this.grid.landCount[victim.id] ?? 0;
+    const land = this.land.areaOf(victim.id);
     victim.lastPct = (land / total) * 100;
     victim.lastRank = this.rankOf(victim.id);
     victim.lastTime = victim.aliveMs;
@@ -652,7 +619,7 @@ export class Sim {
       time: victim.aliveMs,
       rank: victim.lastRank,
     });
-    this.grid.clearPlayer(victim.id);
+    this.land.clear(victim.id);
     victim.trailLen = 0;
     victim.land = 0;
     if (victim.bot) {
@@ -662,11 +629,11 @@ export class Sim {
   }
 
   private rankOf(id: number): number {
-    const land = this.grid.landCount[id] ?? 0;
+    const land = this.land.areaOf(id);
     let better = 0;
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.id === id) continue;
-      if ((this.grid.landCount[p.id] ?? 0) > land) better++;
+      if (this.land.areaOf(p.id) > land) better++;
     }
     return better + 1;
   }
@@ -677,7 +644,7 @@ export class Sim {
     for (const p of this.roster) {
       if (p.active && p.alive) buf[n++] = p;
     }
-    const r2 = (this.cfg.headRadius * 2) * (this.cfg.headRadius * 2);
+    const r2 = this.cfg.headRadius * 2 * (this.cfg.headRadius * 2);
     for (let i = 0; i < n; i++) {
       const a = buf[i]!;
       if (!a.alive) continue;
@@ -687,8 +654,8 @@ export class Sim {
         const dx = a.x - b.x;
         const dy = a.y - b.y;
         if (dx * dx + dy * dy > r2) continue;
-        const la = this.grid.landCount[a.id] ?? 0;
-        const lb = this.grid.landCount[b.id] ?? 0;
+        const la = this.land.areaOf(a.id);
+        const lb = this.land.areaOf(b.id);
         if (la > lb) this.kill(b, a, 'headon');
         else if (lb > la) this.kill(a, b, 'headon');
         else {
@@ -734,8 +701,8 @@ export class Sim {
     for (let attempt = 0; attempt < 8; attempt++) {
       const x = 1 + this.rng() * (this.cfg.gridW - 2);
       const y = 1 + this.rng() * (this.cfg.gridH - 2);
-      const i = this.grid.idx(Math.floor(x), Math.floor(y));
-      if (this.grid.owner[i] !== 0 || this.grid.trail[i] !== 0) continue;
+      if (this.land.ownerAt(x, y) !== 0) continue;
+      if (this.nearTrail(x, y, 1.25)) continue;
       slot.active = true;
       slot.x = x;
       slot.y = y;
@@ -744,6 +711,14 @@ export class Sim {
       slot.kind = roll < this.cfg.rareLootChance ? 2 : roll < 0.42 ? 1 : 0;
       return;
     }
+  }
+
+  private nearTrail(x: number, y: number, radius: number): boolean {
+    for (const p of this.roster) {
+      if (!p.active || p.trailLen === 0) continue;
+      if (polylineNearSegment(x, y, x, y, p.trailX, p.trailY, 0, p.trailLen, radius)) return true;
+    }
+    return false;
   }
 
   private dropKillCoins(x: number, y: number): void {

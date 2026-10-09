@@ -15,6 +15,7 @@ import {
   LineBasicMaterial,
   LineSegments,
   Matrix4,
+  Group,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -31,6 +32,7 @@ import {
   WebGLRenderer,
   type BufferGeometry,
 } from 'three';
+import { buildLand } from './landmesh.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
@@ -354,6 +356,14 @@ class Ribbon {
   }
 }
 
+interface LandSlot {
+  fill: Mesh;
+  rim: Mesh;
+  shadow: Mesh;
+  fillGeo: BufGeo;
+  rimGeo: BufGeo;
+}
+
 export class Renderer {
   readonly renderer: WebGLRenderer;
   readonly territory: Territory;
@@ -384,12 +394,9 @@ export class Renderer {
   private readonly platform: Mesh;
   private readonly ground: Mesh;
   private readonly gridLines: LineSegments;
-  private readonly land: Mesh;
-  private readonly landShadow: Mesh;
-  private readonly landPos: BufferAttribute;
-  private readonly landUv: BufferAttribute;
-  private landSig = 1;
-  private readonly spans = new Int16Array(24 * 5);
+  private readonly land: Group;
+  private readonly landShadow: Group;
+  private readonly slots: LandSlot[] = [];
   private readonly flashRing: Mesh;
   private readonly claimRing: Mesh;
   private readonly popLife = new Float32Array(24);
@@ -459,7 +466,7 @@ export class Renderer {
     this.renderer.domElement.style.height = '100%';
     document.body.prepend(this.renderer.domElement);
     perf.hook(this.renderer);
-    perf.territoryH = territory.texH;
+    perf.territoryH = 0;
 
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
     this.scene.add(new HemisphereLight(0xfff4d8, 0x7dce9a, 1.15));
@@ -477,59 +484,48 @@ export class Renderer {
     this.scene.add(this.ground);
     this.gridLines = this.makeGrid(gw, gh);
     this.scene.add(this.gridLines);
-    const landGeo = new BufGeo();
-    const quads = 24;
-    const posArr = new Float32Array(quads * 12);
-    const uvArr = new Float32Array(quads * 8);
-    const index = new Uint16Array(quads * 6);
-    for (let i = 0; i < quads; i++) {
-      const v = i * 4;
-      const o = i * 6;
-      // (x0,z0), (x1,z0), (x0,z1), (x1,z1). This winding faces +Y so the
-      // camera above sees the front. The opposite order is culled.
-      index[o] = v;
-      index[o + 1] = v + 2;
-      index[o + 2] = v + 1;
-      index[o + 3] = v + 1;
-      index[o + 4] = v + 2;
-      index[o + 5] = v + 3;
+    this.land = new Group();
+    this.landShadow = new Group();
+    const shadowMat = new MeshBasicMaterial({
+      color: 0x1a3a28,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    for (let id = 0; id <= 16; id++) {
+      const col = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
+      const fillGeo = new BufGeo();
+      const rimGeo = new BufGeo();
+      const fill = new Mesh(
+        fillGeo,
+        new MeshBasicMaterial({
+          color: (col[0] << 16) | (col[1] << 8) | col[2],
+          toneMapped: false,
+        }),
+      );
+      fill.frustumCulled = false;
+      fill.renderOrder = 1;
+      fill.visible = false;
+      const rim = new Mesh(
+        rimGeo,
+        new MeshBasicMaterial({
+          color: (Math.round(col[0] * 0.62) << 16) | (Math.round(col[1] * 0.62) << 8) | Math.round(col[2] * 0.62),
+          toneMapped: false,
+        }),
+      );
+      rim.frustumCulled = false;
+      rim.renderOrder = 2;
+      rim.visible = false;
+      const shadow = new Mesh(fillGeo, shadowMat);
+      shadow.frustumCulled = false;
+      shadow.renderOrder = 0;
+      shadow.visible = false;
+      this.land.add(fill, rim);
+      this.landShadow.add(shadow);
+      this.slots.push({ fill, rim, shadow, fillGeo, rimGeo });
     }
-    this.landPos = new BufferAttribute(posArr, 3);
-    this.landUv = new BufferAttribute(uvArr, 2);
-    this.landPos.setUsage(DynamicDrawUsage);
-    this.landUv.setUsage(DynamicDrawUsage);
-    landGeo.setAttribute('position', this.landPos);
-    landGeo.setAttribute('uv', this.landUv);
-    landGeo.setIndex(new BufferAttribute(index, 1));
-    landGeo.setDrawRange(0, 0);
-    this.land = new Mesh(
-      landGeo,
-      new MeshBasicMaterial({
-        map: territory.texture,
-        alphaTest: 0.42,
-        transparent: false,
-        depthWrite: true,
-        toneMapped: false,
-      }),
-    );
-    this.land.frustumCulled = false;
-    this.land.renderOrder = 1;
     this.scene.add(this.land);
-    this.landShadow = new Mesh(
-      landGeo,
-      new MeshBasicMaterial({
-        map: territory.texture,
-        color: 0x1a3a28,
-        alphaTest: 0.42,
-        transparent: true,
-        opacity: 0.22,
-        depthWrite: false,
-        toneMapped: false,
-      }),
-    );
-    this.landShadow.frustumCulled = false;
-    this.landShadow.renderOrder = 0;
-    this.landShadow.visible = false;
     this.scene.add(this.landShadow);
     this.addFence(gw, gh);
 
@@ -732,97 +728,45 @@ export class Renderer {
     return lines;
   }
 
-  /**
-   * One quad per owner, padded just enough for the rim and the one-texel
-   * shadow. UVs match the territory texture: v = 1 at world z = 0.
-   * A live claim eases the new patch up by a few percent, then back.
-   */
-  private syncLandQuads(): void {
-    const n = this.territory.landSpans(this.spans);
-    const pulse = this.territory.claimPulse;
-    const pulseQ = pulse > 0.02 ? (pulse * 24) | 0 : 0;
-    let sig = n * 131 + pulseQ;
-    for (let i = 0; i < n * 5; i++) sig = (Math.imul(sig, 33) + this.spans[i]!) | 0;
-    if (sig === this.landSig) return;
-    this.landSig = sig;
-    const gw = this.territory.gridW * WORLD;
-    const gh = this.territory.gridH * WORLD;
-    const pos = this.landPos.array as Float32Array;
-    const uv = this.landUv.array as Float32Array;
-    const pad = 1.65;
-    const y = 0.07;
-    for (let i = 0; i < n; i++) {
-      const o = i * 5;
-      let x0 = (this.spans[o + 1]! - pad) * WORLD;
-      let z0 = (this.spans[o + 2]! - pad) * WORLD;
-      let x1 = (this.spans[o + 3]! + 1 + pad) * WORLD;
-      let z1 = (this.spans[o + 4]! + 1 + pad) * WORLD;
-      if (pulse > 0.02 && this.quadHasClaim(i)) {
-        const bounce = 1 + Math.sin((1 - pulse) * Math.PI) * 0.075;
-        const mx = (x0 + x1) * 0.5;
-        const mz = (z0 + z1) * 0.5;
-        x0 = mx + (x0 - mx) * bounce;
-        x1 = mx + (x1 - mx) * bounce;
-        z0 = mz + (z0 - mz) * bounce;
-        z1 = mz + (z1 - mz) * bounce;
-      }
-      const u0 = x0 / gw;
-      const u1 = x1 / gw;
-      const v0 = 1 - z0 / gh;
-      const v1 = 1 - z1 / gh;
-      const p = i * 12;
-      const t = i * 8;
-      pos[p] = x0;
-      pos[p + 1] = y;
-      pos[p + 2] = z0;
-      pos[p + 3] = x1;
-      pos[p + 4] = y;
-      pos[p + 5] = z0;
-      pos[p + 6] = x0;
-      pos[p + 7] = y;
-      pos[p + 8] = z1;
-      pos[p + 9] = x1;
-      pos[p + 10] = y;
-      pos[p + 11] = z1;
-      uv[t] = u0;
-      uv[t + 1] = v0;
-      uv[t + 2] = u1;
-      uv[t + 3] = v0;
-      uv[t + 4] = u0;
-      uv[t + 5] = v1;
-      uv[t + 6] = u1;
-      uv[t + 7] = v1;
+  /** Rebuild meshes for owners whose polygons changed. Nothing runs when the set is empty. */
+  private syncLand(): void {
+    const ids = this.territory.consumeDirty();
+    for (const id of ids) this.rebuildSlot(id);
+  }
+
+  private rebuildSlot(id: number): void {
+    const slot = this.slots[id];
+    if (!slot) return;
+    const built = buildLand(this.territory.polygon(id), WORLD);
+    if (!built) {
+      slot.fill.visible = false;
+      slot.rim.visible = false;
+      slot.shadow.visible = false;
+      return;
     }
-    this.landPos.clearUpdateRanges();
-    this.landUv.clearUpdateRanges();
-    this.landPos.addUpdateRange(0, Math.max(1, n * 12));
-    this.landUv.addUpdateRange(0, Math.max(1, n * 8));
-    this.landPos.needsUpdate = true;
-    this.landUv.needsUpdate = true;
-    this.land.geometry.setDrawRange(0, n * 6);
+    slot.fillGeo.setAttribute('position', new BufferAttribute(built.fillPos, 3));
+    slot.fillGeo.setIndex(new BufferAttribute(built.fillIdx, 1));
+    slot.fill.visible = true;
+    slot.shadow.visible = true;
+    if (built.rimIdx.length >= 3) {
+      slot.rimGeo.setAttribute('position', new BufferAttribute(built.rimPos, 3));
+      slot.rimGeo.setIndex(new BufferAttribute(built.rimIdx, 1));
+      slot.rim.visible = true;
+    } else {
+      slot.rim.visible = false;
+    }
   }
 
-  private quadHasClaim(i: number): boolean {
-    const o = i * 5;
-    const x0 = this.spans[o + 1]!;
-    const y0 = this.spans[o + 2]!;
-    const x1 = this.spans[o + 3]!;
-    const y1 = this.spans[o + 4]!;
-    const c = this.territory;
-    return c.claimX1 >= x0 && c.claimX0 <= x1 && c.claimY1 >= y0 && c.claimY0 <= y1;
-  }
-
-  /** World-space XZ boxes of the land quads. Width and depth are in world units. */
+  /** World-space XZ bounds of each owner's polygon. */
   landBoxes(): Array<{ x0: number; z0: number; x1: number; z1: number; w: number; d: number }> {
-    const n = this.land.geometry.drawRange.count / 6;
-    const pos = this.landPos.array as Float32Array;
     const out: Array<{ x0: number; z0: number; x1: number; z1: number; w: number; d: number }> = [];
-    for (let i = 0; i < n; i++) {
-      const p = i * 12;
-      const x0 = pos[p]!;
-      const z0 = pos[p + 2]!;
-      const x1 = pos[p + 3]!;
-      const z1 = pos[p + 8]!;
+    for (let id = 1; id < this.slots.length; id++) {
+      const box = this.territory.ownerBounds(id);
+      if (!box) continue;
+      const x0 = box.x0 * WORLD;
+      const z0 = box.y0 * WORLD;
+      const x1 = (box.x1 + 1) * WORLD;
+      const z1 = (box.y1 + 1) * WORLD;
       out.push({ x0, z0, x1, z1, w: x1 - x0, d: z1 - z0 });
     }
     return out;
@@ -907,9 +851,6 @@ export class Renderer {
 
   /** Drop every ribbon that now sits on `ownerId`'s land, including the claimer. */
   dropCoveredTrails(ownerId: number): void {
-    const owner = this.territory.owner;
-    const w = this.territory.gridW;
-    const h = this.territory.gridH;
     for (let id = 1; id < this.trails.length; id++) {
       const trail = this.trails[id];
       if (!trail || trail.n < 1) {
@@ -920,10 +861,7 @@ export class Renderer {
       const samples = Math.min(trail.n, 32);
       for (let k = 0; k < samples && !hit; k++) {
         const i = (trail.head - 1 - k + PATH_N * 8) % PATH_N;
-        const cx = trail.xs[i]! | 0;
-        const cy = trail.zs[i]! | 0;
-        if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
-        if (owner[cy * w + cx] === ownerId) hit = true;
+        if (this.territory.contains(ownerId, trail.xs[i]!, trail.zs[i]!)) hit = true;
       }
       if (!hit) continue;
       trail.clear();
@@ -935,29 +873,16 @@ export class Renderer {
   /** The live head is already on this pet's land, so the ribbon is a leftover. */
   private headOnOwnLand(id: number, path: PathBuf): boolean {
     if (path.n < 1) return false;
-    const owner = this.territory.owner;
-    const w = this.territory.gridW;
-    const h = this.territory.gridH;
     const i = (path.head - 1 + PATH_N * 8) % PATH_N;
-    const cx = path.xs[i]! | 0;
-    const cy = path.zs[i]! | 0;
-    if (cx < 0 || cy < 0 || cx >= w || cy >= h) return false;
-    return owner[cy * w + cx] === id;
+    return this.territory.contains(id, path.xs[i]!, path.zs[i]!);
   }
 
   /** True when a stored trail sample now sits on someone else's land. */
   private trailStolen(id: number, path: PathBuf): boolean {
-    const owner = this.territory.owner;
-    const w = this.territory.gridW;
-    const h = this.territory.gridH;
     const n = Math.min(path.n, 80);
     for (let k = 0; k < n; k++) {
       const i = (path.head - 1 - k + PATH_N * 8) % PATH_N;
-      const cx = path.xs[i]! | 0;
-      const cy = path.zs[i]! | 0;
-      if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
-      const o = owner[cy * w + cx]!;
-      if (o !== 0 && o !== id) return true;
+      if (this.territory.coveredByOther(id, path.xs[i]!, path.zs[i]!)) return true;
     }
     return false;
   }
@@ -991,10 +916,9 @@ export class Renderer {
   ): void {
     this.time += dt;
     this.territory.update(dt);
-    this.syncLandQuads();
+    this.syncLand();
     this.syncClaimRing();
     this.perf.beginFrame();
-    this.territory.upload(this.renderer);
 
     if (phase === 'dead') {
       this.stepParticles(dt);
