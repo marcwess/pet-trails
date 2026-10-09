@@ -1785,11 +1785,12 @@ function outsideRing(world: Array<[number, number]>): BufGeo {
     const innerB = j;
     const outerA = n + i;
     const outerB = n + j;
-    // (center, boundary i, boundary i+1) points down and was culled. This is the opposite.
+    // Blob ring is counter-clockwise. Both halves of the quad face +Y;
+    // swapping one of them culls every other triangle and leaves pale spokes.
     const t = i * 6;
     idx[t] = innerA;
-    idx[t + 1] = outerB;
-    idx[t + 2] = innerB;
+    idx[t + 1] = innerB;
+    idx[t + 2] = outerB;
     idx[t + 3] = innerA;
     idx[t + 4] = outerB;
     idx[t + 5] = outerA;
