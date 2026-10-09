@@ -168,6 +168,19 @@ class Ribbon {
     this.sideAttr.setUsage(DynamicDrawUsage);
     this.geo.setAttribute('position', this.posAttr);
     this.geo.setAttribute('side', this.sideAttr);
+    // Mesh draws triangles. Expand the strip once; drawRange selects the live span.
+    const index = new Uint16Array((RIBBON_SEGS - 1) * 6);
+    for (let s = 0; s < RIBBON_SEGS - 1; s++) {
+      const i = s * 2;
+      const o = s * 6;
+      index[o] = i;
+      index[o + 1] = i + 1;
+      index[o + 2] = i + 2;
+      index[o + 3] = i + 1;
+      index[o + 4] = i + 3;
+      index[o + 5] = i + 2;
+    }
+    this.geo.setIndex(new BufferAttribute(index, 1));
     this.geo.setDrawRange(0, 0);
     this.color = new Color(color);
     const mat = new ShaderMaterial({
@@ -315,7 +328,7 @@ class Ribbon {
     this.sideAttr.clearUpdateRanges();
     this.sideAttr.addUpdateRange(0, count * 2);
     this.sideAttr.needsUpdate = true;
-    this.geo.setDrawRange(0, count * 2);
+    this.geo.setDrawRange(0, Math.max(0, (count - 1) * 6));
     this.mesh.visible = count > 1;
   }
 
