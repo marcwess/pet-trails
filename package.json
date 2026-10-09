@@ -1,0 +1,26 @@
+{
+  "name": "pet-trails",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "npm run build -w shared && concurrently -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "start": "npm run start -w server",
+    "build": "npm run build -w shared && npm run build -w client && npm run build -w server",
+    "test": "npm run build -w shared && npm run test -w shared && npm run test -w server",
+    "typecheck": "npm run build -w shared && tsc -p server --noEmit && tsc -p client --noEmit"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "playwright": "^1.55.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

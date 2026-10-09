@@ -1,0 +1,12 @@
+node_modules/
+dist/
+client/dist/
+shared/dist/
+server/dist/
+.vite/
+*.local
+.DS_Store
+playwright-report/
+test-results/
+*.webm
+.artifacts/
