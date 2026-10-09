@@ -9,6 +9,7 @@ import {
   type PassiveId,
   type RarityName,
 } from './config.js';
+import { levelPower } from './cosmetics.js';
 
 /** One pet's rolled kit. Equipped slots pick which of the two is live. */
 export interface Kit {
@@ -39,18 +40,19 @@ export function isPassive(value: unknown): value is PassiveId {
   return typeof value === 'string' && (PASSIVES as readonly string[]).includes(value);
 }
 
-export function rarityScale(rarity: RarityName, cfg: GameConfig = CONFIG): number {
-  return cfg.rarityMult[rarity] ?? 1;
+/** Rarity multiplier times the level bonus (`levelGain` per level above 1). */
+export function rarityScale(rarity: RarityName, cfg: GameConfig = CONFIG, level = 1): number {
+  return (cfg.rarityMult[rarity] ?? 1) * levelPower(level, cfg);
 }
 
-/** Effect size and duration grow with rarity. */
-export function effectOf(base: number, rarity: RarityName, cfg: GameConfig = CONFIG): number {
-  return base * rarityScale(rarity, cfg);
+/** Effect size and duration grow with rarity and level. */
+export function effectOf(base: number, rarity: RarityName, cfg: GameConfig = CONFIG, level = 1): number {
+  return base * rarityScale(rarity, cfg, level);
 }
 
-/** Cooldowns shrink with rarity. */
-export function cooldownOf(base: number, rarity: RarityName, cfg: GameConfig = CONFIG): number {
-  const scale = rarityScale(rarity, cfg);
+/** Cooldowns shrink with rarity and level. */
+export function cooldownOf(base: number, rarity: RarityName, cfg: GameConfig = CONFIG, level = 1): number {
+  const scale = rarityScale(rarity, cfg, level);
   return scale > 0 ? base / scale : base;
 }
 
@@ -73,9 +75,10 @@ export function speedMultiplier(
   dashing: boolean,
   slowMul: number | null,
   cfg: GameConfig = CONFIG,
+  level = 1,
 ): number {
   const a = cfg.abilities;
-  const scale = rarityScale(rarity, cfg);
+  const scale = rarityScale(rarity, cfg, level);
   let mul = 1;
   if (passive === 'swift') mul *= 1 + a.swiftSpeed * scale;
   if (dashing) mul *= 1 + (a.dashSpeed - 1) * scale;

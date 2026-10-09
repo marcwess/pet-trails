@@ -183,6 +183,37 @@ canvas {
   paint-order: stroke fill;
 }
 
+.petcard {
+  background: #fffdf8;
+  color: var(--ink);
+  border-radius: 18px;
+  padding: 8px 12px 10px;
+  text-align: left;
+}
+#petcard-name { font-weight: 700; font-size: 15px; }
+#petcard-boost { font-size: 12px; font-weight: 700; color: #8a5a00; margin: 2px 0 6px; }
+.petcard .bar { height: 8px; border-radius: 99px; background: #e6ebf1; overflow: hidden; }
+#petcard-fill { display: block; height: 100%; width: 0; background: #ffd23f; border-radius: 99px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.chips span, .chips span.next {
+  background: #eef2f6;
+  border-radius: 99px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.chips span.next { background: #fff3c4; }
+.levelup {
+  background: #ffd23f;
+  color: #3a2800;
+  border-radius: 18px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+.levelup b { display: block; font-size: 22px; }
+.levelup span { font-weight: 650; }
+
 #hud {
   position: absolute;
   inset: 0;

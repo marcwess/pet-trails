@@ -9,6 +9,7 @@ export class Player {
   alive = false;
   name = '';
   pet = 0;
+  level = 1;
   x = 0;
   y = 0;
   heading = 0;
