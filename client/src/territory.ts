@@ -19,6 +19,7 @@ export class Territory {
   private readonly polys: MultiPolygon[];
   private readonly area: Float64Array;
   private readonly dirty = new Set<number>();
+  private readonly dirtyIds: number[] = [];
   private readonly scratch: LandBook;
 
   constructor(gridW: number, gridH: number) {
@@ -53,7 +54,9 @@ export class Territory {
   }
 
   consumeDirty(): number[] {
-    const ids = [...this.dirty];
+    const ids = this.dirtyIds;
+    ids.length = 0;
+    for (const id of this.dirty) ids.push(id);
     this.dirty.clear();
     return ids;
   }

@@ -258,13 +258,13 @@ canvas {
 
 #stick {
   position: absolute;
-  width: 112px;
-  height: 112px;
-  margin-left: -56px;
-  margin-top: -56px;
+  width: 86px;
+  height: 86px;
+  margin-left: -43px;
+  margin-top: -43px;
   border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.72);
-  box-shadow: 0 0 0 10px rgba(20, 24, 34, 0.12), inset 0 0 0 1px rgba(26, 20, 8, 0.25);
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(26, 20, 8, 0.12);
   pointer-events: none;
 }
 
@@ -272,18 +272,19 @@ canvas {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 46px;
-  height: 46px;
-  margin: -23px 0 0 -23px;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.88);
-  box-shadow: 0 3px 0 rgba(26, 20, 8, 0.25);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 2px 0 rgba(26, 20, 8, 0.18);
 }
 
 .kill-banner {
   position: absolute;
   left: 50%;
-  top: 30%;
+  top: 22%;
+  z-index: 6;
   transform: translate(-50%, -40%) scale(0.4);
   text-align: center;
   opacity: 0;
@@ -331,6 +332,7 @@ canvas {
   padding: 18px 18px 16px;
   text-align: center;
   box-shadow: 0 10px 0 rgba(26, 20, 8, 0.18);
+  z-index: 4;
   pointer-events: auto;
   transform: translate(-50%, -50%);
   animation: cardIn 0.38s cubic-bezier(0.2, 1.25, 0.35, 1) both;
@@ -410,6 +412,7 @@ canvas {
 #dim {
   position: absolute;
   inset: 0;
+  z-index: 3;
   background: rgba(18, 22, 32, 0.46);
 }
 

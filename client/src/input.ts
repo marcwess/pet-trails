@@ -63,15 +63,17 @@ export class Input {
     this.keys.delete(ev.key.toLowerCase());
   };
 
+  private readonly stickOut = { x: 0, y: 0, dx: 0, dy: 0, on: false };
+
   /** Where the finger is, for the on-screen ring. Steering math is unchanged. */
   stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
-    return {
-      x: this.originX,
-      y: this.originY,
-      dx: this.lastX - this.originX,
-      dy: this.lastY - this.originY,
-      on: this.active,
-    };
+    const out = this.stickOut;
+    out.x = this.originX;
+    out.y = this.originY;
+    out.dx = this.lastX - this.originX;
+    out.dy = this.lastY - this.originY;
+    out.on = this.active;
+    return out;
   }
 
   /**

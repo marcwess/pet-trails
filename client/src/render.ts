@@ -542,7 +542,7 @@ export class Renderer {
       fill.renderOrder = 2;
       fill.visible = false;
       const wall = (Math.round(col[0] * 0.52) << 16) | (Math.round(col[1] * 0.52) << 8) | Math.round(col[2] * 0.52);
-      const rim = new Mesh(rimGeo, new MeshLambertMaterial({ color: wall }));
+      const rim = new Mesh(rimGeo, new MeshBasicMaterial({ color: wall, toneMapped: false }));
       rim.frustumCulled = false;
       rim.renderOrder = 1;
       rim.visible = false;
