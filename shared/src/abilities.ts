@@ -63,6 +63,26 @@ export function cooldownBase(kind: ActiveId, cfg: GameConfig = CONFIG): number {
   return a.recallCd;
 }
 
+/**
+ * Speed multiplier from the swift passive, an active dash, and a frost slow.
+ * The sim and the client prediction both use this, so they move at the same pace.
+ */
+export function speedMultiplier(
+  rarity: RarityName,
+  passive: PassiveId,
+  dashing: boolean,
+  slowMul: number | null,
+  cfg: GameConfig = CONFIG,
+): number {
+  const a = cfg.abilities;
+  const scale = rarityScale(rarity, cfg);
+  let mul = 1;
+  if (passive === 'swift') mul *= 1 + a.swiftSpeed * scale;
+  if (dashing) mul *= 1 + (a.dashSpeed - 1) * scale;
+  if (slowMul !== null) mul *= slowMul;
+  return mul;
+}
+
 export function rollRarity(rng: () => number): RarityName {
   const t = rng();
   let acc = 0;

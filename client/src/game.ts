@@ -19,6 +19,7 @@ import {
   ringArea,
   integrateBody,
   lerpAngle,
+  speedMultiplier,
   xpForLevel,
   type ActiveId,
   type DeltaMsg,
@@ -372,7 +373,8 @@ export class Game {
       this.body.heading = this.predH;
       this.body.desiredX = this.predDX;
       this.body.desiredY = this.predDY;
-      integrateBody(this.body, dt, CONFIG);
+      const mul = this.predSpeedMul();
+      integrateBody(this.body, dt, mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul });
       this.predX = this.body.x;
       this.predY = this.body.y;
       this.predH = this.body.heading;
@@ -502,7 +504,7 @@ export class Game {
     const dx = sx - this.predX;
     const dy = sy - this.predY;
     const err = Math.hypot(dx, dy);
-    const lead = CONFIG.speed * Math.min(0.3, Math.max(0.05, this.net.ping / 1000));
+    const lead = CONFIG.speed * this.predSpeedMul() * Math.min(0.3, Math.max(0.05, this.net.ping / 1000));
     if (err > lead + 1.8) {
       this.predX = sx;
       this.predY = sy;
@@ -872,6 +874,18 @@ export class Game {
     const species = SPECIES[pet.species] ?? 'cat';
     const label = SPECIES_LABEL[species];
     return `Your pet · ${label} · Lv ${pet.level}`;
+  }
+
+  /** Mirror the server's speed multiplier so dash, swift, and frost don't rubber-band. */
+  private predSpeedMul(): number {
+    const pet = this.equipped();
+    const status = this.ents[this.selfId]?.status ?? 0;
+    return speedMultiplier(
+      pet.rarity,
+      pet.passives[pet.equippedPassive],
+      (status & 1) !== 0,
+      (status & 4) !== 0 ? CONFIG.abilities.frostSlow : null,
+    );
   }
 
   private equipped(): PetInstance {

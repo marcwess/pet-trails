@@ -1,4 +1,4 @@
-import { DEFAULT_KIT, cooldownBase, cooldownOf, effectOf, rarityScale, type Kit } from './abilities.js';
+import { DEFAULT_KIT, cooldownBase, cooldownOf, effectOf, rarityScale, speedMultiplier, type Kit } from './abilities.js';
 import { botWantsAbility, updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
 import { LandBook, polylineNearSegment } from './land.js';
@@ -819,13 +819,7 @@ export class Sim {
   }
 
   private speedMul(p: Player): number {
-    const a = this.cfg.abilities;
-    const scale = rarityScale(p.rarity, this.cfg);
-    let mul = 1;
-    if (p.passiveId === 'swift') mul *= 1 + a.swiftSpeed * scale;
-    if (this.tick < p.dashUntil) mul *= 1 + (a.dashSpeed - 1) * scale;
-    if (this.tick < p.slowUntil) mul *= p.slowMul;
-    return mul;
+    return speedMultiplier(p.rarity, p.passiveId, this.tick < p.dashUntil, this.tick < p.slowUntil ? p.slowMul : null, this.cfg);
   }
 
   private coinBonus(p: Player, base: number): number {

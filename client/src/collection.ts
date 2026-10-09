@@ -181,8 +181,12 @@ export class Collection {
     root.dataset.phase = 'shake';
     const flash = must('reveal-flash');
     flash.style.background = RARITY_COLOR[pet.rarity];
-    this.host.preview(pet.species);
-    this.timers.push(window.setTimeout(() => { root.dataset.phase = 'burst'; }, 700));
+    // Keep the shop panel and the new pet out of view until the box bursts.
+    must('boxes').hidden = true;
+    this.timers.push(window.setTimeout(() => {
+      root.dataset.phase = 'burst';
+      this.host.preview(pet.species);
+    }, 700));
     this.timers.push(window.setTimeout(() => {
       root.dataset.phase = 'reveal';
       this.fillCard(pet);
@@ -197,12 +201,12 @@ export class Collection {
     card.style.borderColor = RARITY_COLOR[pet.rarity];
     const kit = kitOf(pet);
     card.innerHTML =
-      `<div class="hop-pet" style="background:${RARITY_COLOR[pet.rarity]}">🐾</div>` +
+      `<p class="rare-pill" style="background:${RARITY_COLOR[pet.rarity]}">${label(pet.rarity)}</p>` +
       `<h3>${SPECIES_LABEL[species]}</h3>` +
-      `<p class="rare-name">${label(pet.rarity)} · Lv ${pet.level}</p>` +
+      `<p class="rare-name">Lv ${pet.level}</p>` +
       `<p class="kit">${ABILITY_ICON[kit.actives[0]]} ${ABILITY_LABEL[kit.actives[0]]} · ${ABILITY_ICON[kit.actives[1]]} ${ABILITY_LABEL[kit.actives[1]]}</p>` +
       `<p class="kit">${ABILITY_ICON[kit.passives[0]]} ${ABILITY_LABEL[kit.passives[0]]} · ${ABILITY_ICON[kit.passives[1]]} ${ABILITY_LABEL[kit.passives[1]]}</p>` +
-      `<p>Tap to keep</p>`;
+      `<p class="tap">Tap to keep</p>`;
   }
 
   private finishReveal(): void {

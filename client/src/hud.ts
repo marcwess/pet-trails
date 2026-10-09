@@ -120,7 +120,17 @@ export class Hud {
   }
 
   onAbility(fn: () => void): void {
-    this.abilityBtn.addEventListener('click', fn);
+    // Fire on pointerdown: iOS WebKit drops the synthetic click while another
+    // finger is still steering, which is exactly when the button gets pressed.
+    this.abilityBtn.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      fn();
+    });
+    this.abilityBtn.addEventListener('keydown', (ev) => {
+      if (ev.key !== ' ' && ev.key !== 'Enter') return;
+      ev.preventDefault();
+      fn();
+    });
   }
 
   showAbility(on: boolean): void {

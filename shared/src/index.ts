@@ -1,6 +1,6 @@
 export { CONFIG, PALETTE, SPECIES, SPECIES_LABEL, BOT_NAMES, ACTIVES, PASSIVES, RARITY_ODDS, RARITY_ORDER, RARITY_COLOR, RARITY_RGB, ABILITY_LABEL, ABILITY_ICON, makeConfig, paletteIndex } from './config.js';
 export type { GameConfig, RarityName, SpeciesId, ActiveId, PassiveId } from './config.js';
-export { parseKit, rollRarity, effectOf, cooldownOf, cooldownBase, rarityScale, DEFAULT_KIT } from './abilities.js';
+export { parseKit, rollRarity, effectOf, cooldownOf, cooldownBase, rarityScale, speedMultiplier, DEFAULT_KIT } from './abilities.js';
 export type { Kit } from './abilities.js';
 export { mulberry32, randomSeed } from './rng.js';
 export { integrateBody, angleDelta, lerpAngle, walkCells } from './motion.js';

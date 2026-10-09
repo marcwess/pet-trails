@@ -604,6 +604,10 @@ canvas {
   z-index: 4;
   font-size: 36px;
   line-height: 1;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .ability:active { transform: translateY(3px); box-shadow: 0 3px 0 #d5dbe3; }
@@ -656,6 +660,7 @@ canvas {
   padding: 8px 14px calc(16px + env(safe-area-inset-bottom));
   align-content: start;
 }
+.pet-grid[hidden] { display: none; }
 .pcard {
   appearance: none;
   text-align: left;
@@ -717,22 +722,40 @@ canvas {
   pointer-events: auto;
 }
 .reveal[hidden] { display: none; }
+.reveal[data-phase='shake'] { background: rgba(28, 36, 48, 0.55); }
 #reveal-flash {
   position: absolute;
   inset: 0;
   opacity: 0;
   transition: opacity 0.25s linear;
 }
-.reveal[data-phase='burst'] #reveal-flash,
-.reveal[data-phase='reveal'] #reveal-flash { opacity: 0.72; }
+.reveal[data-phase='burst'] #reveal-flash { opacity: 0.85; transition-duration: 0.12s; }
+.reveal[data-phase='reveal'] #reveal-flash {
+  opacity: 0;
+  transition-duration: 0.6s;
+}
+.reveal-card .rare-pill {
+  display: inline-block;
+  margin: 0 0 6px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  -webkit-text-stroke: 3px rgba(20, 24, 34, 0.55);
+  paint-order: stroke fill;
+}
+.reveal-card .kit { margin: 6px 0; font-weight: 600; }
+.reveal-card .tap { margin: 10px 0 0; color: #6b7686; text-align: center; }
 .gift {
   position: absolute;
   left: 50%;
   top: 46%;
-  width: 132px;
-  height: 132px;
-  margin: -66px 0 0 -66px;
-  border-radius: 36px;
+  width: 156px;
+  height: 156px;
+  margin: -78px 0 0 -78px;
+  border-radius: 44px;
   background: linear-gradient(#ffd23f, #ff9f1c);
   box-shadow: 0 10px 0 #c46a00, inset 0 0 0 8px rgba(255, 255, 255, 0.35);
 }
