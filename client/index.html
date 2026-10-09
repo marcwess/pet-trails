@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#8fd4ff" />
+    <title>Pet Trails</title>
+  </head>
+  <body>
+    <div id="ui">
+      <div id="chip" class="chip">Connecting…</div>
+      <section id="title" class="sheet">
+        <p class="eyebrow">Draw a loop. Take the land.</p>
+        <h1>Pet Trails</h1>
+        <p id="petline" class="petline">Loading pets…</p>
+        <button id="play" class="btn" type="button" disabled>Play</button>
+        <p class="fine">Drag anywhere to steer. Close a loop to claim it.</p>
+      </section>
+      <div id="hud" hidden>
+        <div id="lb" class="lb"></div>
+        <div id="you" class="you">
+          <div id="you-pct">0.0%</div>
+          <div id="you-kills">0 kills</div>
+        </div>
+        <div id="steer" class="steer">Drag to steer</div>
+      </div>
+      <div id="dim" hidden></div>
+      <section id="death" class="sheet" hidden>
+        <p id="death-kicker" class="eyebrow">Run over</p>
+        <h2 id="death-title">Your trail was cut!</h2>
+        <ul id="death-stats" class="stats"></ul>
+        <button id="again" class="btn" type="button">Play again</button>
+      </section>
+      <div id="toasts"></div>
+      <div id="popups"></div>
+      <div id="labels"></div>
+      <div id="perf" hidden></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
