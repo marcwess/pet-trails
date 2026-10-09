@@ -1,5 +1,7 @@
-export { CONFIG, PALETTE, SPECIES, SPECIES_LABEL, BOT_NAMES, ACTIVES, PASSIVES, RARITY_ODDS, RARITY_ORDER, makeConfig, paletteIndex } from './config.js';
+export { CONFIG, PALETTE, SPECIES, SPECIES_LABEL, BOT_NAMES, ACTIVES, PASSIVES, RARITY_ODDS, RARITY_ORDER, RARITY_COLOR, RARITY_RGB, ABILITY_LABEL, ABILITY_ICON, makeConfig, paletteIndex } from './config.js';
 export type { GameConfig, RarityName, SpeciesId, ActiveId, PassiveId } from './config.js';
+export { parseKit, rollRarity, effectOf, cooldownOf, cooldownBase, rarityScale, DEFAULT_KIT } from './abilities.js';
+export type { Kit } from './abilities.js';
 export { mulberry32, randomSeed } from './rng.js';
 export { integrateBody, angleDelta, lerpAngle, walkCells } from './motion.js';
 export type { Body } from './motion.js';
@@ -11,7 +13,7 @@ export { Player } from './player.js';
 export type { DeathReason } from './player.js';
 export { Sim } from './sim.js';
 export type { SimEvent, SimStats } from './types.js';
-export { createStarterProfile, applyXp, xpForLevel, rollKit } from './profile.js';
+export { createStarterProfile, applyXp, xpForLevel, rollKit, createPet, openBox, buyBox, equippedPet, normalizeProfile, kitOf, rollBotKit } from './profile.js';
 export type { Profile, PetInstance } from './profile.js';
 export {
   parseClientMsg,

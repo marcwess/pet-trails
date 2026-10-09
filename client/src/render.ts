@@ -1,4 +1,4 @@
-import { CONFIG, PALETTE, SPECIES, mapBlob } from '@pet-trails/shared';
+import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, mapBlob } from '@pet-trails/shared';
 import {
   BufferAttribute,
   BufferGeometry as BufGeo,
@@ -45,6 +45,7 @@ const FLOOR_COLOR = 0xe7edf3;
 /** Dark surround. Drawn only as the ring outside the blob. */
 const OUTSIDE_COLOR = 0x62707e;
 const PAL_CSS = PALETTE.map((c) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`);
+const RARITY_TINT = RARITY_ORDER.map((name) => RARITY_RGB[name]);
 const PET_CAP = 64;
 const PICK_CAP = 72;
 const PART_CAP = 140;
@@ -67,6 +68,11 @@ export interface DrawPet {
   hop: number;
   blink: boolean;
   name: string;
+  /** 0 common … 4 legendary. */
+  rarity: number;
+  dash: boolean;
+  shield: boolean;
+  slow: boolean;
 }
 
 export interface DrawPickup {
@@ -500,6 +506,20 @@ export class Renderer {
   private readonly land: Group;
   private readonly flashRing: Mesh;
   private readonly claimRing: Mesh;
+  private readonly frames: InstancedMesh;
+  private readonly glows: InstancedMesh;
+  private readonly shields: InstancedMesh;
+  private readonly slows: InstancedMesh;
+  private readonly paintRing: Mesh;
+  private readonly frostRing: Mesh;
+  private paintLife = 0;
+  private paintX = 0;
+  private paintZ = 0;
+  private paintR = 1;
+  private frostLife = 0;
+  private frostX = 0;
+  private frostZ = 0;
+  private frostR = 1;
   private readonly popLife = new Float32Array(24);
   private killFlash = 0;
   private killX = 0;
@@ -751,6 +771,68 @@ export class Renderer {
     this.claimRing.visible = false;
     this.claimRing.renderOrder = 2;
     this.scene.add(this.claimRing);
+
+    const frameGeo = new RingGeometry(0.46, 0.62, 28);
+    frameGeo.rotateX(-Math.PI / 2);
+    this.frames = new InstancedMesh(
+      frameGeo,
+      new MeshBasicMaterial({ color: 0xffffff, toneMapped: false, side: DoubleSide, transparent: true, opacity: 0.95, depthWrite: false }),
+      48,
+    );
+    this.frames.instanceColor = new InstancedBufferAttribute(new Float32Array(48 * 3), 3);
+    this.frames.frustumCulled = false;
+    this.frames.renderOrder = 3;
+    this.frames.count = 0;
+    this.scene.add(this.frames);
+
+    const glowGeo = new RingGeometry(0.7, 1.05, 32);
+    glowGeo.rotateX(-Math.PI / 2);
+    this.glows = new InstancedMesh(
+      glowGeo,
+      new MeshBasicMaterial({ color: 0xffb43a, toneMapped: false, transparent: true, opacity: 0.72, depthWrite: false, side: DoubleSide }),
+      16,
+    );
+    this.glows.frustumCulled = false;
+    this.glows.renderOrder = 3;
+    this.glows.count = 0;
+    this.scene.add(this.glows);
+
+    this.shields = new InstancedMesh(
+      new SphereGeometry(0.62, 12, 8),
+      new MeshBasicMaterial({ color: 0xd7f6ff, transparent: true, opacity: 0.38, depthWrite: false, toneMapped: false }),
+      48,
+    );
+    this.shields.frustumCulled = false;
+    this.shields.renderOrder = 4;
+    this.shields.count = 0;
+    this.scene.add(this.shields);
+
+    this.slows = new InstancedMesh(
+      new SphereGeometry(0.7, 12, 8),
+      new MeshBasicMaterial({ color: 0x6ec6ff, transparent: true, opacity: 0.42, depthWrite: false, toneMapped: false }),
+      16,
+    );
+    this.slows.frustumCulled = false;
+    this.slows.renderOrder = 4;
+    this.slows.count = 0;
+    this.scene.add(this.slows);
+
+    const boomGeo = new RingGeometry(0.7, 0.95, 40);
+    boomGeo.rotateX(-Math.PI / 2);
+    this.paintRing = new Mesh(
+      boomGeo,
+      new MeshBasicMaterial({ color: 0xff4d8d, transparent: true, opacity: 0.9, depthWrite: false, toneMapped: false, side: DoubleSide }),
+    );
+    this.paintRing.visible = false;
+    this.paintRing.renderOrder = 3;
+    this.scene.add(this.paintRing);
+    this.frostRing = new Mesh(
+      boomGeo.clone(),
+      new MeshBasicMaterial({ color: 0x7ec8ff, transparent: true, opacity: 0.9, depthWrite: false, toneMapped: false, side: DoubleSide }),
+    );
+    this.frostRing.visible = false;
+    this.frostRing.renderOrder = 3;
+    this.scene.add(this.frostRing);
 
     for (let i = 0; i < 40; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false, name: false, color: '#fff' });
     // Mirror X so the south-looking camera is north-up with east on the right.
@@ -1198,6 +1280,12 @@ export class Renderer {
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbonBatch.ribbons) ribbon.clear();
       this.ring.visible = false;
+      this.frames.count = 0;
+      this.glows.count = 0;
+      this.shields.count = 0;
+      this.slows.count = 0;
+      this.paintRing.visible = false;
+      this.frostRing.visible = false;
       const spin = this.time * 0.7;
       this.podium.rotation.z = spin;
       const mesh = this.pets[hero];
@@ -1424,6 +1512,7 @@ export class Renderer {
       this.layoutPickups(this.coins, pickups, pickupCount, 0);
       this.layoutPickups(this.orbs, pickups, pickupCount, 1);
       this.layoutPickups(this.loot, pickups, pickupCount, 2);
+      this.syncAbility(pets, petCount, dt);
     }
 
     this.stepParticles(dt);
@@ -1659,6 +1748,116 @@ export class Renderer {
     if (n > 0) this.fxCoins.instanceMatrix.needsUpdate = true;
   }
 
+  /** One-shot bursts. Ongoing dash, shield, and frost tint follow the snapshots. */
+  abilityFx(kind: string, x: number, z: number, r: number, fx: number, fy: number): void {
+    if (kind === 'paint') {
+      this.paintLife = 0.62;
+      this.paintX = x * WORLD;
+      this.paintZ = z * WORLD;
+      this.paintR = Math.max(0.5, r * WORLD);
+      this.splash(x, z, 26, 1, 0.35, 0.62);
+    } else if (kind === 'frost') {
+      this.frostLife = 0.66;
+      this.frostX = x * WORLD;
+      this.frostZ = z * WORLD;
+      this.frostR = Math.max(0.5, r * WORLD);
+      this.splash(x, z, 22, 0.45, 0.78, 1);
+    } else if (kind === 'recall') {
+      this.splash(fx, fy, 16, 0.96, 0.96, 1);
+      this.splash(x, z, 16, 0.96, 0.96, 1);
+    } else if (kind === 'dash') {
+      this.splash(x, z, 12, 1, 0.82, 0.28);
+    } else if (kind === 'shield') {
+      this.splash(x, z, 10, 0.72, 0.92, 1);
+    }
+  }
+
+  private splash(x: number, z: number, n: number, r: number, g: number, b: number): void {
+    const wx = x * WORLD;
+    const wz = z * WORLD;
+    for (let k = 0; k < n; k++) {
+      if (this.partCount >= PART_CAP) break;
+      const i = this.partCount++;
+      const ang = (k / n) * Math.PI * 2;
+      const sp = 1.4 + (k % 5) * 0.45;
+      this.px[i] = wx;
+      this.py[i] = 0.35 + (k % 4) * 0.12;
+      this.pz[i] = wz;
+      this.vx[i] = Math.cos(ang) * sp;
+      this.vy[i] = 1.6 + (k % 3) * 0.4;
+      this.vz[i] = Math.sin(ang) * sp;
+      this.life[i] = 0.55;
+      this.pr[i] = r;
+      this.pg[i] = g;
+      this.pb[i] = b;
+    }
+  }
+
+  private syncAbility(pets: DrawPet[], petCount: number, dt: number): void {
+    let frames = 0;
+    let glows = 0;
+    let shields = 0;
+    let slows = 0;
+    for (let i = 0; i < petCount; i++) {
+      const pet = pets[i]!;
+      if (!pet.alive) continue;
+      const wx = pet.x * WORLD;
+      const wz = pet.z * WORLD;
+      if (frames < 48) {
+        this.place(this.frames, frames, wx, 0.07, wz, 0, 0, pet.self ? 1.22 : 1.08);
+        const tint = RARITY_TINT[pet.rarity] ?? RARITY_TINT[0]!;
+        this.frames.instanceColor?.setXYZ(frames, tint[0] / 255, tint[1] / 255, tint[2] / 255);
+        frames++;
+      }
+      if (pet.rarity >= 4 && glows < 16) {
+        const pulse = 1.28 + Math.sin(this.time * 3.2 + pet.id) * 0.1;
+        this.place(this.glows, glows++, wx, 0.09, wz, this.time * 0.6, 0, pulse);
+      }
+      if (pet.slow && slows < 16) this.place(this.slows, slows++, wx, 0.5, wz, 0, 0, 1.28);
+      if (pet.shield) {
+        if (shields < 48) this.place(this.shields, shields++, wx, 0.58, wz, 0, 0, 1.12);
+        const trail = this.trails[pet.id];
+        if (trail) {
+          for (let k = 3; k < trail.n && shields < 48; k += 5) {
+            const idx = (trail.head - 1 - k + PATH_N * 8) % PATH_N;
+            this.place(this.shields, shields++, trail.xs[idx]! * WORLD, 0.42, trail.zs[idx]! * WORLD, 0, 0, 0.7);
+          }
+        }
+      }
+      if (pet.dash && this.partCount < PART_CAP - 1) {
+        const back = pet.h + Math.PI;
+        this.splash(pet.x + Math.cos(back) * 1.2, pet.z + Math.sin(back) * 1.2, 2, 1, 0.86, 0.35);
+      }
+    }
+    this.frames.count = frames;
+    this.glows.count = glows;
+    this.shields.count = shields;
+    this.slows.count = slows;
+    if (frames > 0) this.frames.instanceColor!.needsUpdate = true;
+    this.frames.instanceMatrix.needsUpdate = frames > 0;
+    this.glows.instanceMatrix.needsUpdate = glows > 0;
+    this.shields.instanceMatrix.needsUpdate = shields > 0;
+    this.slows.instanceMatrix.needsUpdate = slows > 0;
+    this.paintLife = this.stepRing(this.paintRing, this.paintLife, 0.62, this.paintX, this.paintZ, this.paintR, dt);
+    this.frostLife = this.stepRing(this.frostRing, this.frostLife, 0.66, this.frostX, this.frostZ, this.frostR, dt);
+  }
+
+  private stepRing(mesh: Mesh, life: number, max: number, x: number, z: number, radius: number, dt: number): number {
+    if (life <= 0) {
+      mesh.visible = false;
+      return 0;
+    }
+    const next = life - dt;
+    const u = 1 - Math.max(0, next) / max;
+    const mat = mesh.material as MeshBasicMaterial;
+    mat.opacity = 0.9 * (1 - u);
+    mesh.visible = true;
+    mesh.position.set(x, 0.06 + u * 0.7, z);
+    const s = (radius / 0.82) * (0.2 + 0.8 * u);
+    mesh.scale.set(s, 1, s);
+    return Math.max(0, next);
+  }
+
   private placePet(
     mesh: InstancedMesh,
     index: number,
@@ -1714,6 +1913,12 @@ export class Renderer {
       this.ring.visible = false;
       this.flashRing.visible = false;
       this.claimRing.visible = false;
+      this.paintRing.visible = false;
+      this.frostRing.visible = false;
+      this.frames.visible = false;
+      this.glows.visible = false;
+      this.shields.visible = false;
+      this.slows.visible = false;
       this.parts.visible = false;
       this.fxCoins.visible = false;
     }

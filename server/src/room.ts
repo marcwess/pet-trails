@@ -2,10 +2,12 @@ import {
   FLAG_ALIVE,
   FLAG_BOT,
   FLAG_OUTSIDE,
+  RARITY_ORDER,
   SPECIES,
   parseClientMsg,
   type DeltaMsg,
   type EntSnap,
+  type Kit,
   type WelcomeMsg,
   type WireEvent,
   Sim,
@@ -17,6 +19,8 @@ interface Conn {
   id: number | null;
   name: string;
   pet: number;
+  /** `null` means the client sent a kit the tables reject. */
+  kit: Kit | null;
   wantPlay: boolean;
 }
 
@@ -32,7 +36,7 @@ export class Room {
   }
 
   addSocket(ws: WebSocket): void {
-    const conn: Conn = { ws, id: null, name: 'You', pet: -1, wantPlay: false };
+    const conn: Conn = { ws, id: null, name: 'You', pet: -1, kit: null, wantPlay: false };
     this.conns.push(conn);
     ws.on('message', (data, isBinary) => {
       if (isBinary) return;
@@ -57,12 +61,17 @@ export class Room {
     if (msg.t === 'hello') {
       conn.name = msg.name ?? 'You';
       if (msg.pet !== undefined) conn.pet = msg.pet;
+      if (msg.kit !== undefined) conn.kit = msg.kit;
       if (conn.wantPlay) this.spawn(conn);
       return;
     }
     if (msg.t === 'play') {
       conn.wantPlay = true;
       this.spawn(conn);
+      return;
+    }
+    if (msg.t === 'ability' && conn.id !== null) {
+      this.sim.useAbility(conn.id);
       return;
     }
     if (msg.t === 'input' && conn.id !== null) {
@@ -80,7 +89,7 @@ export class Room {
     const pet = conn.pet >= 0 && conn.pet < SPECIES.length ? conn.pet : Math.floor(Math.random() * SPECIES.length);
     conn.pet = pet;
     if (conn.id === null) {
-      const p = this.sim.addHuman(conn.name, pet);
+      const p = this.sim.addHuman(conn.name, pet, conn.kit);
       if (!p) {
         this.send(conn, { t: 'full' });
         return;
@@ -92,7 +101,10 @@ export class Room {
       return;
     }
     const existing = this.sim.players[conn.id];
-    if (existing) existing.pet = pet;
+    if (existing) {
+      existing.pet = pet;
+      if (conn.kit) this.sim.setKit(conn.id, conn.kit);
+    }
     // The client already has the map. Send only this owner's new square.
     this.sim.land.beginTick();
     this.sim.respawn(conn.id);
@@ -146,6 +158,12 @@ export class Room {
         xp: Math.round(p.xp),
         tn: p.trainLen,
         tr,
+        ry: Math.max(0, RARITY_ORDER.indexOf(p.rarity)),
+        cd: Math.max(0, (p.cdUntil - this.sim.tick) / this.sim.cfg.tickHz),
+        st:
+          (this.sim.tick < p.dashUntil ? 1 : 0) |
+          (this.sim.tick < p.shieldUntil ? 2 : 0) |
+          (this.sim.tick < p.slowUntil ? 4 : 0),
       });
     }
     const delta: DeltaMsg = {

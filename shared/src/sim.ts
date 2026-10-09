@@ -1,7 +1,9 @@
-import { updateBot, type BotView } from './bots.js';
+import { DEFAULT_KIT, cooldownBase, cooldownOf, effectOf, rarityScale, type Kit } from './abilities.js';
+import { botWantsAbility, updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
 import { LandBook, polylineNearSegment } from './land.js';
 import { integrateBody } from './motion.js';
+import { rollBotKit } from './profile.js';
 import { circleRing, mapBlob, spawnRadius } from './shape.js';
 import { Player, type DeathReason } from './player.js';
 import { mulberry32, rngInt } from './rng.js';
@@ -69,12 +71,13 @@ export class Sim {
     };
   }
 
-  addHuman(name: string, pet: number): Player | null {
+  addHuman(name: string, pet: number, kit?: Kit | null): Player | null {
     const p = this.alloc();
     if (!p) return null;
     p.bot = false;
     p.name = name || 'You';
     p.pet = this.clampPet(pet);
+    this.setKit(p.id, kit ?? DEFAULT_KIT);
     this.spawn(p);
     this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: false });
     return p;
@@ -87,10 +90,22 @@ export class Sim {
     p.name = this.takeBotName();
     p.pet = rngInt(this.rng, SPECIES.length);
     p.botStyle = p.id % 2;
+    this.setKit(p.id, rollBotKit(this.rng));
     p.botTurnSign = this.rng() < 0.5 ? -1 : 1;
     this.spawn(p);
     this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: true });
     return p;
+  }
+
+  /** Apply a validated kit. Returns false and leaves the player unchanged when the kit is impossible. */
+  setKit(id: number, kit: Kit | null): boolean {
+    const p = this.players[id];
+    if (!p || !kit) return false;
+    if (kit.actives[0] === kit.actives[1] || kit.passives[0] === kit.passives[1]) return false;
+    p.rarity = kit.rarity;
+    p.activeId = kit.actives[kit.equippedActive];
+    p.passiveId = kit.passives[kit.equippedPassive];
+    return true;
   }
 
   remove(id: number): void {
@@ -138,6 +153,71 @@ export class Sim {
     this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: p.bot });
   }
 
+  /**
+   * Server-side active. Returns false when the pet is dead or the cooldown
+   * has not finished. The effect is applied here, not on the client.
+   */
+  useAbility(id: number): boolean {
+    const p = this.players[id];
+    if (!p || !p.active || !p.alive) return false;
+    if (this.tick < p.cdUntil) return false;
+    const kind = p.activeId;
+    const a = this.cfg.abilities;
+    const scale = rarityScale(p.rarity, this.cfg);
+    const fromX = p.x;
+    const fromY = p.y;
+    let radius = 0;
+    if (kind === 'dash') {
+      p.dashUntil = this.tick + Math.max(1, Math.round(effectOf(a.dashSec, p.rarity, this.cfg) * this.cfg.tickHz));
+    } else if (kind === 'shield') {
+      p.shieldUntil = this.tick + Math.max(1, Math.round(effectOf(a.shieldSec, p.rarity, this.cfg) * this.cfg.tickHz));
+    } else if (kind === 'paint') {
+      radius = effectOf(a.paintRadius, p.rarity, this.cfg);
+      this.land.unionPolygon(p.id, [circleRing(p.x, p.y, radius, 48)]);
+      p.land = this.land.areaOf(p.id);
+    } else if (kind === 'frost') {
+      radius = effectOf(a.frostRadius, p.rarity, this.cfg);
+      const mul = Math.max(0.12, a.frostSlow / scale);
+      const until = this.tick + Math.max(1, Math.round(effectOf(a.frostSec, p.rarity, this.cfg) * this.cfg.tickHz));
+      const r2 = radius * radius;
+      for (const o of this.roster) {
+        if (!o.active || !o.alive || o.id === p.id) continue;
+        const dx = o.x - p.x;
+        const dy = o.y - p.y;
+        if (dx * dx + dy * dy > r2) continue;
+        if (until >= o.slowUntil) {
+          o.slowUntil = until;
+          o.slowMul = mul;
+        }
+      }
+    } else if (kind === 'recall') {
+      if (!a.recallSafe) return false;
+      const home = this.land.home(p.id);
+      if (!home) return false;
+      p.x = home.x;
+      p.y = home.y;
+      p.trailLen = 0;
+      p.outside = false;
+    } else {
+      return false;
+    }
+    const cd = cooldownOf(cooldownBase(kind, this.cfg), p.rarity, this.cfg);
+    p.cdUntil = this.tick + Math.max(1, Math.round(cd * this.cfg.tickHz));
+    this.events.push({ e: 'ability', id: p.id, kind, x: p.x, y: p.y, r: radius, fx: fromX, fy: fromY });
+    return true;
+  }
+
+  /** Drop a pickup for tests. */
+  debugPickup(x: number, y: number, kind = 0): void {
+    const slot = this.pickups.find((item) => !item.active) ?? this.pickups[0];
+    if (!slot) return;
+    slot.active = true;
+    slot.x = x;
+    slot.y = y;
+    slot.kind = kind;
+    slot.id = this.pickupSeq++;
+  }
+
   setInput(id: number, x: number, y: number, seq: number): void {
     const p = this.players[id];
     if (!p || !p.active || !p.alive) return;
@@ -175,6 +255,7 @@ export class Sim {
     for (const p of this.roster) {
       if (!p.active || !p.alive || !p.bot) continue;
       updateBot(p, this.botView);
+      if (botWantsAbility(p, this.botView)) this.useAbility(p.id);
     }
 
     for (const p of this.roster) {
@@ -182,7 +263,8 @@ export class Sim {
       p.aliveMs += dt * 1000;
       const x0 = p.x;
       const y0 = p.y;
-      integrateBody(p, dt, this.cfg, undefined, this.land.mapRing);
+      const mul = this.speedMul(p);
+      integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
       if (!p.alive) continue;
       this.followSegment(p, x0, y0, p.x, p.y);
     }
@@ -307,8 +389,10 @@ export class Sim {
   private spawn(p: Player): void {
     if (p.alive) this.land.clear(p.id);
     p.resetRun();
-    const spot = this.findSpawn(p.bot);
-    const radius = spawnRadius(this.cfg.spawnSize);
+    let size = this.cfg.spawnSize;
+    if (p.passiveId === 'headstart') size += effectOf(this.cfg.abilities.headStartExtra, p.rarity, this.cfg);
+    const radius = spawnRadius(size);
+    const spot = this.findSpawn(p.bot, radius);
     this.land.unionPolygon(p.id, [circleRing(spot.x, spot.y, radius, 48)]);
     p.x = spot.x;
     p.y = spot.y;
@@ -352,8 +436,7 @@ export class Sim {
    * Pick a spawn disk that sits inside the blob, with a gap from existing land
    * and from every living head. The last resort still refuses to overlap land.
    */
-  private findSpawn(bot: boolean): { x: number; y: number } {
-    const radius = spawnRadius(this.cfg.spawnSize);
+  private findSpawn(bot: boolean, radius = spawnRadius(this.cfg.spawnSize)): { x: number; y: number } {
     const anchor = this.livingAnchor(true) ?? this.livingAnchor(false) ?? this.land.mapCenter();
     const want = bot ? 50 : 0;
     for (const gap of [14, 8, 4, 1]) {
@@ -539,7 +622,7 @@ export class Sim {
       p.outside = false;
       p.land = this.land.areaOf(p.id);
       if (n > 0.5) {
-        p.xp += n * this.cfg.claimXpPerCell;
+        p.xp += this.xpBonus(p, n * this.cfg.claimXpPerCell);
         this.stats.claims++;
         this.stats.claimedCells += n;
         this.events.push({ e: 'claim', id: p.id, n, x: p.x, y: p.y });
@@ -555,6 +638,7 @@ export class Sim {
 
   private kill(victim: Player, killer: Player | null, reason: DeathReason): void {
     if (!victim.alive) return;
+    if (reason === 'trail' && this.tick < victim.shieldUntil) return;
     if (
       this.tick < victim.invulnUntil &&
       (reason === 'headon' || reason === 'trail' || reason === 'enclosed')
@@ -574,8 +658,8 @@ export class Sim {
     const credit = killer && killer.id !== victim.id && killer.alive;
     if (credit && killer) {
       killer.kills++;
-      killer.coins += this.cfg.killCoins;
-      killer.xp += this.cfg.killXp;
+      killer.coins += this.coinBonus(killer, this.cfg.killCoins);
+      killer.xp += this.xpBonus(killer, this.cfg.killXp);
       if (killer.trainLen < killer.train.length) killer.train[killer.trainLen++] = victim.pet;
       this.stats.kills++;
       this.events.push({
@@ -649,14 +733,15 @@ export class Sim {
   }
 
   private collectPickups(): void {
-    const r2 = this.cfg.pickupRadius * this.cfg.pickupRadius;
     for (const item of this.pickups) {
       if (!item.active) continue;
       for (const p of this.roster) {
         if (!p.active || !p.alive) continue;
+        let radius = this.cfg.pickupRadius;
+        if (p.passiveId === 'magnet') radius += effectOf(this.cfg.abilities.magnetRadius, p.rarity, this.cfg);
         const dx = p.x - item.x;
         const dy = p.y - item.y;
-        if (dx * dx + dy * dy > r2) continue;
+        if (dx * dx + dy * dy > radius * radius) continue;
         let coins = 0;
         let xp = 0;
         if (item.kind === 0) coins = this.cfg.coinValue;
@@ -665,6 +750,11 @@ export class Sim {
           coins = this.cfg.lootCoins;
           xp = this.cfg.lootXp;
         }
+        if (p.passiveId === 'lucky' && coins > 0 && this.rng() < effectOf(this.cfg.abilities.luckyLoot, p.rarity, this.cfg)) {
+          coins += this.cfg.lootCoins;
+        }
+        coins = this.coinBonus(p, coins);
+        xp = this.xpBonus(p, xp);
         p.coins += coins;
         p.xp += xp;
         item.active = false;
@@ -726,6 +816,26 @@ export class Sim {
       item.kind = 0;
       dropped++;
     }
+  }
+
+  private speedMul(p: Player): number {
+    const a = this.cfg.abilities;
+    const scale = rarityScale(p.rarity, this.cfg);
+    let mul = 1;
+    if (p.passiveId === 'swift') mul *= 1 + a.swiftSpeed * scale;
+    if (this.tick < p.dashUntil) mul *= 1 + (a.dashSpeed - 1) * scale;
+    if (this.tick < p.slowUntil) mul *= p.slowMul;
+    return mul;
+  }
+
+  private coinBonus(p: Player, base: number): number {
+    if (base === 0 || p.passiveId !== 'lucky') return base;
+    return base * (1 + effectOf(this.cfg.abilities.luckyCoins, p.rarity, this.cfg));
+  }
+
+  private xpBonus(p: Player, base: number): number {
+    if (base === 0 || p.passiveId !== 'scholar') return base;
+    return base * (1 + effectOf(this.cfg.abilities.scholarXp, p.rarity, this.cfg));
   }
 
   private respawnBots(): void {

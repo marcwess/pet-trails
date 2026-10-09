@@ -1,25 +1,34 @@
 import {
+  ABILITY_ICON,
   CONFIG,
   FLAG_ALIVE,
   FLAG_BOT,
   FLAG_OUTSIDE,
   PALETTE,
+  RARITY_ORDER,
   SPECIES,
   SPECIES_LABEL,
   Sim,
   applyXp,
+  cooldownBase,
+  cooldownOf,
+  equippedPet,
+  kitOf,
   mapBlob,
   randomSeed,
   ringArea,
   integrateBody,
   lerpAngle,
   xpForLevel,
+  type ActiveId,
   type DeltaMsg,
   type EntSnap,
+  type PetInstance,
   type Profile,
   type WelcomeMsg,
   type WireEvent,
 } from '@pet-trails/shared';
+import { Collection } from './collection.js';
 import { Hud, cssColor, deathIcon, deathTitle, type BoardRow, type DeathView } from './hud.js';
 import { Input } from './input.js';
 import { NetClient } from './net.js';
@@ -48,6 +57,10 @@ interface Ent {
   hop: number;
   outside: boolean;
   blinkUntil: number;
+  rarity: number;
+  status: number;
+  cdLeft: number;
+  cdAt: number;
   prevX: number;
   prevZ: number;
   prevH: number;
@@ -87,6 +100,8 @@ export class Game {
   private serverTickAt = 0;
   private steerUntil = 0;
   private hitLeft = 0;
+  private previewSpecies: number | null = null;
+  private readonly collection: Collection;
   private boardAcc = 0;
   private shownKills = 0;
   /** Land percent last written to the HUD. The death sheet uses this same number. */
@@ -142,6 +157,10 @@ export class Game {
         hop: 0,
         blink: false,
         name: '',
+        rarity: 0,
+        dash: false,
+        shield: false,
+        slow: false,
       });
     }
     for (let i = 0; i < 72; i++) this.drawPickups.push({ x: 0, z: 0, kind: 0 });
@@ -156,6 +175,14 @@ export class Game {
       if (this.phase !== 'title') this.startOffline();
     };
     this.hud.onPlay(() => void this.play());
+    this.hud.onAbility(() => this.cast());
+    this.collection = new Collection(profile, {
+      save: () => saveProfile(this.profile),
+      preview: (species) => {
+        this.previewSpecies = species;
+      },
+      line: () => this.hud.setPetLine(this.petLabel()),
+    });
     this.hud.setChip(this.net.mode);
     this.api = {
       phase: 'title',
@@ -175,6 +202,10 @@ export class Game {
         this.input.desiredY = y;
       },
       project: (x: number, y: number) => this.renderer.project(x, 0, y),
+      showPets: () => this.collection.showPets(),
+      showBoxes: () => this.collection.showBoxes(),
+      cast: (kind?: string) => this.cast(kind),
+      screen: () => this.collection.phase(),
     };
   }
 
@@ -207,7 +238,18 @@ export class Game {
     this.predPrimed = false;
     if (mode === 'online') {
       this.offline = null;
-      this.net.send({ t: 'hello', name: this.displayName, pet: this.profile.pet.species });
+      const pet = this.equipped();
+      const kit = kitOf(pet);
+      this.net.send({
+        t: 'hello',
+        name: this.displayName,
+        pet: pet.species,
+        rarity: kit.rarity,
+        actives: kit.actives,
+        passives: kit.passives,
+        eqA: kit.equippedActive,
+        eqP: kit.equippedPassive,
+      });
       this.net.send({ t: 'play' });
       this.phase = 'playing';
     } else if (this.offline) {
@@ -235,7 +277,7 @@ export class Game {
           : {},
       randomSeed(),
     );
-    const player = sim.addHuman(this.displayName, this.profile.pet.species);
+    const player = sim.addHuman(this.displayName, this.equipped().species, kitOf(this.equipped()));
     if (!player) return;
     this.offline = sim;
     this.selfId = player.id;
@@ -279,9 +321,12 @@ export class Game {
       if (this.offline) this.stepOffline(frame);
       else this.stepOnline(frame);
     }
+    this.hud.showAbility(this.phase === 'playing');
+    if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
     const petCount = this.fillDraw();
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
-    this.renderer.update(frame || dt * 0.15, view, this.profile.pet.species, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
+    const hero = this.previewSpecies ?? this.equipped().species;
+    this.renderer.update(frame || dt * 0.15, view, hero, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
     if (this.phase !== 'title') this.snapCam = false;
     if (gfx.cpu) this.hud.setLabels(this.renderer.labels);
     this.boardAcc += dt;
@@ -375,6 +420,11 @@ export class Game {
       ent.coins = p.coins;
       ent.xp = p.xp;
       ent.outside = p.outside;
+      ent.rarity = Math.max(0, RARITY_ORDER.indexOf(p.rarity));
+      ent.status =
+        (sim.tick < p.dashUntil ? 1 : 0) | (sim.tick < p.shieldUntil ? 2 : 0) | (sim.tick < p.slowUntil ? 4 : 0);
+      ent.cdLeft = Math.max(0, (p.cdUntil - sim.tick) / sim.cfg.tickHz);
+      ent.cdAt = performance.now();
       if (p.trainLen > ent.trainLen) ent.hop = 0.72;
       ent.trainShown = Math.min(CONFIG.maxTrainVisible, p.trainLen);
       ent.trainLen = p.trainLen;
@@ -496,6 +546,10 @@ export class Game {
     }
     ent.coins = snap.c;
     ent.xp = snap.xp;
+    ent.rarity = snap.ry;
+    ent.status = snap.st;
+    ent.cdLeft = snap.cd;
+    ent.cdAt = performance.now();
     if (snap.tn > ent.trainLen) ent.hop = 0.72;
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
@@ -569,6 +623,8 @@ export class Game {
         if (ev.kind === 2) this.hud.popup(p.x, p.y, 'Loot!', 'loot');
         else if (ev.kind === 1) this.hud.popup(p.x, p.y, `+${ev.xp} XP`, 'xp');
         else this.hud.popup(p.x, p.y, `+${ev.amount}`, 'coin');
+      } else if (ev.e === 'ability') {
+        this.renderer.abilityFx(ev.kind, ev.x, ev.y, ev.r, ev.fx, ev.fy);
       }
     }
   }
@@ -583,21 +639,21 @@ export class Game {
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     if (me) me.alive = false;
     this.updateBoard();
-    const levels = applyXp(this.profile.pet, Math.round(ev.xp), CONFIG.levelCap);
+    const levels = applyXp(this.equipped(), Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
     this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills, ev.train);
-    const need = xpForLevel(this.profile.pet.level);
+    const need = xpForLevel(this.equipped().level);
     const rows: DeathView['rows'] = [
       { k: 'Territory', v: `${pctNum.toFixed(1)}%`, icon: '▣' },
       { k: 'Rank', v: `#${ev.rank}`, icon: '#' },
       { k: 'Kills', v: String(ev.kills), icon: '⚔' },
       { k: 'Train', v: String(ev.train), icon: '🐾' },
       { k: 'Coins', v: `+${ev.coins}`, icon: '🪙' },
-      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.profile.pet.xp / need : 1 },
+      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.equipped().xp / need : 1 },
       { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
     ];
-    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.profile.pet.level}`, icon: '▲', up: true });
+    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.equipped().level}`, icon: '▲', up: true });
     this.hud.hideSteer();
     this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows });
     buzz(20);
@@ -621,6 +677,10 @@ export class Game {
       draw.hop = ent.hop;
       draw.blink = ent.blinkUntil > performance.now();
       draw.name = ent.name;
+      draw.rarity = ent.rarity;
+      draw.dash = (ent.status & 1) !== 0;
+      draw.shield = (ent.status & 2) !== 0;
+      draw.slow = (ent.status & 4) !== 0;
       if (!ent.alive) {
         draw.x = ent.x;
         draw.z = ent.z;
@@ -808,9 +868,59 @@ export class Game {
   }
 
   petLabel(): string {
-    const species = SPECIES[this.profile.pet.species] ?? 'cat';
+    const pet = this.equipped();
+    const species = SPECIES[pet.species] ?? 'cat';
     const label = SPECIES_LABEL[species];
-    return `Your pet · ${label} · Lv ${this.profile.pet.level}`;
+    return `Your pet · ${label} · Lv ${pet.level}`;
+  }
+
+  private equipped(): PetInstance {
+    return equippedPet(this.profile);
+  }
+
+  private cast(kind?: string): void {
+    if (this.phase !== 'playing') return;
+    if (!this.offline) {
+      this.net.send({ t: 'ability' });
+      return;
+    }
+    const p = this.offline.players[this.selfId];
+    if (!p) return;
+    if (kind && (['dash', 'shield', 'paint', 'frost', 'recall'] as const).includes(kind as ActiveId)) {
+      p.activeId = kind as ActiveId;
+      p.cdUntil = 0;
+    }
+    if (!this.offline.useAbility(this.selfId)) return;
+    this.consume(this.offline.consumeEvents());
+    this.syncOffline(this.offline, false);
+  }
+
+  private abilityIcon(): string {
+    if (this.offline) {
+      const p = this.offline.players[this.selfId];
+      if (p) return ABILITY_ICON[p.activeId];
+    }
+    return ABILITY_ICON[this.equipped().actives[this.equipped().equippedActive]];
+  }
+
+  private abilityTotal(): number {
+    if (this.offline) {
+      const p = this.offline.players[this.selfId];
+      if (p) return cooldownOf(cooldownBase(p.activeId, this.offline.cfg), p.rarity, this.offline.cfg);
+    }
+    const pet = this.equipped();
+    return cooldownOf(cooldownBase(pet.actives[pet.equippedActive]), pet.rarity);
+  }
+
+  private abilityLeft(): number {
+    if (this.offline) {
+      const p = this.offline.players[this.selfId];
+      if (!p) return 0;
+      return Math.max(0, (p.cdUntil - this.offline.tick) / this.offline.cfg.tickHz);
+    }
+    const ent = this.ents[this.selfId];
+    if (!ent) return 0;
+    return Math.max(0, ent.cdLeft - (performance.now() - ent.cdAt) / 1000);
   }
 }
 
@@ -832,6 +942,10 @@ function makeEnt(id: number): Ent {
     hop: 0,
     outside: false,
     blinkUntil: 0,
+    rarity: 0,
+    status: 0,
+    cdLeft: 0,
+    cdAt: 0,
     prevX: 0,
     prevZ: 0,
     prevH: 0,
@@ -943,6 +1057,10 @@ declare global {
       landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
       steer: (x: number, y: number) => void;
       project: (x: number, y: number) => { x: number; y: number; ok: boolean };
+      showPets: () => void;
+      showBoxes: () => void;
+      cast: (kind?: string) => void;
+      screen: () => string;
     };
   }
 }
