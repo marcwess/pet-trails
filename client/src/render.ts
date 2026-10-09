@@ -1774,11 +1774,10 @@ function blobFloor(world: Array<[number, number]>): BufGeo {
     pos[(i + 1) * 3 + 2] = world[i]![1];
     uv[(i + 1) * 2] = world[i]![0] / 2.2;
     uv[(i + 1) * 2 + 1] = world[i]![1] / 2.2;
-    // Screen-space vignette was a full-frame composite. Darken the rim in the mesh instead.
     const o = (i + 1) * 3;
-    col[o] = 0.78;
-    col[o + 1] = 0.82;
-    col[o + 2] = 0.88;
+    col[o] = 1;
+    col[o + 1] = 1;
+    col[o + 2] = 1;
   }
   const idx = new Uint32Array(world.length * 3);
   for (let i = 0; i < world.length; i++) {

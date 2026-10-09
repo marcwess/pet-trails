@@ -225,8 +225,16 @@ export class Game {
   }
 
   private startOffline(): void {
-    const solo = new URLSearchParams(location.search).has('solo');
-    const sim = new Sim(solo ? { targetPopulation: 1, pickupTarget: 0 } : {}, randomSeed());
+    const params = new URLSearchParams(location.search);
+    const pop = Number(params.get('pop'));
+    const sim = new Sim(
+      params.has('solo')
+        ? { targetPopulation: 1, pickupTarget: 0 }
+        : Number.isFinite(pop) && pop >= 1
+          ? { targetPopulation: Math.min(11, Math.floor(pop)), pickupTarget: 0 }
+          : {},
+      randomSeed(),
+    );
     const player = sim.addHuman(this.displayName, this.profile.pet.species);
     if (!player) return;
     this.offline = sim;
