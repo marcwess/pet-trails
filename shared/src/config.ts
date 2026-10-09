@@ -72,8 +72,9 @@ export const CONFIG: GameConfig = {
   tickHz: 20,
   maxEntities: 16,
   targetPopulation: 11,
-  speed: 13.5,
-  turnRate: 5.1,
+  // 20% faster than the 13.5 baseline. Turn rate scales with it so the radius stays ~2.65 cells.
+  speed: 16.2,
+  turnRate: 6.12,
   spawnSize: 18,
   headRadius: 0.9,
   pickupRadius: 2.1,
@@ -89,7 +90,8 @@ export const CONFIG: GameConfig = {
   pickupTarget: 46,
   rareLootChance: 0.08,
   killDropCoins: 4,
-  botThinkSec: 0.14,
+  // Shortened with the speed bump so a bot still thinks after the same distance.
+  botThinkSec: 0.117,
   botMistakeChance: 0.06,
   botThreatRange: 14,
   botHuntRange: 38,
