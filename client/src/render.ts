@@ -10,13 +10,13 @@ import {
   DirectionalLight,
   DoubleSide,
   DynamicDrawUsage,
+  Group,
   HemisphereLight,
   InstancedBufferAttribute,
   InstancedMesh,
   LineBasicMaterial,
   LineSegments,
   Matrix4,
-  Group,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -345,6 +345,15 @@ class Ribbon {
     this.mesh.visible = count > 1;
   }
 
+  /** One short strip so the ribbon program compiles before the first claim. */
+  prime(): void {
+    const path = new PathBuf();
+    path.push(4, 4, 0);
+    path.push(8, 4, 0);
+    path.push(8, 8, 0);
+    this.draw(path, 8, 9);
+  }
+
   private dir(i: number, n: number, forward: boolean): { x: number; z: number } | null {
     if (forward) {
       for (let j = i + 1; j < n; j++) {
@@ -502,10 +511,15 @@ export class Renderer {
     perf.territoryH = 0;
 
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
-    this.scene.add(new HemisphereLight(0xfff8ef, 0xc5d0dc, 0.95));
-    const dir = new DirectionalLight(0xfffaf4, 1.45);
-    dir.position.set(24, 48, 12);
-    this.scene.add(dir);
+    // Walls are lit Lambert. The hemisphere keeps the shaded face in the owner
+    // hue, and the two directions give the slab a light side and a dark side.
+    this.scene.add(new HemisphereLight(0xfff6ec, 0xb9c8d8, 0.9));
+    const key = new DirectionalLight(0xfffaf4, 0.72);
+    key.position.set(26, 42, 18);
+    this.scene.add(key);
+    const fillLight = new DirectionalLight(0xd7e4f4, 0.38);
+    fillLight.position.set(-22, 30, -16);
+    this.scene.add(fillLight);
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
@@ -541,8 +555,9 @@ export class Renderer {
       fill.frustumCulled = false;
       fill.renderOrder = 2;
       fill.visible = false;
-      const wall = (Math.round(col[0] * 0.52) << 16) | (Math.round(col[1] * 0.52) << 8) | Math.round(col[2] * 0.52);
-      const rim = new Mesh(rimGeo, new MeshBasicMaterial({ color: wall, toneMapped: false }));
+      const shade = 0.7;
+      const wall = (Math.round(col[0] * shade) << 16) | (Math.round(col[1] * shade) << 8) | Math.round(col[2] * shade);
+      const rim = new Mesh(rimGeo, new MeshLambertMaterial({ color: wall, toneMapped: false }));
       rim.frustumCulled = false;
       rim.renderOrder = 1;
       rim.visible = false;
@@ -683,6 +698,16 @@ export class Renderer {
     this.scene.add(this.claimRing);
 
     for (let i = 0; i < 40; i++) this.labels.push({ sx: 0, sy: 0, text: '', on: false, name: false, color: '#fff' });
+    // Mirror X so the south-looking camera is north-up with east on the right.
+    // Three's right-handed lookAt would otherwise put east on the left.
+    const mirror = new Group();
+    mirror.scale.x = -1;
+    for (const child of [...this.scene.children]) {
+      if (child.type === 'HemisphereLight' || child.type === 'DirectionalLight') continue;
+      this.scene.remove(child);
+      mirror.add(child);
+    }
+    this.scene.add(mirror);
     this.applySize();
     window.addEventListener('resize', () => this.applySize());
     if (perf.enabled) (window as unknown as { __r?: Renderer }).__r = this;
@@ -713,10 +738,33 @@ export class Renderer {
     this.ring.visible = true;
     this.platform.visible = true;
     this.ground.visible = true;
+    const slot = this.slots[1];
+    if (slot) {
+      const top = new Float32Array([0, SLAB_H, 0, 3, SLAB_H, 0, 3, SLAB_H, 3, 0, SLAB_H, 3]);
+      const topIdx = new Uint16Array([0, 1, 2, 0, 2, 3]);
+      slot.fillGeo.setAttribute('position', new BufferAttribute(top, 3));
+      slot.fillGeo.setIndex(new BufferAttribute(topIdx, 1));
+      slot.fill.visible = true;
+      const side = new Float32Array([
+        0, 0, 0, 3, 0, 0, 0, SLAB_H, 0, 3, SLAB_H, 0,
+        3, 0, 0, 3, 0, 3, 3, SLAB_H, 0, 3, SLAB_H, 3,
+      ]);
+      const sideIdx = new Uint16Array([0, 2, 3, 0, 3, 1, 4, 6, 7, 4, 7, 5]);
+      slot.rimGeo.setAttribute('position', new BufferAttribute(side, 3));
+      slot.rimGeo.setIndex(new BufferAttribute(sideIdx, 1));
+      slot.rimGeo.computeVertexNormals();
+      slot.rim.visible = true;
+    }
+    this.ribbons[0]?.prime();
     this.camera.position.set(10, 8, 16);
     this.camera.lookAt(2, 0.6, 2);
     this.renderer.compile(this.scene, this.camera);
     this.renderer.render(this.scene, this.camera);
+    if (slot) {
+      slot.fill.visible = false;
+      slot.rim.visible = false;
+    }
+    for (const ribbon of this.ribbons) ribbon.clear();
     for (const pet of this.pets) pet.count = 0;
     this.coins.count = 0;
     this.orbs.count = 0;
@@ -835,6 +883,7 @@ export class Renderer {
     if (built.rimIdx.length >= 3) {
       slot.rimGeo.setAttribute('position', new BufferAttribute(built.rimPos, 3));
       slot.rimGeo.setIndex(new BufferAttribute(built.rimIdx, 1));
+      slot.rimGeo.computeVertexNormals();
       slot.rimGeo.computeBoundingSphere();
       slot.rim.visible = true;
       slot.rim.scale.y = 1;
@@ -1234,13 +1283,17 @@ export class Renderer {
       const pz = selfZ * WORLD;
       const lx = px + fx * 1.35;
       const lz = pz + fz * 1.35;
-      const tx = lx - fx * back;
-      const tz = lz - fz * back;
+      // North-up. The look point still leads the pet, but the camera stays due
+      // south of it, so steering turns the pet and never the map. The world
+      // group is mirrored on X, which puts east on the right of this view.
+      const lookSceneX = -lx;
+      const tx = lookSceneX;
+      const tz = lz - back;
       if (!this.camInit || snapCam) {
         this.camX = tx;
         this.camY = height;
         this.camZ = tz;
-        this.lookX = lx;
+        this.lookX = lookSceneX;
         this.lookZ = lz;
         this.camInit = true;
       } else {
@@ -1248,18 +1301,19 @@ export class Renderer {
         this.camX += (tx - this.camX) * k;
         this.camY += (height - this.camY) * k;
         this.camZ += (tz - this.camZ) * k;
-        this.lookX += (lx - this.lookX) * k;
+        this.lookX += (lookSceneX - this.lookX) * k;
         this.lookZ += (lz - this.lookZ) * k;
       }
       const jx = (Math.random() - 0.5) * this.shake * 0.35;
       const jz = (Math.random() - 0.5) * this.shake * 0.35;
+      this.camera.up.set(0, 1, 0);
       this.camera.position.set(this.camX + jx, this.camY, this.camZ + jz);
       this.camera.lookAt(this.lookX, 0.42, this.lookZ);
       const shx = this.camX - this.lookX;
       const shz = this.camZ - this.lookZ;
       const shl = Math.hypot(shx, shz) || 1;
       const off = 0.07;
-      this.landShadow.position.set((shx / shl) * off, -0.02, (shz / shl) * off);
+      this.landShadow.position.set(-(shx / shl) * off, -0.02, (shz / shl) * off);
 
       this.layoutPickups(this.coins, pickups, pickupCount, 0);
       this.layoutPickups(this.orbs, pickups, pickupCount, 1);
@@ -1362,7 +1416,7 @@ export class Renderer {
   }
 
   project(x: number, y: number, z: number): { x: number; y: number; ok: boolean } {
-    this.proj.set(x * WORLD, y, z * WORLD).project(this.camera);
+    this.proj.set(-x * WORLD, y, z * WORLD).project(this.camera);
     const w = this.renderer.domElement.clientWidth || window.innerWidth;
     const h = this.renderer.domElement.clientHeight || window.innerHeight;
     return {

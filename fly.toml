@@ -1,6 +1,6 @@
 # Change `app` to your Fly app name before `fly deploy`.
 app = "pet-trails"
-primary_region = "iad"
+primary_region = "sjc"
 
 [build]
 
@@ -20,3 +20,7 @@ primary_region = "iad"
     method = "GET"
     timeout = "2s"
     path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

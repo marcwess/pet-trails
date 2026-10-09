@@ -14,6 +14,8 @@ export class Input {
   private mouseValid = false;
   private readonly fine = window.matchMedia('(pointer: fine)').matches;
   private readonly keysOnly = new URLSearchParams(location.search).has('keys');
+  private readonly stickEl = document.getElementById('stick');
+  private readonly knobEl = document.getElementById('stick-knob');
 
   constructor(private readonly playerScreen: () => { x: number; y: number } | null) {
     window.addEventListener('pointerdown', this.onDown, { passive: false });
@@ -37,6 +39,7 @@ export class Input {
     this.originY = ev.clientY;
     this.lastX = ev.clientX;
     this.lastY = ev.clientY;
+    this.placeStick();
   };
 
   private onMove = (ev: PointerEvent) => {
@@ -46,6 +49,7 @@ export class Input {
     if (!this.active || ev.pointerId !== this.pointerId) return;
     this.lastX = ev.clientX;
     this.lastY = ev.clientY;
+    this.placeStick();
     ev.preventDefault();
   };
 
@@ -53,6 +57,7 @@ export class Input {
     if (ev.pointerId !== this.pointerId) return;
     this.active = false;
     this.pointerId = -1;
+    this.placeStick();
   };
 
   private onKey = (ev: KeyboardEvent) => {
@@ -77,31 +82,28 @@ export class Input {
   }
 
   /**
-   * Screen-space stick. `heading` is the pet's facing (camera looks along it),
-   * so drag-up and W move toward the top of the screen.
+   * Absolute stick. Screen up is world +Y and screen right is world +X.
+   * Drag is measured from the touch-down point, keys are those axes, and the
+   * mouse is measured from the pet's screen position.
    */
-  sample(heading: number): void {
+  sample(): void {
     let x = 0;
     let y = 0;
     let steering = false;
-    const fx = Math.cos(heading);
-    const fz = Math.sin(heading);
     const w = this.keys.has('w') || this.keys.has('arrowup');
     const a = this.keys.has('a') || this.keys.has('arrowleft');
     const s = this.keys.has('s') || this.keys.has('arrowdown');
     const d = this.keys.has('d') || this.keys.has('arrowright');
     if (w || a || s || d) {
-      const sx = (d ? 1 : 0) - (a ? 1 : 0);
-      const sy = (w ? 1 : 0) - (s ? 1 : 0);
-      x = -fz * sx + fx * sy;
-      y = fx * sx + fz * sy;
+      x = (d ? 1 : 0) - (a ? 1 : 0);
+      y = (w ? 1 : 0) - (s ? 1 : 0);
       steering = true;
     } else if (this.active) {
       const dx = this.lastX - this.originX;
       const dy = this.lastY - this.originY;
       if (dx * dx + dy * dy > 36) {
-        x = -fz * dx - fx * dy;
-        y = fx * dx - fz * dy;
+        x = dx;
+        y = -dy;
         steering = true;
       }
     } else if (this.fine && this.mouseValid && !this.keysOnly) {
@@ -109,8 +111,8 @@ export class Input {
       if (p) {
         const dx = this.mouseX - p.x;
         const dy = this.mouseY - p.y;
-        x = -fz * dx - fx * dy;
-        y = fx * dx - fz * dy;
+        x = dx;
+        y = -dy;
         if (dx * dx + dy * dy > 16) steering = true;
       }
     }
@@ -121,5 +123,28 @@ export class Input {
     } else if (!this.active) {
       this.steering = false;
     }
+  }
+
+  /** Knob sits along the drag, which is the world direction (screen up = north). */
+  private placeStick(): void {
+    const stick = this.stickEl;
+    const knob = this.knobEl;
+    if (!stick || !knob) return;
+    if (!this.active) {
+      stick.hidden = true;
+      return;
+    }
+    stick.hidden = false;
+    stick.style.left = `${this.originX}px`;
+    stick.style.top = `${this.originY}px`;
+    let dx = this.lastX - this.originX;
+    let dy = this.lastY - this.originY;
+    const mag = Math.hypot(dx, dy);
+    const cap = 34;
+    if (mag > cap) {
+      dx = (dx / mag) * cap;
+      dy = (dy / mag) * cap;
+    }
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
   }
 }

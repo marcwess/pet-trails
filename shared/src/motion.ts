@@ -24,14 +24,14 @@ export function lerpAngle(from: number, to: number, t: number): number {
  * Advance a body by `dt` seconds: turn toward the desired direction at the
  * configured rate, then move forward. `onCell` fires for every newly entered
  * grid cell (4-connected, so diagonal steps cannot leak a flood fill).
- * Return false from `onCell` to stop on that cell.
+ * Return false from `onCell` to stop on that cell. The map fence never kills:
+ * a step past it is clamped and the heading is deflected along the wall.
  */
 export function integrateBody(
   body: Body,
   dt: number,
   cfg: Pick<GameConfig, 'speed' | 'turnRate' | 'gridW' | 'gridH'>,
   onCell?: (cx: number, cy: number) => boolean,
-  onBorder?: () => void,
 ): void {
   if (body.desiredX !== 0 || body.desiredY !== 0) {
     const target = Math.atan2(body.desiredY, body.desiredX);
@@ -47,16 +47,19 @@ export function integrateBody(
   let nx = x0 + Math.cos(body.heading) * cfg.speed * dt;
   let ny = y0 + Math.sin(body.heading) * cfg.speed * dt;
   const m = 0.35;
-  const hitBorder = nx < m || ny < m || nx > cfg.gridW - m || ny > cfg.gridH - m;
-  if (nx < m) nx = m;
-  if (ny < m) ny = m;
-  if (nx > cfg.gridW - m) nx = cfg.gridW - m;
-  if (ny > cfg.gridH - m) ny = cfg.gridH - m;
+  const hitL = nx < m;
+  const hitR = nx > cfg.gridW - m;
+  const hitB = ny < m;
+  const hitT = ny > cfg.gridH - m;
+  if (hitL) nx = m;
+  if (hitR) nx = cfg.gridW - m;
+  if (hitB) ny = m;
+  if (hitT) ny = cfg.gridH - m;
+  if (hitL || hitR || hitB || hitT) slideAlongWall(body, hitL, hitR, hitB, hitT);
 
   if (!onCell) {
     body.x = nx;
     body.y = ny;
-    if (hitBorder && onBorder) onBorder();
     return;
   }
 
@@ -68,7 +71,19 @@ export function integrateBody(
   }
   body.x = nx;
   body.y = ny;
-  if (hitBorder && onBorder) onBorder();
+}
+
+/** Drop the outward component so the pet slides along the fence. */
+function slideAlongWall(body: Body, hitL: boolean, hitR: boolean, hitB: boolean, hitT: boolean): void {
+  let vx = Math.cos(body.heading);
+  let vy = Math.sin(body.heading);
+  if ((hitL && vx < 0) || (hitR && vx > 0)) vx = 0;
+  if ((hitB && vy < 0) || (hitT && vy > 0)) vy = 0;
+  if (Math.abs(vx) < 1e-8 && Math.abs(vy) < 1e-8) {
+    if (hitL || hitR) vy = body.desiredY < 0 ? -1 : 1;
+    else vx = body.desiredX < 0 ? -1 : 1;
+  }
+  body.heading = Math.atan2(vy, vx);
 }
 
 /**

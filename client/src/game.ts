@@ -8,6 +8,7 @@ import {
   SPECIES_LABEL,
   Sim,
   applyXp,
+  randomSeed,
   integrateBody,
   lerpAngle,
   xpForLevel,
@@ -165,6 +166,11 @@ export class Game {
       landCheck: () => this.landCheck(),
       landVerts: () => this.territory.vertexCount(),
       landPoly: (id?: number) => this.territory.polygon(id ?? this.selfId),
+      steer: (x: number, y: number) => {
+        this.input.desiredX = x;
+        this.input.desiredY = y;
+      },
+      project: (x: number, y: number) => this.renderer.project(x, 0, y),
     };
   }
 
@@ -215,7 +221,8 @@ export class Game {
   }
 
   private startOffline(): void {
-    const sim = new Sim({}, (Date.now() ^ 0x51f1e) >>> 0);
+    const solo = new URLSearchParams(location.search).has('solo');
+    const sim = new Sim(solo ? { targetPopulation: 1, pickupTarget: 0 } : {}, randomSeed());
     const player = sim.addHuman(this.displayName, this.profile.pet.species);
     if (!player) return;
     this.offline = sim;
@@ -251,8 +258,7 @@ export class Game {
     for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
     const self = this.ents[this.selfId];
     if (self) this.renderer.landPct = self.land / (CONFIG.gridW * CONFIG.gridH);
-    const viewH = this.predPrimed ? this.predH : (self?.h ?? 0);
-    this.input.sample(viewH);
+    this.input.sample();
     const stick = this.input.stick();
     this.hud.setStick(stick.x, stick.y, stick.dx, stick.dy, stick.on && this.phase === 'playing');
     if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
@@ -915,6 +921,8 @@ declare global {
       };
       landVerts: () => number;
       landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
+      steer: (x: number, y: number) => void;
+      project: (x: number, y: number) => { x: number; y: number; ok: boolean };
     };
   }
 }

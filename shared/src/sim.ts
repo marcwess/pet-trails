@@ -1,6 +1,6 @@
 import { updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
-import { LandBook, distPointSeg, polylineNearSegment } from './land.js';
+import { LandBook, polylineNearSegment } from './land.js';
 import { integrateBody } from './motion.js';
 import { Player, type DeathReason } from './player.js';
 import { mulberry32, rngInt } from './rng.js';
@@ -179,9 +179,7 @@ export class Sim {
       p.aliveMs += dt * 1000;
       const x0 = p.x;
       const y0 = p.y;
-      integrateBody(p, dt, this.cfg, undefined, () => {
-        if (p.alive) this.kill(p, null, 'border');
-      });
+      integrateBody(p, dt, this.cfg);
       if (!p.alive) continue;
       this.followSegment(p, x0, y0, p.x, p.y);
     }
@@ -439,16 +437,10 @@ export class Sim {
     }
   }
 
-  /** @returns false when the mover died on this step. */
+  /** @returns false when the mover died on this step. Crossing your own trail is harmless. */
   private consumeStep(p: Player, ax: number, ay: number, bx: number, by: number): boolean {
     if (!p.alive) return false;
     const radius = this.cfg.headRadius;
-    const tail = p.trailLen > 6 ? 4 : p.trailLen > 1 ? 1 : 0;
-    const selfEnd = p.trailLen - tail;
-    if (selfEnd > 0 && this.hitsOwnTrail(p, ax, ay, bx, by, selfEnd, radius)) {
-      this.kill(p, null, 'self');
-      return false;
-    }
     for (const o of this.roster) {
       if (!o.active || !o.alive || o.id === p.id || o.trailLen === 0) continue;
       if (polylineNearSegment(ax, ay, bx, by, o.trailX, o.trailY, 0, o.trailLen, radius)) {
@@ -480,33 +472,6 @@ export class Sim {
     return true;
   }
 
-  private hitsOwnTrail(p: Player, ax: number, ay: number, bx: number, by: number, end: number, radius: number): boolean {
-    // The fresh tail sits on the segment we just travelled. Only an older
-    // point that this step actually moves toward counts as a cross.
-    const vx = bx - ax;
-    const vy = by - ay;
-    const len2 = vx * vx + vy * vy;
-    let cut = end;
-    let acc = 0;
-    const keep = Math.max(1.2, radius * 1.4);
-    for (let i = p.trailLen - 1; i > 0; i--) {
-      acc += Math.hypot(p.trailX[i]! - p.trailX[i - 1]!, p.trailY[i]! - p.trailY[i - 1]!);
-      if (acc >= keep) {
-        cut = Math.min(end, i);
-        break;
-      }
-    }
-    for (let i = 0; i < cut; i++) {
-      const x = p.trailX[i]!;
-      const y = p.trailY[i]!;
-      if (this.land.contains(p.id, x, y)) continue;
-      let t = 1;
-      if (len2 > 1e-12) t = ((x - ax) * vx + (y - ay) * vy) / len2;
-      if (t < 0.08) continue;
-      if (distPointSeg(x, y, ax, ay, bx, by) <= radius) return true;
-    }
-    return false;
-  }
 
   /** Binary search the segment for the land boundary. `endInside` is the state at (bx, by). */
   private boundaryPoint(id: number, ax: number, ay: number, bx: number, by: number, endInside: boolean): [number, number] {
@@ -589,7 +554,7 @@ export class Sim {
     victim.alive = false;
     victim.outside = false;
 
-    const credit = killer && killer.id !== victim.id && killer.alive && reason !== 'self';
+    const credit = killer && killer.id !== victim.id && killer.alive;
     if (credit && killer) {
       killer.kills++;
       killer.coins += this.cfg.killCoins;

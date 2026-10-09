@@ -1,6 +1,5 @@
 import type { GameConfig } from './config.js';
 import type { LandBook } from './land.js';
-import { polylineNearSegment } from './land.js';
 import { angleDelta } from './motion.js';
 import type { Player } from './player.js';
 
@@ -74,7 +73,7 @@ function trailThreatened(p: Player, view: BotView): boolean {
   return false;
 }
 
-/** Turn away from the bot's own trail and the map edge. */
+/** Steer back toward mid-map near the fence. A bot's own trail is safe to cross. */
 function avoid(p: Player, view: BotView): boolean {
   const { cfg } = view;
   const edge = 6;
@@ -82,20 +81,6 @@ function avoid(p: Player, view: BotView): boolean {
     p.desiredX = cfg.gridW / 2 - p.x;
     p.desiredY = cfg.gridH / 2 - p.y;
     return true;
-  }
-  const dx = Math.cos(p.heading);
-  const dy = Math.sin(p.heading);
-  const tail = p.trailLen > 6 ? 4 : 0;
-  for (const dist of [3.2, 6.5]) {
-    const x = p.x + dx * dist;
-    const y = p.y + dy * dist;
-    if (x < 0 || y < 0 || x >= cfg.gridW || y >= cfg.gridH) continue;
-    if (view.land.contains(p.id, x, y)) continue;
-    if (polylineNearSegment(x, y, x, y, p.trailX, p.trailY, 0, Math.max(0, p.trailLen - tail), 1.15)) {
-      const s = p.botTurnSign || 1;
-      steer(p, Math.atan2(dy, dx) + s * 0.85);
-      return true;
-    }
   }
   return false;
 }

@@ -64,6 +64,12 @@ canvas {
   pointer-events: none;
 }
 
+.title-screen[hidden],
+#hud[hidden],
+#stick[hidden] {
+  display: none;
+}
+
 .logo {
   margin: 8px 0 0;
   font-size: clamp(64px, 18vw, 104px);
@@ -258,6 +264,7 @@ canvas {
 
 #stick {
   position: absolute;
+  z-index: 5;
   width: 86px;
   height: 86px;
   margin-left: -43px;

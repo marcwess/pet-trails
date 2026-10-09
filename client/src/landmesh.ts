@@ -114,23 +114,18 @@ function faceUp(pos: Float32Array, idx: Uint16Array): void {
   }
 }
 
-/** Vertical quads. Outward for a CCW outer ring and into a CW hole. */
+/** Vertical quads with unique vertices so each face keeps its own normal. */
 function pushWalls(ring: Pair[], world: number, pos: number[], idx: number[]): void {
   const n = ring.length;
   if (n < 3) return;
-  const base = pos.length / 3;
-  for (let i = 0; i < n; i++) {
-    pos.push(ring[i]![0] * world, 0, ring[i]![1] * world);
-  }
-  for (let i = 0; i < n; i++) {
-    pos.push(ring[i]![0] * world, SLAB_H, ring[i]![1] * world);
-  }
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n;
-    const b0 = base + i;
-    const b1 = base + j;
-    const t0 = base + n + i;
-    const t1 = base + n + j;
-    idx.push(b0, t0, t1, b0, t1, b1);
+    const x0 = ring[i]![0] * world;
+    const z0 = ring[i]![1] * world;
+    const x1 = ring[j]![0] * world;
+    const z1 = ring[j]![1] * world;
+    const base = pos.length / 3;
+    pos.push(x0, 0, z0, x1, 0, z1, x0, SLAB_H, z0, x1, SLAB_H, z1);
+    idx.push(base, base + 2, base + 3, base, base + 3, base + 1);
   }
 }

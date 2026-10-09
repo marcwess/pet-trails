@@ -16,22 +16,28 @@ function placePair(seed: number) {
   return { sim, a, b };
 }
 
-test('crossing the map border kills you and shows a border death', () => {
+test('hitting the fence slides along the wall and does not kill', () => {
   const sim = new Sim(
-    { gridW: 24, gridH: 24, spawnSize: 4, speed: 30, turnRate: 40, tickHz: 20, pickupTarget: 0 },
+    { gridW: 40, gridH: 40, spawnSize: 4, speed: 16, turnRate: 12, tickHz: 20, pickupTarget: 0 },
     4,
   );
   const a = sim.addHuman('A', 0);
   assert.ok(a);
-  sim.debugPlace(a.id, 2.2, 12, Math.PI);
-  for (let i = 0; i < 40 && a.alive; i++) {
-    sim.setInput(a.id, -1, 0, i + 1);
+  sim.debugPlace(a.id, 3, 12, Math.PI);
+  const y0 = a.y;
+  for (let i = 0; i < 24; i++) {
+    sim.setInput(a.id, -1, 1, i + 1);
     sim.step();
   }
-  assert.equal(a.alive, false);
-  assert.equal(a.deathReason, 'border');
-  const died = sim.consumeEvents().find((e) => e.e === 'die' && e.id === a.id);
-  assert.ok(died && died.e === 'die' && died.reason === 'border');
+  assert.equal(a.alive, true);
+  assert.equal(a.deathReason, '');
+  assert.ok(a.x <= 0.4, `x ${a.x} should sit on the fence`);
+  assert.ok(a.y > y0 + 6, `y ${a.y} should have slid north from ${y0}`);
+  assert.ok(Math.cos(a.heading) > -0.05, `heading ${a.heading} still points out through the wall`);
+  assert.equal(
+    sim.consumeEvents().some((e) => e.e === 'die'),
+    false,
+  );
 });
 
 test('cutting a trail kills the owner and credits the cutter', () => {
@@ -59,23 +65,70 @@ test('cutting a trail kills the owner and credits the cutter', () => {
   assert.ok(sim.auditLand());
 });
 
-test('hitting your own trail is a death with no kill credit', () => {
-  const { sim, a, b } = placePair(2);
-  sim.debugGiveRect(a.id, 2, 2, 4, 4);
-  const trailCell = sim.idx(14, 14);
-  sim.debugSetTrail(a.id, [trailCell]);
-  sim.debugPlace(a.id, 14.5, 12.2, Math.PI / 2);
-  b.frozen = true;
-  const killsBefore = b.kills;
-  for (let i = 0; i < 12 && a.alive; i++) {
-    sim.setInput(a.id, 0, 1, i + 1);
-    sim.step();
+test('a self-crossing loop stays alive and claims both lobes', () => {
+  const sim = new Sim(
+    { gridW: 80, gridH: 80, spawnSize: 6, speed: 20, turnRate: 80, tickHz: 20, pickupTarget: 0 },
+    4,
+  );
+  const p = sim.addHuman('Ada', 3);
+  assert.ok(p);
+  sim.debugClear(p.id);
+  sim.debugGiveRect(p.id, 20, 30, 8, 8);
+  sim.debugPlace(p.id, 26.5, 34.5, 0);
+  p.alive = true;
+  p.outside = false;
+  p.trailLen = 0;
+  const start = p.land;
+  const drive = (x: number, y: number, ticks: number) => {
+    for (let i = 0; i < ticks; i++) {
+      sim.setInput(p.id, x, y, sim.tick + 1);
+      sim.step();
+      assert.equal(p.alive, true, `died ${p.deathReason} at ${p.x.toFixed(1)},${p.y.toFixed(1)} tick ${sim.tick}`);
+    }
+  };
+  // East out of home, around the lower lobe, through the outbound trail,
+  // around the upper lobe, then west back onto the land.
+  drive(1, 0, 20);
+  drive(0, -1, 12);
+  drive(-1, 0, 16);
+  drive(0, 1, 12);
+  assert.equal(p.outside, true, 'crossing the outbound trail must not end the run');
+  assert.ok(p.trailLen > 10, 'the trail keeps going through the cross');
+  drive(0, 1, 12);
+  drive(1, 0, 16);
+  drive(0, -1, 12);
+  drive(-1, 0, 22);
+  assert.equal(p.alive, true);
+  assert.equal(p.deathReason, '');
+  assert.ok(p.land > start + 80, `land ${p.land} did not take both lobes from ${start}`);
+  const at = (x: number, y: number) => sim.ownerAt(x + 0.5, y + 0.5);
+  assert.equal(at(38, 28), p.id, 'lower lobe');
+  assert.equal(at(38, 40), p.id, 'upper lobe');
+  assert.equal(at(32, 33), p.id, 'cell just south of the cross');
+  assert.equal(at(32, 35), p.id, 'cell just north of the cross');
+  assert.equal(at(5, 5), 0, 'open map stays unclaimed');
+  assert.ok(sim.auditLand());
+  assert.equal(
+    sim.consumeEvents().some((e) => e.e === 'die'),
+    false,
+  );
+});
+
+test('bots can cross their own trails and the fence without those deaths', () => {
+  const sim = new Sim(
+    { gridW: 80, gridH: 80, spawnSize: 8, targetPopulation: 6, pickupTarget: 0 },
+    11,
+  );
+  const human = sim.addHuman('A', 0);
+  assert.ok(human);
+  human.frozen = true;
+  for (let i = 0; i < 400; i++) {
+    sim.step({ humans: 1 });
+    for (const e of sim.consumeEvents()) {
+      if (e.e !== 'die') continue;
+      assert.ok(e.reason === 'trail' || e.reason === 'headon' || e.reason === 'enclosed', `unexpected ${e.reason}`);
+    }
   }
-  assert.equal(a.alive, false);
-  assert.equal(a.deathReason, 'self');
-  assert.equal(b.kills, killsBefore);
-  assert.equal(sim.stats.kills, 0);
-  assert.equal(sim.land.areaOf(a.id), 0);
 });
 
 test('head-on: more land wins, the smaller pet joins the train', () => {

@@ -17,10 +17,8 @@ export interface DeathView {
 
 const REASONS: Record<DeathReason, { title: string; icon: string }> = {
   trail: { title: 'Your trail was cut!', icon: '✂' },
-  self: { title: 'You crossed your trail!', icon: '↩' },
   headon: { title: 'Head-on collision!', icon: '💥' },
   enclosed: { title: 'You got surrounded!', icon: '◎' },
-  border: { title: 'You hit the wall!', icon: '▣' },
 };
 
 export function deathTitle(reason: string): string {

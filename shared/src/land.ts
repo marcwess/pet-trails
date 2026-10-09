@@ -447,6 +447,99 @@ function segsCross(ax: number, ay: number, bx: number, by: number, cx: number, c
   return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
 }
 
+/** Proper crossing, not a shared endpoint. */
+function segHit(ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number): Pair | null {
+  const rdx = bx - ax;
+  const rdy = by - ay;
+  const sdx = dx - cx;
+  const sdy = dy - cy;
+  const den = rdx * sdy - rdy * sdx;
+  if (Math.abs(den) < 1e-12) return null;
+  const t = ((cx - ax) * sdy - (cy - ay) * sdx) / den;
+  const u = ((cx - ax) * rdy - (cy - ay) * rdx) / den;
+  const eps = 1e-5;
+  if (t <= eps || t >= 1 - eps || u <= eps || u >= 1 - eps) return null;
+  return [ax + t * rdx, ay + t * rdy];
+}
+
+function chainCrosses(chain: Pair[]): boolean {
+  const n = chain.length;
+  for (let i = 0; i < n - 1; i++) {
+    const a = chain[i]!;
+    const b = chain[i + 1]!;
+    for (let j = i + 2; j < n - 1; j++) {
+      if (j === i + 1) continue;
+      const c = chain[j]!;
+      const d = chain[j + 1]!;
+      if (segHit(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Peel each self-crossing into its own simple face, then union every face.
+ * A figure-eight therefore claims both lobes instead of the smaller one.
+ */
+function unionOfFaces(open: Pair[]): MultiPolygon | null {
+  let chain: Pair[] = [];
+  for (const p of open) {
+    const last = chain[chain.length - 1];
+    if (last && samePt(last, p)) continue;
+    chain.push([p[0], p[1]]);
+  }
+  if (chain.length >= 2 && samePt(chain[0]!, chain[chain.length - 1]!)) chain.pop();
+  const faces: MultiPolygon[] = [];
+  for (let guard = 0; guard < 16 && chain.length >= 4; guard++) {
+    let hit: { i: number; j: number; q: Pair } | null = null;
+    const n = chain.length;
+    for (let i = 0; i < n - 1 && !hit; i++) {
+      const a = chain[i]!;
+      const b = chain[i + 1]!;
+      for (let j = i + 2; j < n - 1; j++) {
+        const c = chain[j]!;
+        const d = chain[j + 1]!;
+        const q = segHit(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]);
+        if (!q) continue;
+        hit = { i, j, q };
+        break;
+      }
+    }
+    if (!hit) break;
+    const loop: Pair[] = [hit.q];
+    for (let k = hit.i + 1; k <= hit.j; k++) loop.push(chain[k]!);
+    loop.push(hit.q);
+    const ring = closeRing(loop);
+    if (ring && Math.abs(signedArea(ring)) >= 0.4) faces.push([[orient(ring, true)]]);
+    const next: Pair[] = [];
+    for (let k = 0; k <= hit.i; k++) next.push(chain[k]!);
+    next.push(hit.q);
+    for (let k = hit.j + 1; k < chain.length; k++) next.push(chain[k]!);
+    chain = [];
+    for (const p of next) {
+      const last = chain[chain.length - 1];
+      if (last && samePt(last, p)) continue;
+      chain.push(p);
+    }
+  }
+  const rest = closeRing(chain);
+  if (rest && Math.abs(signedArea(rest)) >= 0.4) faces.push([[orient(rest, true)]]);
+  if (faces.length === 0) return null;
+  let acc: MultiPolygon = [];
+  for (const face of faces) {
+    if (acc.length === 0) {
+      acc = cloneMulti(face);
+      continue;
+    }
+    try {
+      acc = pc.union(acc, face);
+    } catch {
+      acc = acc.concat(cloneMulti(face));
+    }
+  }
+  return acc.length > 0 ? acc : null;
+}
+
 function pointInRect(x: number, y: number, x0: number, y0: number, x1: number, y1: number): boolean {
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
@@ -718,7 +811,27 @@ export class LandBook {
     if (straight && Math.abs(signedArea(straight)) >= 0.4) candidates.push([[orient(straight, true)]]);
     let best: MultiPolygon | null = null;
     let bestArea = Infinity;
+    let crossed: MultiPolygon | null = null;
+    let crossedArea = -1;
     for (const cand of candidates) {
+      const ring = cand[0]?.[0];
+      if (!ring) continue;
+      const open = ring.slice(0, -1);
+      if (chainCrosses(open)) {
+        const faces = unionOfFaces(open);
+        if (!faces) continue;
+        const clipped = this.clip(sanitize(faces, 0.02));
+        if (clipped.length === 0) continue;
+        const added = own.length === 0 ? clipped : safeDiff(clipped, own);
+        if (farCorner(added, box, this.mapW, this.mapH)) continue;
+        const area = multiArea(added);
+        if (area < 0.5) continue;
+        if (area > crossedArea) {
+          crossedArea = area;
+          crossed = clipped;
+        }
+        continue;
+      }
       const clipped = this.clip(cand);
       if (clipped.length === 0) continue;
       const added = own.length === 0 ? clipped : safeDiff(clipped, own);
@@ -730,8 +843,11 @@ export class LandBook {
         best = clipped;
       }
     }
+    if (crossed) return crossed;
     if (!best) {
       for (const cand of candidates) {
+        const ring = cand[0]?.[0];
+        if (ring && chainCrosses(ring.slice(0, -1))) continue;
         const clipped = this.clip(cand);
         const added = own.length === 0 ? clipped : safeDiff(clipped, own);
         const area = multiArea(added);

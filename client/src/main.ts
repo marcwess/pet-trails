@@ -14,17 +14,18 @@ import { Territory } from './territory.js';
 import './style.css';
 
 async function serverUrl(): Promise<string> {
-  const query = new URLSearchParams(location.search).get('server');
-  if (query) return query;
+  const params = new URLSearchParams(location.search);
+  if (params.has('server')) return params.get('server') ?? '';
   try {
     const res = await fetch(`${import.meta.env.BASE_URL}config.json`);
     if (res.ok) {
       const json = (await res.json()) as { serverUrl?: string };
-      if (json.serverUrl) return json.serverUrl;
+      if (typeof json.serverUrl === 'string') return json.serverUrl;
     }
   } catch {
-    /* offline fallback */
+    /* no config: stay offline on https, localhost only for local http */
   }
+  if (location.protocol === 'https:') return '';
   return 'ws://localhost:8787';
 }
 
