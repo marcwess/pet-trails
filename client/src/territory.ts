@@ -6,17 +6,18 @@ const MAX_OWNERS = 24;
 const LOOP_N = 480;
 const MAX_E = 16384;
 const MAX_P = 16384;
-/** Signed-distance band, in cells, around the smoothed contour. */
-const FEATHER = 1.35;
+/** Signed-distance band, in cells, around the smoothed contour. Narrow so the offset shadow sits outside it. */
+const FEATHER = 0.42;
+/** Previous ramp texels kept per owner so the next claim can erase them without scanning the map. */
+const TOUCH_N = 32768;
 
 /**
  * Territory is a single DataTexture. After the initial upload, only dirty
  * pixel rows go to the GPU via texSubImage2D.
  *
- * Cell ownership is painted solid, then each owner's contour is corner-cut
- * (Chaikin) and, once a claim's trail polyline is known, snapped to that
- * centerline. A signed-distance ramp in the texture is what the ground shader
- * smoothsteps, so diagonal edges stay curved at screen resolution.
+ * Cells are painted solid. A finished claim (not every frame) corner-cuts that
+ * owner's contour and snaps it to the trail centerline, then writes a narrow
+ * coverage ramp. The ground shader turns that ramp into a 1.5px edge.
  */
 export class Territory {
   readonly gridW: number;
@@ -27,6 +28,14 @@ export class Territory {
   readonly trail: Uint8Array;
   readonly texture: DataTexture;
   snapshotUploads = 0;
+
+  /** Cell bounds of each owner that currently has land. */
+  visitBoxes(fn: (x0: number, y0: number, x1: number, y1: number) => void): void {
+    for (let id = 1; id < MAX_OWNERS; id++) {
+      if (!this.bbOn[id]) continue;
+      fn(this.bbMinX[id]!, this.bbMinY[id]!, this.bbMaxX[id]!, this.bbMaxY[id]!);
+    }
+  }
 
   private readonly data: Uint8Array<ArrayBuffer>;
   private readonly drawOwner: Uint8Array;
@@ -42,6 +51,8 @@ export class Territory {
   private readonly hotMark: Uint8Array;
   private hotN = 0;
   private readonly rowDirty: Uint8Array;
+  private readonly rowX0: Uint16Array;
+  private readonly rowX1: Uint16Array;
   private rowCount = 0;
   private now = 0;
   private ready = false;
@@ -68,9 +79,15 @@ export class Territory {
   private readonly sd: Float32Array;
   private readonly sdStamp: Uint16Array;
   private readonly touch: Int32Array;
-  private readonly once: Uint32Array;
+  private readonly touchAt: Int32Array;
+  private readonly touchLen = new Int32Array(MAX_OWNERS);
+  private readonly bbMinX = new Int16Array(MAX_OWNERS);
+  private readonly bbMinY = new Int16Array(MAX_OWNERS);
+  private readonly bbMaxX = new Int16Array(MAX_OWNERS);
+  private readonly bbMaxY = new Int16Array(MAX_OWNERS);
+  private readonly bbOn = new Uint8Array(MAX_OWNERS);
+  private readonly due = new Float32Array(MAX_OWNERS);
   private sid = 1;
-  private onceId = 1;
   private touchN = 0;
 
   constructor(gridW: number, gridH: number) {
@@ -92,13 +109,15 @@ export class Territory {
     this.hot = new Int32Array(n);
     this.hotMark = new Uint8Array(n);
     this.rowDirty = new Uint8Array(this.texH);
+    this.rowX0 = new Uint16Array(this.texH);
+    this.rowX1 = new Uint16Array(this.texH);
     this.data = new Uint8Array(new ArrayBuffer(this.texW * this.texH * 4));
     this.eHead = new Int32Array((gridW + 1) * (gridH + 1));
     this.eHead.fill(-1);
     this.sd = new Float32Array(this.texW * this.texH);
     this.sdStamp = new Uint16Array(this.texW * this.texH);
     this.touch = new Int32Array(this.texW * this.texH);
-    this.once = new Uint32Array(n);
+    this.touchAt = new Int32Array(MAX_OWNERS * TOUCH_N);
     this.texture = new DataTexture(this.data, this.texW, this.texH, RGBAFormat, UnsignedByteType);
     this.texture.colorSpace = LinearSRGBColorSpace;
     this.texture.magFilter = LinearFilter;
@@ -122,6 +141,8 @@ export class Territory {
     this.fade.fill(0);
     this.hotMark.fill(0);
     this.loopN.fill(0);
+    this.touchLen.fill(0);
+    this.bbOn.fill(0);
     this.paintAll();
     this.snapshotUploads++;
     this.ready = false;
@@ -142,7 +163,7 @@ export class Territory {
       this.loopY[base + i] = ys[i]!;
     }
     this.loopN[id] = count;
-    this.markOwner(id);
+    this.schedule(id);
   }
 
   applyRuns(runs: ArrayLike<number>, animate: boolean, ox: number, oy: number): void {
@@ -225,27 +246,27 @@ export class Territory {
       const i = this.hot[k]!;
       const cx = i % this.gridW;
       const cy = (i / this.gridW) | 0;
-      let live = false;
-      if (this.flash[i]! > 0) {
-        this.flash[i] = Math.max(0, this.flash[i]! - drop);
-        live = true;
+        if (this.flash[i]! > 0) {
+        const prev = this.flash[i]!;
+        const next = Math.max(0, prev - drop);
+        this.flash[i] = next;
+        if ((prev > 140 && next <= 140) || next === 0) this.paintCell(cx, cy, false);
+        // The flash repaint restores flat color. Rebuild once it is over so the rim comes back.
+        if (next === 0) this.schedule(this.shownOwner(cx, cy));
       }
       if (this.fade[i]! > 0) {
         const prevOwner = this.fadeOwner[i]!;
-        this.fade[i] = Math.max(0, this.fade[i]! - drop * 1.6);
-        if (this.fade[i] === 0) {
+        const prev = this.fade[i]!;
+        const next = Math.max(0, prev - drop * 1.6);
+        this.fade[i] = next;
+        if (next === 0) {
           this.drawOwner[i] = 0;
           this.drawTrail[i] = 0;
           this.paintCell(cx, cy, true);
-          this.markOwner(prevOwner);
-          this.noteNeighbors(cx, cy);
-        } else {
+          this.schedule(prevOwner);
+        } else if (((prev / 48) | 0) !== ((next / 48) | 0)) {
           this.paintCell(cx, cy, true);
-          this.markOwner(prevOwner);
         }
-        live = true;
-      } else if (this.flash[i] === 0 || live) {
-        this.paintCell(cx, cy, false);
       }
       if (this.flash[i]! > 0 || this.fade[i]! > 0) this.hot[w++] = i;
       else this.hotMark[i] = 0;
@@ -270,8 +291,8 @@ export class Territory {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
     const gl2 = gl as WebGL2RenderingContext;
-    if (typeof gl2.UNPACK_ROW_LENGTH === 'number') gl.pixelStorei(gl2.UNPACK_ROW_LENGTH, 0);
-    const stride = this.texW * 4;
+    const rowLength = typeof gl2.UNPACK_ROW_LENGTH === 'number';
+    if (rowLength) gl.pixelStorei(gl2.UNPACK_ROW_LENGTH, this.texW);
     let y = 0;
     while (y < this.texH) {
       if (!this.rowDirty[y]) {
@@ -279,40 +300,82 @@ export class Territory {
         continue;
       }
       let y2 = y + 1;
-      while (y2 < this.texH && this.rowDirty[y2]) y2++;
+      let x0 = this.rowX0[y]!;
+      let x1 = this.rowX1[y]!;
+      while (y2 < this.texH && this.rowDirty[y2] && y2 - y < 24) {
+        const nx0 = Math.min(x0, this.rowX0[y2]!);
+        const nx1 = Math.max(x1, this.rowX1[y2]!);
+        if (y2 > y && nx1 - nx0 > x1 - x0 + 64) break;
+        x0 = nx0;
+        x1 = nx1;
+        y2++;
+      }
+      const width = x1 - x0 + 1;
       const height = y2 - y;
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y, this.texW, height, gl.RGBA, gl.UNSIGNED_BYTE, this.data, y * stride);
+      const offset = (y * this.texW + x0) * 4;
+      if (rowLength) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y, width, height, gl.RGBA, gl.UNSIGNED_BYTE, this.data, offset);
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, y, this.texW, height, gl.RGBA, gl.UNSIGNED_BYTE, this.data, y * this.texW * 4);
+      }
       y = y2;
     }
+    if (rowLength) gl.pixelStorei(gl2.UNPACK_ROW_LENGTH, 0);
     this.rowDirty.fill(0);
     this.rowCount = 0;
   }
 
   private paintAll(): void {
+    this.bbOn.fill(0);
     const n = this.gridW * this.gridH;
     for (let i = 0; i < n; i++) {
-      if (this.drawOwner[i]) this.markOwner(this.drawOwner[i]!);
-      this.paintCell(i % this.gridW, (i / this.gridW) | 0, true);
+      const cx = i % this.gridW;
+      const cy = (i / this.gridW) | 0;
+      const o = this.drawOwner[i]!;
+      if (o) this.grow(o, cx, cy);
+      this.paintCell(cx, cy, true);
     }
-    this.flushEdges();
+    this.dirtyN = 0;
+    this.dirtyOn.fill(0);
     this.rowDirty.fill(0);
     this.rowCount = 0;
+    for (let id = 1; id < MAX_OWNERS; id++) {
+      if (this.bbOn[id]) this.schedule(id);
+    }
   }
 
   private paintIndex(i: number, prevDraw: number): void {
     const cx = i % this.gridW;
     const cy = (i / this.gridW) | 0;
     this.paintCell(cx, cy, true);
-    this.markOwner(prevDraw);
-    this.markOwner(this.shownOwner(cx, cy));
-    this.noteNeighbors(cx, cy);
+    const shown = this.shownOwner(cx, cy);
+    this.grow(prevDraw, cx, cy);
+    this.grow(shown, cx, cy);
+    this.schedule(prevDraw);
+    this.schedule(shown);
   }
 
-  private noteNeighbors(cx: number, cy: number): void {
-    if (cx > 0) this.markOwner(this.shownOwner(cx - 1, cy));
-    if (cx + 1 < this.gridW) this.markOwner(this.shownOwner(cx + 1, cy));
-    if (cy > 0) this.markOwner(this.shownOwner(cx, cy - 1));
-    if (cy + 1 < this.gridH) this.markOwner(this.shownOwner(cx, cy + 1));
+  private grow(id: number, cx: number, cy: number): void {
+    if (id <= 0 || id >= MAX_OWNERS || cx < 0 || cy < 0 || cx >= this.gridW || cy >= this.gridH) return;
+    if (!this.bbOn[id]) {
+      this.bbOn[id] = 1;
+      this.bbMinX[id] = cx;
+      this.bbMaxX[id] = cx;
+      this.bbMinY[id] = cy;
+      this.bbMaxY[id] = cy;
+      return;
+    }
+    if (cx < this.bbMinX[id]!) this.bbMinX[id] = cx;
+    if (cx > this.bbMaxX[id]!) this.bbMaxX[id] = cx;
+    if (cy < this.bbMinY[id]!) this.bbMinY[id] = cy;
+    if (cy > this.bbMaxY[id]!) this.bbMaxY[id] = cy;
+  }
+
+  private schedule(id: number): void {
+    if (id <= 0 || id >= MAX_OWNERS) return;
+    this.markOwner(id);
+    const when = this.now + 0.1;
+    if (this.due[id]! < when) this.due[id] = when;
   }
 
   private markOwner(id: number): void {
@@ -346,7 +409,7 @@ export class Territory {
         this.data[p + 2] = rgb.b;
         if (writeAlpha) this.data[p + 3] = a;
       }
-      this.markRow(y0 + py);
+      this.markSpan(y0 + py, x0, x0 + S - 1);
     }
   }
 
@@ -372,59 +435,40 @@ export class Territory {
     };
   }
 
-  private markRow(row: number): void {
-    if (row < 0 || row >= this.texH || this.rowDirty[row]) return;
-    this.rowDirty[row] = 1;
-    this.rowCount++;
+  private markSpan(row: number, x0: number, x1: number): void {
+    if (row < 0 || row >= this.texH) return;
+    const a = Math.max(0, x0);
+    const b = Math.min(this.texW - 1, x1);
+    if (!this.rowDirty[row]) {
+      this.rowDirty[row] = 1;
+      this.rowX0[row] = a;
+      this.rowX1[row] = b;
+      this.rowCount++;
+      return;
+    }
+    if (a < this.rowX0[row]!) this.rowX0[row] = a;
+    if (b > this.rowX1[row]!) this.rowX1[row] = b;
   }
 
+  /** At most one settled claim per frame. The sweep itself only paints solid cells. */
   private flushEdges(): void {
     if (this.dirtyN === 0) return;
-    const n = this.dirtyN;
-    for (let k = 0; k < n; k++) {
+    let ran = -1;
+    for (let k = 0; k < this.dirtyN; k++) {
       const owner = this.dirtyIds[k]!;
+      if (this.ownerPending(owner) || this.now < this.due[owner]!) continue;
+      this.rebuild(owner);
       this.dirtyOn[owner] = 0;
-      this.solidify(owner);
-      this.stampOwner(owner);
+      ran = k;
+      break;
     }
-    this.dirtyN = 0;
-  }
-
-  /** Restore a solid silhouette so a previous ramp cannot leave a stair behind. */
-  private solidify(owner: number): void {
-    this.onceId++;
-    const id = this.onceId;
-    const w = this.gridW;
-    const h = this.gridH;
-    for (let cy = 0; cy < h; cy++) {
-      for (let cx = 0; cx < w; cx++) {
-        if (this.shownOwner(cx, cy) !== owner) continue;
-        this.paintOnce(cx, cy, id);
-        let edge = false;
-        if (this.shownOwner(cx - 1, cy) !== owner) edge = true;
-        else if (this.shownOwner(cx + 1, cy) !== owner) edge = true;
-        else if (this.shownOwner(cx, cy - 1) !== owner) edge = true;
-        else if (this.shownOwner(cx, cy + 1) !== owner) edge = true;
-        if (!edge) continue;
-        for (let dy = -3; dy <= 3; dy++) {
-          const ny = cy + dy;
-          if (ny < 0 || ny >= h) continue;
-          for (let dx = -3; dx <= 3; dx++) {
-            const nx = cx + dx;
-            if (nx < 0 || nx >= w) continue;
-            if (this.shownOwner(nx, ny) !== 0) continue;
-            this.paintOnce(nx, ny, id);
-          }
-        }
-      }
+    if (ran < 0) return;
+    let w = 0;
+    for (let k = 0; k < this.dirtyN; k++) {
+      if (k === ran) continue;
+      this.dirtyIds[w++] = this.dirtyIds[k]!;
     }
-  }
-
-  private paintOnce(cx: number, cy: number, id: number): void {
-    const i = cy * this.gridW + cx;
-    if (this.once[i] === id) return;
-    this.once[i] = id;
-    this.paintCell(cx, cy, true);
+    this.dirtyN = w;
   }
 
   private ownerPending(owner: number): boolean {
@@ -435,15 +479,74 @@ export class Territory {
     return false;
   }
 
-  private stampOwner(owner: number): void {
-    if (this.traceLoops(owner) === 0) return;
+  private rebuild(owner: number): void {
+    const edges = this.traceLoops(owner);
+    this.undoRamp(owner);
+    if (edges === 0) {
+      this.touchLen[owner] = 0;
+      return;
+    }
     this.sid++;
     if (this.sid === 65535) {
       this.sdStamp.fill(0);
       this.sid = 1;
     }
     this.touchN = 0;
-    this.writeLoops(owner, !this.ownerPending(owner) && this.loopN[owner]! >= 2);
+    this.writeLoops(owner, this.loopN[owner]! >= 2);
+    this.saveTouches(owner);
+  }
+
+  /** Put the previous coverage band back to solid cells so a moved curve cannot ghost. */
+  private undoRamp(owner: number): void {
+    if (this.touchLen[owner] === -1) {
+      this.repaintBox(owner);
+      return;
+    }
+    const n = this.touchLen[owner]!;
+    const base = owner * TOUCH_N;
+    for (let k = 0; k < n; k++) {
+      const idx = this.touchAt[base + k]!;
+      const tx = idx % this.texW;
+      const ty = (idx / this.texW) | 0;
+      const sim = this.simOf(tx, ty);
+      const cx = Math.floor(sim.x);
+      const cy = Math.floor(sim.y);
+      const cell = this.shownOwner(cx, cy);
+      if (cell !== owner && cell !== 0) continue;
+      const rgb = this.rgb(cell === owner ? owner : 0, cx, cy);
+      const p = idx * 4;
+      this.data[p] = rgb.r;
+      this.data[p + 1] = rgb.g;
+      this.data[p + 2] = rgb.b;
+      this.data[p + 3] = cell === owner ? Math.round(255 * rgb.fade) : 0;
+      this.markSpan(ty, tx, tx);
+    }
+  }
+
+  private saveTouches(owner: number): void {
+    if (this.touchN > TOUCH_N) {
+      this.touchLen[owner] = -1;
+      return;
+    }
+    const base = owner * TOUCH_N;
+    for (let k = 0; k < this.touchN; k++) this.touchAt[base + k] = this.touch[k]!;
+    this.touchLen[owner] = this.touchN;
+  }
+
+  /** Overflow path: the saved band was truncated, so repaint the owner's box solid. */
+  private repaintBox(owner: number): void {
+    if (!this.bbOn[owner]) return;
+    const pad = 2;
+    const x0 = Math.max(0, this.bbMinX[owner]! - pad);
+    const y0 = Math.max(0, this.bbMinY[owner]! - pad);
+    const x1 = Math.min(this.gridW - 1, this.bbMaxX[owner]! + pad);
+    const y1 = Math.min(this.gridH - 1, this.bbMaxY[owner]! + pad);
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cx = x0; cx <= x1; cx++) {
+        const cell = this.shownOwner(cx, cy);
+        if (cell === owner || cell === 0) this.paintCell(cx, cy, true);
+      }
+    }
   }
 
   /** Walk every boundary loop, smooth it, and splat a coverage ramp. */
@@ -457,7 +560,8 @@ export class Territory {
       if (useLoop) count = this.snapLoop(owner, count);
       if (count < 4) continue;
       count = this.decimate(count, 1600);
-      count = this.smooth(count, useLoop ? 2 : 3);
+      // Squares stay on the cell grid. A captured trail is corner-cut twice so the claim reads as a curve.
+      count = this.smooth(count, useLoop ? 2 : 0);
       this.splat(count);
     }
     this.commitRamp(owner);
@@ -472,8 +576,12 @@ export class Territory {
     const w = this.gridW;
     const h = this.gridH;
     const stride = h + 1;
-    for (let cy = 0; cy < h; cy++) {
-      for (let cx = 0; cx < w; cx++) {
+    const x0 = this.bbOn[owner] ? Math.max(0, this.bbMinX[owner]! - 1) : 0;
+    const y0 = this.bbOn[owner] ? Math.max(0, this.bbMinY[owner]! - 1) : 0;
+    const x1 = this.bbOn[owner] ? Math.min(w - 1, this.bbMaxX[owner]! + 1) : w - 1;
+    const y1 = this.bbOn[owner] ? Math.min(h - 1, this.bbMaxY[owner]! + 1) : h - 1;
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cx = x0; cx <= x1; cx++) {
         if (this.shownOwner(cx, cy) !== owner) continue;
         if (this.shownOwner(cx, cy - 1) !== owner) this.addEdge(cx, cy, cx + 1, cy, stride);
         if (this.shownOwner(cx + 1, cy) !== owner) this.addEdge(cx + 1, cy, cx + 1, cy + 1, stride);
@@ -696,12 +804,49 @@ export class Territory {
       if (signed < 0 && cell !== owner && cell !== 0 && cell !== -1) continue;
       const rgb = this.rgb(owner, cx, cy);
       const fade = cell === owner ? rgb.fade : coverage > 0 ? 1 : 0;
+      // Opaque darker band just inside the contour (~3px). The coverage ramp
+      // outside it is what the shader anti-aliases, so this color stays visible.
+      let shade = 1;
+      let alpha = Math.round(coverage * fade * 255);
+      if (signed > 0.08 && signed < 0.55) {
+        const t = 1 - Math.abs(signed - 0.2) / 0.36;
+        shade = 1 - 0.4 * Math.max(0, Math.min(1, t));
+        alpha = Math.round(255 * fade);
+      }
       const p = idx * 4;
-      this.data[p] = rgb.r;
-      this.data[p + 1] = rgb.g;
-      this.data[p + 2] = rgb.b;
-      this.data[p + 3] = Math.round(coverage * fade * 255);
-      this.markRow(ty);
+      this.data[p] = Math.round(rgb.r * shade);
+      this.data[p + 1] = Math.round(rgb.g * shade);
+      this.data[p + 2] = Math.round(rgb.b * shade);
+      this.data[p + 3] = alpha;
+      this.markSpan(ty, tx, tx);
+    }
+    this.bakeShadow();
+  }
+
+  /**
+   * One-texel stamp just outside the fill, toward +x / -z. It clears the coverage
+   * ramp (FEATHER is under one cell) so a single texture sample can tell shadow
+   * from the bright anti-aliased edge.
+   */
+  private bakeShadow(): void {
+    const n = this.touchN;
+    const ox = 4;
+    const oy = 2;
+    for (let k = 0; k < n; k++) {
+      const idx = this.touch[k]!;
+      if (this.data[idx * 4 + 3]! < 200) continue;
+      const tx = (idx % this.texW) + ox;
+      const ty = ((idx / this.texW) | 0) + oy;
+      if (tx < 0 || ty < 0 || tx >= this.texW || ty >= this.texH) continue;
+      const sidx = ty * this.texW + tx;
+      if (this.data[sidx * 4 + 3]! > 24) continue;
+      const p = sidx * 4;
+      this.data[p] = 28;
+      this.data[p + 1] = 52;
+      this.data[p + 2] = 44;
+      this.data[p + 3] = 110;
+      this.markSpan(ty, tx, tx);
+      if (this.touchN < this.touch.length) this.touch[this.touchN++] = sidx;
     }
   }
 

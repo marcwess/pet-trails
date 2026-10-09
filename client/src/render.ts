@@ -12,6 +12,8 @@ import {
   HemisphereLight,
   InstancedBufferAttribute,
   InstancedMesh,
+  LineBasicMaterial,
+  LineSegments,
   Matrix4,
   Mesh,
   MeshBasicMaterial,
@@ -25,6 +27,7 @@ import {
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
+  Vector2,
   Vector3,
   WebGLRenderer,
   type BufferGeometry,
@@ -381,6 +384,9 @@ export class Renderer {
   private readonly ring: Mesh;
   private readonly platform: Mesh;
   private readonly ground: Mesh;
+  private readonly gridLines: LineSegments;
+  private readonly landMeshes: Mesh[] = [];
+  private readonly landMat: ShaderMaterial;
   private readonly mat = new Matrix4();
   private readonly pos = new Vector3();
   private readonly quat = new Quaternion();
@@ -425,7 +431,7 @@ export class Renderer {
     this.renderer.setPixelRatio(dpr);
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
-    this.renderer.setClearColor(0x8fd4ff, 1);
+    this.renderer.setClearColor(0x8cd6b6, 1);
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     document.body.prepend(this.renderer.domElement);
@@ -443,38 +449,22 @@ export class Renderer {
     const groundGeo = new PlaneGeometry(gw, gh);
     groundGeo.rotateX(-Math.PI / 2);
     groundGeo.translate(gw / 2, 0, gh / 2);
-    const groundMat = new ShaderMaterial({
-      uniforms: { mapTex: { value: territory.texture } },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D mapTex;
-        varying vec2 vUv;
-        void main() {
-          vec4 t = texture2D(mapTex, vUv);
-          float m = smoothstep(0.22, 0.58, t.a);
-          float rim = smoothstep(0.72, 0.40, t.a);
-          vec3 fill = t.rgb * mix(1.0, 0.62, rim);
-          float gx = floor(vUv.x * 72.0);
-          float gy = floor(vUv.y * 72.0);
-          float check = mod(gx + gy, 2.0);
-          vec3 ground = mix(vec3(0.50, 0.80, 0.68), vec3(0.60, 0.88, 0.75), check);
-          float shadow = smoothstep(0.02, 0.22, t.a) * (1.0 - smoothstep(0.42, 0.62, t.a));
-          ground *= mix(1.0, 0.72, shadow);
-          gl_FragColor = vec4(mix(ground, fill, m), 1.0);
-          #include <colorspace_fragment>
-        }
-      `,
-    });
-    groundMat.toneMapped = false;
-    this.ground = new Mesh(groundGeo, groundMat);
+    this.ground = new Mesh(groundGeo, new MeshBasicMaterial({ color: 0x8cd6b6 }));
     this.ground.frustumCulled = false;
     this.scene.add(this.ground);
+    this.gridLines = this.makeGrid(gw, gh);
+    this.scene.add(this.gridLines);
+    this.landMat = this.makeLandMaterial(gw, gh);
+    const patchGeo = new PlaneGeometry(1, 1);
+    patchGeo.rotateX(-Math.PI / 2);
+    for (let i = 0; i < 24; i++) {
+      const patch = new Mesh(patchGeo, this.landMat);
+      patch.frustumCulled = false;
+      patch.visible = false;
+      patch.renderOrder = 1;
+      this.landMeshes.push(patch);
+      this.scene.add(patch);
+    }
     this.addFence(gw, gh);
 
     const platformGeo = new CircleGeometry(7.2, 40);
@@ -598,16 +588,110 @@ export class Renderer {
     if (withShake) this.shake = Math.min(1.2, this.shake + 0.85);
   }
 
+  private makeGrid(gw: number, gh: number): LineSegments {
+    const n = 72;
+    const positions = new Float32Array((n + 1) * 4 * 3);
+    let o = 0;
+    for (let i = 0; i <= n; i++) {
+      const x = (i / n) * gw;
+      const z = (i / n) * gh;
+      positions[o++] = x;
+      positions[o++] = 0.015;
+      positions[o++] = 0;
+      positions[o++] = x;
+      positions[o++] = 0.015;
+      positions[o++] = gh;
+      positions[o++] = 0;
+      positions[o++] = 0.015;
+      positions[o++] = z;
+      positions[o++] = gw;
+      positions[o++] = 0.015;
+      positions[o++] = z;
+    }
+    const geo = new BufGeo();
+    geo.setAttribute('position', new BufferAttribute(positions, 3));
+    const lines = new LineSegments(geo, new LineBasicMaterial({ color: 0x63b894 }));
+    lines.frustumCulled = false;
+    return lines;
+  }
+
+  private makeLandMaterial(gw: number, gh: number): ShaderMaterial {
+    const mat = new ShaderMaterial({
+      uniforms: {
+        mapTex: { value: this.territory.texture },
+        uMap: { value: new Vector2(gw, gh) },
+      },
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+      vertexShader: `
+        varying vec3 vWorld;
+        void main() {
+          vec4 wpos = modelMatrix * vec4(position, 1.0);
+          vWorld = wpos.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wpos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D mapTex;
+        uniform vec2 uMap;
+        varying vec3 vWorld;
+        void main() {
+          vec2 uv = vec2(vWorld.x / uMap.x, 1.0 - vWorld.z / uMap.y);
+          if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
+          vec4 t = texture2D(mapTex, uv);
+          float a = t.a;
+          float w = max(fwidth(a), 0.002);
+          float distPx = (a - 0.5) / w;
+          float m = smoothstep(-0.65, 0.85, distPx);
+          float rim = smoothstep(0.35, 1.15, distPx) * (1.0 - smoothstep(2.0, 3.1, distPx));
+          vec3 fill = t.rgb * mix(1.0, 0.62, rim);
+          float luma = dot(t.rgb, vec3(0.30, 0.50, 0.20));
+          float dark = 1.0 - smoothstep(0.22, 0.42, luma);
+          float sh = smoothstep(0.14, 0.26, a) * (1.0 - smoothstep(0.42, 0.52, a)) * dark * (1.0 - m);
+          float outA = max(m, sh * 0.72);
+          if (outA < 0.04) discard;
+          vec3 rgb = mix(vec3(0.09, 0.14, 0.12), fill, clamp(m / outA, 0.0, 1.0));
+          gl_FragColor = vec4(rgb, outA);
+          #include <premultiplied_alpha_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+    });
+    return mat;
+  }
+
+  private syncLand(): void {
+    let n = 0;
+    this.territory.visitBoxes((x0, y0, x1, y1) => {
+      const mesh = this.landMeshes[n++];
+      if (!mesh) return;
+      const pad = 2.2;
+      const wx0 = (x0 - pad) * WORLD;
+      const wx1 = (x1 + 1 + pad) * WORLD;
+      const wz0 = (y0 - pad) * WORLD;
+      const wz1 = (y1 + 1 + pad) * WORLD;
+      mesh.scale.set(Math.max(0.2, wx1 - wx0), Math.max(0.2, wz1 - wz0), 1);
+      mesh.position.set((wx0 + wx1) / 2, 0.03, (wz0 + wz1) / 2);
+      mesh.visible = true;
+    });
+    for (let i = n; i < this.landMeshes.length; i++) this.landMeshes[i]!.visible = false;
+  }
+
   private addFence(gw: number, gh: number): void {
-    const apron = new Mesh(
-      new PlaneGeometry(gw + 90, gh + 90),
-      new MeshBasicMaterial({ color: 0x3e94c8 }),
-    );
-    apron.rotation.x = -Math.PI / 2;
-    apron.position.set(gw / 2, -0.05, gh / 2);
-    apron.frustumCulled = false;
-    this.scene.add(apron);
-    this.fenceMeshes.push(apron);
+    const water = new MeshBasicMaterial({ color: 0x3e94c8 });
+    const skirt = (x: number, z: number, w: number, d: number) => {
+      const mesh = new Mesh(new PlaneGeometry(w, d), water);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(x, -0.05, z);
+      this.scene.add(mesh);
+      this.fenceMeshes.push(mesh);
+    };
+    const pad = 48;
+    skirt(-pad / 2, gh / 2, pad, gh + pad * 2);
+    skirt(gw + pad / 2, gh / 2, pad, gh + pad * 2);
+    skirt(gw / 2, -pad / 2, gw, pad);
+    skirt(gw / 2, gh + pad / 2, gw, pad);
 
     const mat = new MeshLambertMaterial({ color: 0xfff6ea });
     const post = new BoxGeometry(0.34, 1.55, 0.34);
@@ -700,6 +784,7 @@ export class Renderer {
   ): void {
     this.time += dt;
     this.territory.update(dt);
+    this.syncLand();
     this.perf.beginFrame();
     this.territory.upload(this.renderer);
 
@@ -716,6 +801,8 @@ export class Renderer {
 
     if (phase === 'title') {
       this.ground.visible = false;
+      this.gridLines.visible = false;
+      for (const patch of this.landMeshes) patch.visible = false;
       this.platform.visible = true;
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbons) ribbon.clear();
@@ -743,7 +830,8 @@ export class Renderer {
       this.shadows.count = 0;
       this.selfScreen = false;
     } else {
-      this.ground.visible = true;
+      this.ground.visible = false;
+      this.gridLines.visible = true;
       this.platform.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;

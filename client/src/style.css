@@ -287,9 +287,7 @@ canvas {
 #dim {
   position: absolute;
   inset: 0;
-  background: rgba(18, 28, 44, 0.42);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  background: rgba(18, 28, 44, 0.45);
 }
 
 #death.sheet {
