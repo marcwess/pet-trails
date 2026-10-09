@@ -129,9 +129,12 @@ export function updateBot(p: Player, view: BotView): void {
       return;
     }
     const huntBias = p.botStyle === 1 ? 0.72 : 0.34;
+    const committed = p.botPhase === 1 && p.botTurns < 2;
     if (view.rng() < huntBias) {
       const target = nearestTrail(p, view);
-      if (target && (p.land + 12 >= target.land * 0.65 || target.dist < 14)) {
+      const close = !!target && target.dist < (committed ? 11 : 18);
+      const worth = !!target && !committed && p.land > target.land * 1.4 && target.dist < 28;
+      if (target && (close || worth)) {
         p.botPhase = 4;
         p.desiredX = target.x - p.x;
         p.desiredY = target.y - p.y;
@@ -156,7 +159,15 @@ export function updateBot(p: Player, view: BotView): void {
     p.botTurns = 0;
     p.botMoved = 0;
     p.botLeg = legLength(p, view);
-    p.botTurnSign = view.rng() < 0.5 ? -1 : 1;
+    const rx = p.x - cfg.gridW / 2;
+    const ry = p.y - cfg.gridH / 2;
+    if (rx * rx + ry * ry < 45 * 45) {
+      const ang = Math.atan2(p.desiredY, p.desiredX);
+      const out = -Math.sin(ang) * rx + Math.cos(ang) * ry;
+      p.botTurnSign = out >= 0 ? 1 : -1;
+    } else {
+      p.botTurnSign = view.rng() < 0.5 ? -1 : 1;
+    }
     return;
   }
 

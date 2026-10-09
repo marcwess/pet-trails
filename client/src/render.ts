@@ -612,7 +612,7 @@ export class Renderer {
           const species = pet.train[shown - 1 - t] ?? 0;
           const follower = this.pets[species];
           if (!follower || follower.count >= PET_CAP || !path) continue;
-          if (!path.sample(6.4 * (t + 1), this.sample)) continue;
+          if (!path.sample(8.2 * (t + 1), this.sample)) continue;
           const newest = t === 0;
           const hop = newest ? pet.hop : 0;
           const hopT = hop > 0 ? 1 - hop / 0.42 : 1;

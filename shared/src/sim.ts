@@ -262,11 +262,16 @@ export class Sim {
     this.grid.fillRect(p.id, spot.x, spot.y, size, size);
     p.x = spot.x + size / 2;
     p.y = spot.y + size / 2;
+    const { gridW: w, gridH: h } = this.cfg;
     let ang = this.rng() * Math.PI * 2;
+    if (p.bot) {
+      const rx = p.x - w / 2;
+      const ry = p.y - h / 2;
+      if (rx * rx + ry * ry > 16) ang = Math.atan2(rx, -ry) + (this.rng() - 0.5) * 0.5;
+    }
     const reach = 36;
     const nx = p.x + Math.cos(ang) * reach;
     const ny = p.y + Math.sin(ang) * reach;
-    const { gridW: w, gridH: h } = this.cfg;
     if (nx < 22 || ny < 22 || nx > w - 22 || ny > h - 22) {
       ang = Math.atan2(h / 2 - p.y, w / 2 - p.x) + (this.rng() - 0.5) * 0.9;
     }
