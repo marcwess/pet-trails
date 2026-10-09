@@ -303,7 +303,7 @@ canvas {
 .stats li { font-size: 16px; }
 
 @media (orientation: landscape) and (max-height: 500px) {
-  #death.sheet {
+  #death.sheet:not([hidden]) {
     top: 8px;
     bottom: 8px;
     transform: translateX(-50%);

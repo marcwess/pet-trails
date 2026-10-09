@@ -9,9 +9,9 @@ const MAX_P = 16384;
 /** How far, in cells, the smoothed contour is allowed to repaint. Wide enough to cut a 1-cell stair. */
 const BAND = 1.6;
 /** Texels this far outside the contour stay opaque so bilinear corners do not notch. */
-const SKIRT = 0.16;
-/** Darker band on the outer edge. One texel is 0.25 cells, so this hits that row. */
-const RIM = 0.26;
+const SKIRT = 0.13;
+/** Darker band on the outer edge. Half a texel is 0.125, so this is one texel row. */
+const RIM = 0.15;
 /** Previous ramp texels kept per owner so the next claim can erase them without scanning the map. */
 const TOUCH_N = 32768;
 
@@ -876,7 +876,7 @@ export class Territory {
         continue;
       }
       const rgb = this.rgb(owner, cx, cy);
-      const shade = signed < RIM ? 0.7 : 1;
+      const shade = signed < RIM ? 0.62 : 1;
       this.data[p] = Math.round(rgb.r * shade);
       this.data[p + 1] = Math.round(rgb.g * shade);
       this.data[p + 2] = Math.round(rgb.b * shade);

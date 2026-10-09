@@ -522,7 +522,7 @@ export class Renderer {
         color: 0x1a3a28,
         alphaTest: 0.42,
         transparent: true,
-        opacity: 0.32,
+        opacity: 0.22,
         depthWrite: false,
         toneMapped: false,
       }),
@@ -1211,7 +1211,7 @@ export class Renderer {
       const shx = this.camX - this.lookX;
       const shz = this.camZ - this.lookZ;
       const shl = Math.hypot(shx, shz) || 1;
-      const off = 0.1;
+      const off = 0.07;
       this.landShadow.position.set((shx / shl) * off, -0.02, (shz / shl) * off);
 
       this.layoutPickups(this.coins, pickups, pickupCount, 0);
