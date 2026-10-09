@@ -39,6 +39,11 @@ export class Sim {
   private readonly freeNames: string[] = [];
   private readonly aliveBuf: Player[] = [];
   private botView: BotView;
+  /** Scratch for claim-edge trim. Not used on the per-tick path. */
+  private readonly fringe: Int32Array;
+  private fringeN = 0;
+  private readonly fringeMark: Uint8Array;
+  private fringeStamp = 1;
 
   constructor(over: Partial<GameConfig> = {}, seed = 1) {
     this.cfg = makeConfig(over);
@@ -65,6 +70,9 @@ export class Sim {
       rng: this.rng,
       dt: this.tickDt,
     };
+    const cells = this.cfg.gridW * this.cfg.gridH;
+    this.fringe = new Int32Array(cells);
+    this.fringeMark = new Uint8Array(cells);
   }
 
   addHuman(name: string, pet: number): Player | null {
@@ -461,7 +469,11 @@ export class Sim {
         }
       }
     }
-    const n = this.grid.applyClaim(p.id);
+    this.collectFringe(p);
+    const before = this.grid.landCount[p.id] ?? 0;
+    this.grid.applyClaim(p.id);
+    this.trimFringe(p);
+    const n = (this.grid.landCount[p.id] ?? 0) - before;
     p.trailLen = 0;
     p.outside = false;
     p.land = this.grid.landCount[p.id] ?? 0;
@@ -474,6 +486,122 @@ export class Sim {
     for (const v of victims) {
       if (v.p.alive) this.kill(v.p, p, v.reason);
     }
+  }
+
+  /**
+   * Cells the flood is about to claim that sit next to the trail. Trimmed
+   * after applyClaim when their centers fall outside the trail polyline.
+   */
+  private collectFringe(p: Player): void {
+    this.fringeStamp = this.fringeStamp >= 255 ? 1 : this.fringeStamp + 1;
+    if (this.fringeStamp === 1) this.fringeMark.fill(0);
+    const stamp = this.fringeStamp;
+    const w = this.grid.w;
+    const h = this.grid.h;
+    this.fringeN = 0;
+    for (let t = 0; t < p.trailLen; t++) {
+      const i = p.trail[t]!;
+      const cx = i % w;
+      const cy = (i / w) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const x = cx + dx;
+          const y = cy + dy;
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
+          const j = y * w + x;
+          if (this.fringeMark[j] === stamp) continue;
+          if (this.grid.owner[j] === p.id) continue;
+          if (this.grid.visited[j] !== 0) continue;
+          this.fringeMark[j] = stamp;
+          this.fringe[this.fringeN++] = j;
+        }
+      }
+    }
+  }
+
+  /** Drop newly claimed cells whose centers lie outside the trail centerline. */
+  private trimFringe(p: Player): void {
+    const n = p.trailLen;
+    if (n < 2 || this.fringeN === 0) return;
+    const w = this.grid.w;
+    const xs = new Float64Array(n);
+    const ys = new Float64Array(n);
+    for (let t = 0; t < n; t++) {
+      const i = p.trail[t]!;
+      xs[t] = (i % w) + 0.5;
+      ys[t] = ((i / w) | 0) + 0.5;
+    }
+    const leftOutside = this.leftIsOutside(xs, ys, n);
+    for (let k = 0; k < this.fringeN; k++) {
+      const j = this.fringe[k]!;
+      if (this.grid.owner[j] !== p.id) continue;
+      const px = (j % w) + 0.5;
+      const py = ((j / w) | 0) + 0.5;
+      const hit = this.distToTrail(px, py, xs, ys, n);
+      const outside = hit.left === leftOutside;
+      if (hit.dist > 0.5 && outside) this.grid.setOwner(j, 0);
+    }
+  }
+
+  private leftIsOutside(xs: Float64Array, ys: Float64Array, n: number): boolean {
+    let left = 0;
+    let right = 0;
+    const step = Math.max(1, (n / 16) | 0);
+    for (let s = 0; s < n - 1; s += step) {
+      const ax = xs[s]!;
+      const ay = ys[s]!;
+      const bx = xs[s + 1]!;
+      const by = ys[s + 1]!;
+      const vx = bx - ax;
+      const vy = by - ay;
+      const len = Math.hypot(vx, vy);
+      if (len < 0.2) continue;
+      const nx = -vy / len;
+      const ny = vx / len;
+      const mx = (ax + bx) * 0.5;
+      const my = (ay + by) * 0.5;
+      if (this.cellOutside(mx + nx * 0.75, my + ny * 0.75)) left++;
+      if (this.cellOutside(mx - nx * 0.75, my - ny * 0.75)) right++;
+    }
+    return left >= right;
+  }
+
+  private cellOutside(x: number, y: number): boolean {
+    const cx = Math.floor(x);
+    const cy = Math.floor(y);
+    if (cx < 0 || cy < 0 || cx >= this.grid.w || cy >= this.grid.h) return true;
+    return this.grid.visited[this.grid.idx(cx, cy)] === 1;
+  }
+
+  private distToTrail(
+    px: number,
+    py: number,
+    xs: Float64Array,
+    ys: Float64Array,
+    n: number,
+  ): { dist: number; left: boolean } {
+    let best = 1e9;
+    let left = false;
+    for (let s = 0; s < n - 1; s++) {
+      const ax = xs[s]!;
+      const ay = ys[s]!;
+      const bx = xs[s + 1]!;
+      const by = ys[s + 1]!;
+      const vx = bx - ax;
+      const vy = by - ay;
+      const len2 = vx * vx + vy * vy;
+      let t = 0;
+      if (len2 > 1e-8) t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+      const cx = ax + vx * t;
+      const cy = ay + vy * t;
+      const dist = Math.hypot(px - cx, py - cy);
+      if (dist < best) {
+        best = dist;
+        const cross = vx * (py - ay) - vy * (px - ax);
+        left = cross >= 0;
+      }
+    }
+    return { dist: best, left };
   }
 
   private kill(victim: Player, killer: Player | null, reason: DeathReason): void {

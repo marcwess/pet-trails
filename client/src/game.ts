@@ -535,6 +535,7 @@ export class Game {
         const loop = this.renderer.exportTrail(ev.id);
         if (loop.n >= 2) this.territory.offerLoop(ev.id, loop.x, loop.y, loop.n);
         this.renderer.clearPath(ev.id);
+        this.renderer.dropCoveredTrails(ev.id);
         if (ev.id === this.selfId && ev.n > 12) {
           const pct = (ev.n / (CONFIG.gridW * CONFIG.gridH)) * 100;
           const at = this.renderer.project(ev.x, 1.6, ev.y);
@@ -558,13 +559,14 @@ export class Game {
     this.phase = 'dead';
     this.api.phase = 'dead';
     const me = this.ents[this.selfId];
+    const pctNum = Math.max(ev.pct, this.shownPct, this.peakPct);
+    this.shownPct = pctNum;
+    if (pctNum > this.peakPct) this.peakPct = pctNum;
     if (me) me.alive = false;
     this.updateBoard();
     const levels = applyXp(this.profile.pet, Math.round(ev.xp), CONFIG.levelCap);
     this.profile.coins += ev.coins;
     saveProfile(this.profile);
-    const pctNum = Math.max(ev.pct, this.shownPct, this.peakPct);
-    this.shownPct = pctNum;
     this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills);
     const rows: DeathView['rows'] = [
       { k: 'Territory', v: `${pctNum.toFixed(1)}%` },
@@ -576,7 +578,7 @@ export class Game {
       { k: 'Time', v: formatTime(ev.time) },
     ];
     if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.profile.pet.level}`, up: true });
-    this.hud.showHud(false);
+    this.hud.hideSteer();
     this.hud.showDeath({ title: deathTitle(ev.reason), rows });
     buzz(20);
   }
@@ -636,7 +638,8 @@ export class Game {
       topIds.push(id);
     }
     const me = this.ents[this.selfId];
-    if (me && me.used && me.alive && !listed.has(this.selfId) && topIds.length < 6) {
+    const pinSelf = !!me && me.used && (me.alive || this.phase === 'dead');
+    if (pinSelf && !listed.has(this.selfId) && topIds.length < 6) {
       listed.add(this.selfId);
       topIds.push(this.selfId);
     }

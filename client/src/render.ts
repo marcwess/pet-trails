@@ -385,6 +385,7 @@ export class Renderer {
   private readonly ground: Mesh;
   private readonly gridLines: LineSegments;
   private readonly land: Mesh;
+  private readonly landShadow: Mesh;
   private readonly landPos: BufferAttribute;
   private readonly landUv: BufferAttribute;
   private landSig = 1;
@@ -514,6 +515,22 @@ export class Renderer {
     this.land.frustumCulled = false;
     this.land.renderOrder = 1;
     this.scene.add(this.land);
+    this.landShadow = new Mesh(
+      landGeo,
+      new MeshBasicMaterial({
+        map: territory.texture,
+        color: 0x1a3a28,
+        alphaTest: 0.42,
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    this.landShadow.frustumCulled = false;
+    this.landShadow.renderOrder = 0;
+    this.landShadow.visible = false;
+    this.scene.add(this.landShadow);
     this.addFence(gw, gh);
 
     const platformGeo = new CircleGeometry(7.2, 40);
@@ -888,6 +905,46 @@ export class Renderer {
     this.ribbons[id]?.clear();
   }
 
+  /** Drop every ribbon that now sits on `ownerId`'s land, including the claimer. */
+  dropCoveredTrails(ownerId: number): void {
+    const owner = this.territory.owner;
+    const w = this.territory.gridW;
+    const h = this.territory.gridH;
+    for (let id = 1; id < this.trails.length; id++) {
+      const trail = this.trails[id];
+      if (!trail || trail.n < 1) {
+        if (id === ownerId) this.ribbons[id]?.clear();
+        continue;
+      }
+      let hit = id === ownerId;
+      const samples = Math.min(trail.n, 32);
+      for (let k = 0; k < samples && !hit; k++) {
+        const i = (trail.head - 1 - k + PATH_N * 8) % PATH_N;
+        const cx = trail.xs[i]! | 0;
+        const cy = trail.zs[i]! | 0;
+        if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+        if (owner[cy * w + cx] === ownerId) hit = true;
+      }
+      if (!hit) continue;
+      trail.clear();
+      this.paths[id]?.clear();
+      this.ribbons[id]?.clear();
+    }
+  }
+
+  /** The live head is already on this pet's land, so the ribbon is a leftover. */
+  private headOnOwnLand(id: number, path: PathBuf): boolean {
+    if (path.n < 1) return false;
+    const owner = this.territory.owner;
+    const w = this.territory.gridW;
+    const h = this.territory.gridH;
+    const i = (path.head - 1 + PATH_N * 8) % PATH_N;
+    const cx = path.xs[i]! | 0;
+    const cy = path.zs[i]! | 0;
+    if (cx < 0 || cy < 0 || cx >= w || cy >= h) return false;
+    return owner[cy * w + cx] === id;
+  }
+
   /** True when a stored trail sample now sits on someone else's land. */
   private trailStolen(id: number, path: PathBuf): boolean {
     const owner = this.territory.owner;
@@ -957,6 +1014,7 @@ export class Renderer {
       this.ground.visible = false;
       this.gridLines.visible = false;
       this.land.visible = false;
+      this.landShadow.visible = false;
       this.claimRing.visible = false;
       this.flashRing.visible = false;
       this.platform.visible = true;
@@ -988,6 +1046,7 @@ export class Renderer {
     } else {
       this.ground.visible = false;
       this.land.visible = true;
+      this.landShadow.visible = true;
       this.gridLines.visible = true;
       this.platform.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
@@ -1027,13 +1086,11 @@ export class Renderer {
         const path = this.paths[pet.id];
         path?.push(pet.x, pet.z, pet.h);
         const trail = this.trails[pet.id];
-        if (pet.outside && trail && this.trailStolen(pet.id, trail)) {
-          trail.clear();
-          ribbon?.clear();
-        }
-        if (pet.outside) {
-          trail?.push(pet.x, pet.z, pet.h, 0.12);
-          if (ribbon && trail && trail.n >= 1 && !this.trailStolen(pet.id, trail)) {
+        const covered =
+          !!trail && (this.trailStolen(pet.id, trail) || this.headOnOwnLand(pet.id, trail));
+        if (pet.outside && trail && !covered) {
+          trail.push(pet.x, pet.z, pet.h, 0.12);
+          if (ribbon && trail.n >= 1) {
             const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
             ribbon.setColor(
               (col[0] + (255 - col[0]) * 0.38) / 255,
@@ -1116,9 +1173,11 @@ export class Renderer {
       this.punch *= Math.exp(-dt * 4);
       this.shake *= Math.exp(-dt * 6);
       const zoom = 1 + Math.min(0.22, this.landPct * 2.2);
-      const aspect = Math.max(0.42, this.camera.aspect);
       const span = 14 * zoom;
-      const dist = span / (2 * Math.tan((20 * Math.PI) / 180) * aspect);
+      // Frame the short side. Portrait keeps the old width; landscape and
+      // desktop show that same span on the short side and more on the long side.
+      const short = Math.min(this.camera.aspect, 1);
+      const dist = span / (2 * Math.tan((20 * Math.PI) / 180) * short);
       const elev = (70 * Math.PI) / 180;
       const back = Math.cos(elev) * dist;
       const height = Math.sin(elev) * dist - this.punch * 1.3;
@@ -1149,6 +1208,11 @@ export class Renderer {
       const jz = (Math.random() - 0.5) * this.shake * 0.35;
       this.camera.position.set(this.camX + jx, this.camY, this.camZ + jz);
       this.camera.lookAt(this.lookX, 0.35, this.lookZ);
+      const shx = this.camX - this.lookX;
+      const shz = this.camZ - this.lookZ;
+      const shl = Math.hypot(shx, shz) || 1;
+      const off = 0.1;
+      this.landShadow.position.set((shx / shl) * off, -0.02, (shz / shl) * off);
 
       this.layoutPickups(this.coins, pickups, pickupCount, 0);
       this.layoutPickups(this.orbs, pickups, pickupCount, 1);

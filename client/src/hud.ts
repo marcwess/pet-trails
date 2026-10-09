@@ -34,6 +34,9 @@ export class Hud {
   private readonly dim = must('dim');
   private readonly deathTitleEl = must('death-title');
   private readonly deathStats = must('death-stats');
+  private readonly deathRows: HTMLLIElement[] = [];
+  private readonly deathKeys: HTMLSpanElement[] = [];
+  private readonly deathVals: HTMLSpanElement[] = [];
   private readonly petline = must('petline');
   private readonly playBtn = must('play') as HTMLButtonElement;
   private readonly againBtn = must('again') as HTMLButtonElement;
@@ -67,6 +70,17 @@ export class Hud {
       el.className = 'toast';
       toasts.appendChild(el);
       this.toasts.push(el);
+    }
+    for (let i = 0; i < 8; i++) {
+      const li = document.createElement('li');
+      const k = document.createElement('span');
+      const v = document.createElement('span');
+      li.append(k, v);
+      li.hidden = true;
+      this.deathStats.appendChild(li);
+      this.deathRows.push(li);
+      this.deathKeys.push(k);
+      this.deathVals.push(v);
     }
     const labels = must('labels');
     for (let i = 0; i < 16; i++) {
@@ -125,16 +139,17 @@ export class Hud {
     this.death.hidden = false;
     this.dim.hidden = false;
     this.deathTitleEl.textContent = view.title;
-    this.deathStats.replaceChildren();
-    for (const row of view.rows) {
-      const li = document.createElement('li');
-      if (row.up) li.className = 'up';
-      const k = document.createElement('span');
-      k.textContent = row.k;
-      const v = document.createElement('span');
-      v.textContent = row.v;
-      li.append(k, v);
-      this.deathStats.appendChild(li);
+    for (let i = 0; i < this.deathRows.length; i++) {
+      const row = view.rows[i];
+      const li = this.deathRows[i]!;
+      if (!row) {
+        li.hidden = true;
+        continue;
+      }
+      li.hidden = false;
+      li.className = row.up ? 'up' : '';
+      this.deathKeys[i]!.textContent = row.k;
+      this.deathVals[i]!.textContent = row.v;
     }
   }
 

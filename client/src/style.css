@@ -302,6 +302,42 @@ canvas {
 #death.sheet h2 { font-size: 26px; }
 .stats li { font-size: 16px; }
 
+@media (orientation: landscape) and (max-height: 500px) {
+  #death.sheet {
+    top: 8px;
+    bottom: 8px;
+    transform: translateX(-50%);
+    width: min(640px, calc(100% - 24px));
+    max-height: calc(100% - 16px);
+    padding: 8px 14px 10px;
+    border-radius: 18px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "kicker button"
+      "title button"
+      "stats button";
+    column-gap: 18px;
+    row-gap: 0;
+    align-items: center;
+    text-align: left;
+    overflow: hidden;
+  }
+
+  #death-kicker { grid-area: kicker; margin: 0; font-size: 12px; }
+  #death.sheet h2 { grid-area: title; font-size: 20px; margin: 0 0 2px; line-height: 1.05; }
+  #death-stats { grid-area: stats; margin: 0; }
+  #death.sheet .stats li { padding: 1px 2px; font-size: 14px; }
+  #again {
+    grid-area: button;
+    width: 168px;
+    min-height: 48px;
+    font-size: 18px;
+    padding: 8px 12px;
+    align-self: center;
+  }
+}
+
 #perf {
   position: absolute;
   right: 8px;
