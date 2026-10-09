@@ -186,9 +186,7 @@ export class Sim {
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
       p.aliveMs += dt * 1000;
-      integrateBody(p, dt, this.cfg, (cx, cy) => this.enterCell(p, cx, cy), () => {
-        if (p.alive) this.kill(p, null, 'border');
-      });
+      integrateBody(p, dt, this.cfg, (cx, cy) => this.enterCell(p, cx, cy));
     }
 
     this.resolveHeadOns();
@@ -420,12 +418,9 @@ export class Sim {
     if (cx < 0 || cy < 0 || cx >= this.grid.w || cy >= this.grid.h) return false;
     const i = this.grid.idx(cx, cy);
     const tr = this.grid.trail[i]!;
-    const own = this.grid.owner[i]!;
 
-    if (tr === p.id && own !== p.id) {
-      this.kill(p, null, 'self');
-      return false;
-    }
+    // Crossing your own trail is harmless. The line keeps going, and the
+    // return home claims every lobe it sealed, figure-eights included.
     if (tr !== 0 && tr !== p.id) {
       const victim = this.players[tr];
       if (victim && victim.alive) this.kill(victim, p, 'trail');
@@ -470,9 +465,10 @@ export class Sim {
       }
     }
     this.collectFringe(p);
+    const branched = this.trailBranches(p);
     const before = this.grid.landCount[p.id] ?? 0;
     this.grid.applyClaim(p.id);
-    this.trimFringe(p);
+    if (!branched) this.trimFringe(p);
     const n = (this.grid.landCount[p.id] ?? 0) - before;
     p.trailLen = 0;
     p.outside = false;
@@ -519,7 +515,11 @@ export class Sim {
     }
   }
 
-  /** Drop newly claimed cells whose centers lie outside the trail centerline. */
+  /**
+   * Drop newly claimed cells whose centers lie outside the trail centerline.
+   * A self-crossing trail seals more than one lobe. The flood already unions
+   * those interiors; the single-sided trim would shave one of them off.
+   */
   private trimFringe(p: Player): void {
     const n = p.trailLen;
     if (n < 2 || this.fringeN === 0) return;
@@ -604,6 +604,25 @@ export class Sim {
     return { dist: best, left };
   }
 
+  /** True when the trail touches itself (a crossing has 3 or more trail neighbors). */
+  private trailBranches(p: Player): boolean {
+    const { w, h, trail } = this.grid;
+    const id = p.id;
+    for (let t = 0; t < p.trailLen; t++) {
+      const i = p.trail[t]!;
+      if (trail[i] !== id) continue;
+      const x = i % w;
+      const y = (i / w) | 0;
+      let n = 0;
+      if (x > 0 && trail[i - 1] === id) n++;
+      if (x + 1 < w && trail[i + 1] === id) n++;
+      if (y > 0 && trail[i - w] === id) n++;
+      if (y + 1 < h && trail[i + w] === id) n++;
+      if (n >= 3) return true;
+    }
+    return false;
+  }
+
   private kill(victim: Player, killer: Player | null, reason: DeathReason): void {
     if (!victim.alive) return;
     if (
@@ -622,7 +641,7 @@ export class Sim {
     victim.alive = false;
     victim.outside = false;
 
-    const credit = killer && killer.id !== victim.id && killer.alive && reason !== 'self';
+    const credit = killer && killer.id !== victim.id && killer.alive;
     if (credit && killer) {
       killer.kills++;
       killer.coins += this.cfg.killCoins;

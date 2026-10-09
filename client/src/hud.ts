@@ -16,10 +16,8 @@ export interface DeathView {
 
 const REASONS: Record<DeathReason, string> = {
   trail: 'Your trail was cut!',
-  self: 'You crossed your trail!',
   headon: 'Head-on collision!',
   enclosed: 'You got surrounded!',
-  border: 'You hit the wall!',
 };
 
 export function deathTitle(reason: string): string {

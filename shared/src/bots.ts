@@ -79,29 +79,14 @@ function trailThreatened(p: Player, view: BotView): boolean {
   return false;
 }
 
-/** Turn away from the bot's own trail and the map edge. */
+/** Steer back toward mid-map near the fence. A bot's own trail is safe to cross. */
 function avoid(p: Player, view: BotView): boolean {
-  const { grid, cfg } = view;
+  const { cfg } = view;
   const edge = 6;
   if (p.x < edge || p.x > cfg.gridW - edge || p.y < edge || p.y > cfg.gridH - edge) {
     p.desiredX = cfg.gridW / 2 - p.x;
     p.desiredY = cfg.gridH / 2 - p.y;
     return true;
-  }
-  const dx = Math.cos(p.heading);
-  const dy = Math.sin(p.heading);
-  for (const dist of [3.2, 6.5]) {
-    const x = p.x + dx * dist;
-    const y = p.y + dy * dist;
-    const cx = Math.floor(x);
-    const cy = Math.floor(y);
-    if (cx < 0 || cy < 0 || cx >= grid.w || cy >= grid.h) continue;
-    const i = grid.idx(cx, cy);
-    if (grid.trail[i] === p.id && grid.owner[i] !== p.id) {
-      const s = p.botTurnSign || 1;
-      steer(p, Math.atan2(dy, dx) + s * 0.85);
-      return true;
-    }
   }
   return false;
 }

@@ -1,4 +1,4 @@
-import { CONFIG, createStarterProfile, mulberry32, type Profile } from '@pet-trails/shared';
+import { CONFIG, createStarterProfile, mulberry32, randomSeed, type Profile } from '@pet-trails/shared';
 
 const KEY = 'pet-trails-profile-v1';
 
@@ -12,7 +12,7 @@ export function loadProfile(): Profile {
   } catch {
     /* fresh profile */
   }
-  const profile = createStarterProfile(mulberry32((Date.now() ^ 0x9e3779b9) >>> 0));
+  const profile = createStarterProfile(mulberry32(randomSeed()));
   profile.pet.level = Math.min(CONFIG.levelCap, profile.pet.level);
   saveProfile(profile);
   return profile;

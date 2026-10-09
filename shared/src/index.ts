@@ -1,6 +1,6 @@
 export { CONFIG, PALETTE, SPECIES, SPECIES_LABEL, BOT_NAMES, ACTIVES, PASSIVES, RARITY_ODDS, RARITY_ORDER, makeConfig, paletteIndex } from './config.js';
 export type { GameConfig, RarityName, SpeciesId, ActiveId, PassiveId } from './config.js';
-export { mulberry32 } from './rng.js';
+export { mulberry32, randomSeed } from './rng.js';
 export { integrateBody, angleDelta, lerpAngle, walkCells } from './motion.js';
 export type { Body } from './motion.js';
 export { Grid, encodeCellRuns } from './grid.js';
