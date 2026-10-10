@@ -15,7 +15,6 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
   const host = opts?.host ?? '0.0.0.0';
   const tick = opts?.tick !== false;
   const rooms: Room[] = [];
-  const openFor = (room: Room) => room.sim.cfg.roundOpenSec * 1000;
   const makeRoom = () => {
     const room = new Room(opts?.seed === undefined ? undefined : opts.seed + rooms.length);
     room.onRejoin = (conn) => reseat(conn);
@@ -25,8 +24,7 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
   const pick = (): Room => {
     const now = Date.now();
     for (const room of rooms) {
-      if (room.sim.over || !room.hasSlot()) continue;
-      if (now - room.createdAt >= openFor(room)) continue;
+      if (!room.isOpen(now) || !room.hasSlot()) continue;
       return room;
     }
     return makeRoom();
@@ -34,8 +32,7 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
   const reseat = (conn: Conn) => {
     const now = Date.now();
     for (const candidate of rooms) {
-      if (candidate === conn.home || candidate.sim.over || !candidate.hasSlot()) continue;
-      if (now - candidate.createdAt >= openFor(candidate)) continue;
+      if (candidate === conn.home || !candidate.isOpen(now) || !candidate.hasSlot()) continue;
       conn.home.moveTo(conn, candidate);
       return;
     }
@@ -53,7 +50,7 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
     res.end('pet-trails');
   });
   const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 });
-  wss.on('connection', (ws) => pick().addSocket(ws));
+  wss.on('connection', (ws) => Room.park(ws, pick));
 
   let timer: NodeJS.Timeout | null = null;
   return new Promise((resolve, reject) => {
@@ -85,6 +82,7 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
         close: () =>
           new Promise((done) => {
             if (timer) clearInterval(timer);
+            for (const client of wss.clients) client.terminate();
             wss.close();
             server.close(() => done());
           }),
