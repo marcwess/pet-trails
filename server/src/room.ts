@@ -14,7 +14,7 @@ import {
 } from '@pet-trails/shared';
 import type { WebSocket } from 'ws';
 
-interface Conn {
+export interface Conn {
   ws: WebSocket;
   id: number | null;
   name: string;
@@ -23,6 +23,7 @@ interface Conn {
   kit: Kit | null;
   level: number;
   wantPlay: boolean;
+  home: Room;
 }
 
 /**
@@ -31,21 +32,63 @@ interface Conn {
  */
 export class Room {
   readonly sim: Sim;
+  readonly createdAt = Date.now();
+  /** Set by the hub. A dead player, or a finished round, asks to move to a fresh room. */
+  onRejoin: ((conn: Conn) => void) | null = null;
   private readonly conns: Conn[] = [];
   constructor(seed = (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0) {
     this.sim = new Sim({}, seed);
+    this.sim.lockstep = true;
+  }
+
+  /** Still in its opening seconds: a new player may join this round. */
+  isOpen(now = Date.now()): boolean {
+    return !this.sim.over && !this.sim.sealed && now - this.createdAt < this.sim.cfg.roundOpenSec * 1000;
+  }
+
+  /** No sockets and no longer joinable. The hub can stop ticking it. */
+  idle(now = Date.now()): boolean {
+    return this.conns.length === 0 && !this.isOpen(now);
+  }
+
+  hasSlot(): boolean {
+    return this.conns.length < this.sim.cfg.maxEntities && !this.sim.over;
   }
 
   addSocket(ws: WebSocket): void {
-    const conn: Conn = { ws, id: null, name: 'You', pet: -1, kit: null, level: 1, wantPlay: false };
+    const conn: Conn = { ws, id: null, name: 'You', pet: -1, kit: null, level: 1, wantPlay: false, home: this };
     this.conns.push(conn);
     ws.on('message', (data, isBinary) => {
       if (isBinary) return;
       const text = typeof data === 'string' ? data : data.toString();
-      this.onMessage(conn, text);
+      conn.home.onMessage(conn, text);
     });
-    ws.on('close', () => this.drop(conn));
-    ws.on('error', () => this.drop(conn));
+    ws.on('close', () => conn.home.drop(conn));
+    ws.on('error', () => conn.home.drop(conn));
+  }
+
+  /** Drop the player out of this room without closing the socket, then join `next`. */
+  moveTo(conn: Conn, next: Room): void {
+    this.detach(conn);
+    next.receive(conn);
+  }
+
+  private detach(conn: Conn): void {
+    const i = this.conns.indexOf(conn);
+    if (i >= 0) this.conns.splice(i, 1);
+    if (conn.id !== null) {
+      this.sim.remove(conn.id);
+      conn.id = null;
+    }
+    conn.wantPlay = false;
+  }
+
+  private receive(conn: Conn): void {
+    conn.home = this;
+    conn.id = null;
+    conn.wantPlay = true;
+    if (!this.conns.includes(conn)) this.conns.push(conn);
+    this.spawn(conn);
   }
 
   /** One authoritative tick plus a fan-out of deltas. */
@@ -91,6 +134,12 @@ export class Room {
     const pet = conn.pet >= 0 && conn.pet < SPECIES.length ? conn.pet : Math.floor(Math.random() * SPECIES.length);
     conn.pet = pet;
     if (conn.id === null) {
+      // The socket was seated when the page loaded. If the player idled on Home past the
+      // opening window, this round is already sealed: start in one that is still open.
+      if (this.onRejoin && !this.isOpen()) {
+        this.onRejoin(conn);
+        return;
+      }
       const p = this.sim.addHuman(conn.name, pet, conn.kit, conn.level);
       if (!p) {
         this.send(conn, { t: 'full' });
@@ -103,16 +152,11 @@ export class Room {
       return;
     }
     const existing = this.sim.players[conn.id];
-    if (existing) {
-      existing.pet = pet;
-      if (conn.kit) this.sim.setKit(conn.id, conn.kit);
-      existing.level = Math.max(1, Math.min(this.sim.cfg.levelCap, conn.level | 0));
+    // Eliminated pets stay out. Play Again moves the socket to a room that is still opening.
+    if (!existing?.alive || this.sim.over) {
+      this.onRejoin?.(conn);
+      return;
     }
-    // The client already has the map. Send only this owner's new square.
-    this.sim.land.beginTick();
-    this.sim.respawn(conn.id);
-    this.sendWelcome(conn);
-    this.sendDelta(conn, this.sim.consumeEvents(), this.sim.landPatch());
   }
 
   private drop(conn: Conn): void {

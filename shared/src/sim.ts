@@ -26,6 +26,11 @@ const BOT_LEVELS = [1, 5, 8, 10, 12, 15, 18, 20];
  * Authoritative paper.io-style simulation. Territory is a multi-polygon per
  * owner. One instance runs on the server and the same class runs offline.
  */
+/** Queued inputs beyond normal jitter. At this depth a human takes two steps in one tick. */
+const LOCKSTEP_SLACK = 2;
+/** Ticks a human waits for its next input before the server moves it anyway. */
+const LOCKSTEP_WAIT = 6;
+
 export class Sim {
   readonly cfg: GameConfig;
   readonly seed: number;
@@ -70,8 +75,23 @@ export class Sim {
       players: this.players,
       rng: this.rng,
       dt: this.tickDt,
+      heat: 0,
     };
   }
+
+  /** Round is closed to new players and dead pets stay dead. */
+  sealed = false;
+  /**
+   * Server rooms set this. A human only advances on a tick that consumes one
+   * queued input, so prediction and the ack describe the same steps.
+   */
+  lockstep = false;
+  /** 0 while the field is full and the clock is young. 1 when bots should press. */
+  heat = 0;
+  /** Someone has conquered the map, or the clock named a winner. */
+  over = false;
+  /** Pets who were in the round when it sealed. Placement is "4th of this". */
+  roundSize = 0;
 
   addHuman(name: string, pet: number, kit?: Kit | null, level = 1): Player | null {
     const p = this.alloc();
@@ -225,17 +245,70 @@ export class Sim {
   setInput(id: number, x: number, y: number, seq: number): void {
     const p = this.players[id];
     if (!p || !p.active || !p.alive) return;
+    if (seq <= p.lastSeq) return;
+    let nx = x;
+    let ny = y;
     const mag = Math.hypot(x, y);
-    if (mag > 0.15) {
-      p.desiredX = x / mag;
-      p.desiredY = y / mag;
+    if (mag <= 0.15) {
+      // A quiet stick still spends a tick, along the heading already held.
+      // Dropping it would freeze the server while the client keeps gliding.
+      nx = p.desiredX;
+      ny = p.desiredY;
+      const hold = Math.hypot(nx, ny);
+      if (hold <= 1e-6) {
+        nx = Math.cos(p.heading);
+        ny = Math.sin(p.heading);
+      } else {
+        nx /= hold;
+        ny /= hold;
+      }
+    } else {
+      nx /= mag;
+      ny /= mag;
     }
-    if (seq > p.lastSeq) p.lastSeq = seq;
+    const at = p.inSeq.findIndex((s) => s >= seq);
+    if (at >= 0 && p.inSeq[at] === seq) {
+      p.inX[at] = nx;
+      p.inY[at] = ny;
+      return;
+    }
+    const insert = at < 0 ? p.inSeq.length : at;
+    p.inSeq.splice(insert, 0, seq);
+    p.inX.splice(insert, 0, nx);
+    p.inY.splice(insert, 0, ny);
+    // A client cannot grow the queue without bound.
+    if (p.inSeq.length > 64) {
+      p.inSeq.splice(0, p.inSeq.length - 64);
+      p.inX.splice(0, p.inX.length - 64);
+      p.inY.splice(0, p.inY.length - 64);
+      p.lastSeq = p.inSeq[0]! - 1;
+    }
+  }
+
+  /**
+   * One queued input per tick, in seq order. A burst cannot collapse several turns
+   * into one step, and a packet that arrives early waits so a later seq cannot skip ahead.
+   */
+  /** Queued inputs that can be applied back to back, starting at the next seq. */
+  private dueInputs(p: Player): number {
+    let n = 0;
+    while (n < p.inSeq.length && p.inSeq[n] === p.lastSeq + 1 + n) n++;
+    return n;
+  }
+
+  private applyDueInput(p: Player): boolean {
+    if (p.inSeq.length === 0 || p.inSeq[0] !== p.lastSeq + 1) return false;
+    p.lastSeq = p.inSeq.shift()!;
+    p.desiredX = p.inX.shift()!;
+    p.desiredY = p.inY.shift()!;
+    return true;
   }
 
   maintainBots(humanCount: number): void {
+    if (this.sealed || this.over) return;
     const want = Math.max(0, Math.min(this.cfg.targetPopulation - humanCount, this.cfg.maxEntities - humanCount));
     let bots = 0;
+    // Dead bots keep their slot. A round never refills an elimination.
     for (const p of this.roster) if (p.active && p.bot) bots++;
     while (bots > want) {
       const victim = this.pickBotToRemove();
@@ -254,6 +327,8 @@ export class Sim {
     this.land.beginTick();
     if (opts && opts.humans !== undefined) this.maintainBots(opts.humans);
     this.botView.tick = this.tick;
+    this.heat = this.heatNow();
+    this.botView.heat = this.heat;
     const dt = this.tickDt;
 
     for (const p of this.roster) {
@@ -264,24 +339,117 @@ export class Sim {
 
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
+      let steps = 1;
+      if (!p.bot) {
+        const consumed = this.applyDueInput(p);
+        if (this.lockstep) {
+          if (consumed) {
+            p.starved = 0;
+            // A burst that arrived late is spent over a few ticks instead of banking a
+            // permanent lag between the client's steps and the server's.
+            if (this.dueInputs(p) >= LOCKSTEP_SLACK) steps = 2;
+          } else if (++p.starved > LOCKSTEP_WAIT) {
+            // A silent client (backgrounded tab, dead radio) keeps gliding along the held
+            // heading. That step uses up the next seq, so its late input is dropped.
+            p.lastSeq++;
+            while (p.inSeq.length > 0 && p.inSeq[0]! <= p.lastSeq) {
+              p.inSeq.shift();
+              p.inX.shift();
+              p.inY.shift();
+            }
+          } else {
+            continue;
+          }
+        }
+      }
       p.aliveMs += dt * 1000;
-      const x0 = p.x;
-      const y0 = p.y;
-      const mul = this.speedMul(p);
-      integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
-      if (!p.alive) continue;
-      this.followSegment(p, x0, y0, p.x, p.y);
+      for (let k = 0; k < steps && p.alive; k++) {
+        if (k > 0 && !this.applyDueInput(p)) break;
+        const x0 = p.x;
+        const y0 = p.y;
+        const mul = this.speedMul(p);
+        integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
+        if (!p.alive) break;
+        this.followSegment(p, x0, y0, p.x, p.y);
+      }
     }
 
     this.resolveHeadOns();
     this.collectPickups();
     this.spawnPickups();
-    this.respawnBots();
+    this.refillOpening();
 
     for (const p of this.roster) {
       if (!p.active) continue;
       p.land = this.land.areaOf(p.id);
     }
+    this.maybeEnd();
+  }
+
+  private heatNow(): number {
+    const alive = this.living();
+    // The clock ramps from a third of the heat point up to full heat there, so a quiet
+    // round tightens gradually instead of flipping at one instant.
+    const sec = this.tick / this.cfg.tickHz;
+    const from = this.cfg.roundHeatSec / 3;
+    const late = Math.max(0, Math.min(1, (sec - from) / Math.max(1e-3, this.cfg.roundHeatSec - from)));
+    const few = alive <= 2 ? 1 : alive <= 3 ? 0.6 : alive <= 5 ? 0.25 : 0;
+    return Math.max(late, few);
+  }
+
+  private living(): number {
+    let n = 0;
+    for (const p of this.roster) if (p.active && p.alive) n++;
+    return n;
+  }
+
+  private maybeEnd(): void {
+    if (this.over) return;
+    if (!this.sealed && this.tick >= this.cfg.roundOpenSec * this.cfg.tickHz) {
+      this.sealed = true;
+      this.roundSize = this.roster.filter((p) => p.active).length;
+    }
+    const alive = this.living();
+    if (this.sealed && alive === 1) {
+      let winner: Player | null = null;
+      for (const p of this.roster) if (p.active && p.alive) winner = p;
+      this.crown(winner);
+      return;
+    }
+    if (this.tick >= this.cfg.roundCapSec * this.cfg.tickHz) {
+      let winner: Player | null = null;
+      for (const p of this.roster) {
+        if (!p.active || !p.alive) continue;
+        if (!winner || p.land > winner.land) winner = p;
+      }
+      this.crown(winner);
+    }
+  }
+
+  /** One pet owns the blob. Everyone else is eliminated and their land is swept in. */
+  private crown(winner: Player | null): void {
+    if (this.over || !winner) return;
+    this.over = true;
+    if (this.roundSize < 1) this.roundSize = this.roster.filter((p) => p.active).length;
+    const losers: Player[] = [];
+    for (const p of this.roster) if (p.active && p.alive && p.id !== winner.id) losers.push(p);
+    // Smallest land goes out first, so a time crown places the rest by land.
+    losers.sort((a, b) => a.land - b.land);
+    for (const p of losers) this.kill(p, winner, 'time');
+    this.land.flood(winner.id);
+    winner.land = this.land.areaOf(winner.id);
+    const total = Math.max(1, this.land.mapArea);
+    this.events.push({
+      e: 'win',
+      id: winner.id,
+      name: winner.name,
+      total: Math.max(1, this.roundSize),
+      pct: (winner.land / total) * 100,
+      kills: winner.kills,
+      coins: winner.coins,
+      xp: winner.xp,
+      time: winner.aliveMs,
+    });
   }
 
   consumeEvents(): SimEvent[] {
@@ -649,6 +817,7 @@ export class Sim {
     if (!victim.alive) return;
     if (reason === 'trail' && this.tick < victim.shieldUntil) return;
     if (
+      reason !== 'time' &&
       this.tick < victim.invulnUntil &&
       (reason === 'headon' || reason === 'trail' || reason === 'enclosed')
     ) {
@@ -657,12 +826,13 @@ export class Sim {
     const total = Math.max(1, this.land.mapArea);
     const land = this.land.areaOf(victim.id);
     victim.lastPct = (land / total) * 100;
-    victim.lastRank = this.rankOf(victim.id);
+    victim.alive = false;
+    victim.outside = false;
+    const place = this.living() + 1;
+    victim.lastRank = place;
     victim.lastTime = victim.aliveMs;
     victim.deathReason = reason;
     victim.deathKiller = killer ? killer.id : 0;
-    victim.alive = false;
-    victim.outside = false;
 
     const credit = killer && killer.id !== victim.id && killer.alive;
     if (credit && killer) {
@@ -693,24 +863,30 @@ export class Sim {
       xp: victim.xp,
       time: victim.aliveMs,
       rank: victim.lastRank,
+      total: Math.max(1, this.roundSize || this.roster.filter((p) => p.active).length),
     });
-    this.land.clear(victim.id);
+    if (credit && killer) this.land.takeAll(victim.id, killer.id);
+    else this.land.clear(victim.id);
     victim.trailLen = 0;
     victim.land = 0;
-    if (victim.bot) {
+    if (killer) killer.land = this.land.areaOf(killer.id);
+    // While the room is still open a fallen bot comes back, so a player who joins
+    // a few seconds in still finds a full field. Once sealed, out is out.
+    if (victim.bot && !this.sealed && !this.over) {
       victim.respawnTick = this.tick + Math.max(1, Math.round(this.cfg.botRespawnSec * this.cfg.tickHz));
     }
     this.dropKillCoins(victim.x, victim.y);
   }
 
-  private rankOf(id: number): number {
-    const land = this.land.areaOf(id);
-    let better = 0;
+  private refillOpening(): void {
+    if (this.sealed || this.over) return;
     for (const p of this.roster) {
-      if (!p.active || !p.alive || p.id === id) continue;
-      if (this.land.areaOf(p.id) > land) better++;
+      if (!p.active || !p.bot || p.alive) continue;
+      if (p.respawnTick !== 0 && this.tick >= p.respawnTick) {
+        this.spawn(p);
+        this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: true });
+      }
     }
-    return better + 1;
   }
 
   private resolveHeadOns(): void {
@@ -828,7 +1004,14 @@ export class Sim {
   }
 
   private speedMul(p: Player): number {
-    return speedMultiplier(p.rarity, p.passiveId, this.tick < p.dashUntil, this.tick < p.slowUntil ? p.slowMul : null, this.cfg);
+    return speedMultiplier(
+      p.rarity,
+      p.passiveId,
+      this.tick < p.dashUntil,
+      this.tick < p.slowUntil ? p.slowMul : null,
+      this.cfg,
+      p.level,
+    );
   }
 
   private coinBonus(p: Player, base: number): number {
@@ -839,16 +1022,6 @@ export class Sim {
   private xpBonus(p: Player, base: number): number {
     if (base === 0 || p.passiveId !== 'scholar') return base;
     return base * (1 + effectOf(this.cfg.abilities.scholarXp, p.rarity, this.cfg, p.level));
-  }
-
-  private respawnBots(): void {
-    for (const p of this.roster) {
-      if (!p.active || !p.bot || p.alive) continue;
-      if (p.respawnTick !== 0 && this.tick >= p.respawnTick) {
-        this.spawn(p);
-        this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: true });
-      }
-    }
   }
 
   private pickBotToRemove(): Player | null {

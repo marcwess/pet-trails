@@ -32,6 +32,12 @@ export interface GameConfig {
   botLegMin: number;
   botLegMax: number;
   botRespawnSec: number;
+  /** A room still accepts players for this long after it is created. */
+  roundOpenSec: number;
+  /** At this age the pet with the most land wins. */
+  roundCapSec: number;
+  /** Bots start pressing harder at this age so the round does not stall. */
+  roundHeatSec: number;
   levelCap: number;
   /** Coins for one Mystery Box. A decent run is a couple of kills plus a scatter of coins, so this is about one box per 3–5 of those. */
   boxPrice: number;
@@ -107,6 +113,9 @@ export const CONFIG: GameConfig = {
   botLegMin: 16,
   botLegMax: 34,
   botRespawnSec: 1.15,
+  roundOpenSec: 10,
+  roundCapSec: 300,
+  roundHeatSec: 270,
   levelCap: 20,
   boxPrice: 100,
   levelGain: 0.02,

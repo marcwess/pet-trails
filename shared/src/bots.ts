@@ -10,6 +10,8 @@ export interface BotView {
   players: Array<Player | null>;
   rng: () => number;
   dt: number;
+  /** 0 while the round is full, 1 when few pets remain or the clock is late. */
+  heat: number;
 }
 
 function steer(p: Player, angle: number): void {
@@ -73,6 +75,33 @@ function trailThreatened(p: Player, view: BotView): boolean {
   return false;
 }
 
+/**
+ * A rival trail just ahead of the head. Cutting it is a kill, so a hunting bot wants it;
+ * a bot that is only farming land swerves instead, which keeps a full field from
+ * wiping itself out by accident in the first seconds of a round.
+ */
+function rivalTrailAhead(p: Player, view: BotView): { x: number; y: number } | null {
+  const hx = Math.cos(p.heading);
+  const hy = Math.sin(p.heading);
+  const cx = p.x + hx * 3;
+  const cy = p.y + hy * 3;
+  for (let id = 1; id < view.players.length; id++) {
+    const e = view.players[id];
+    if (!e || !e.active || !e.alive || e.id === p.id || e.trailLen < 2) continue;
+    for (let t = 0; t < e.trailLen; t++) {
+      // Inside a capsule from the head to 5 cells ahead, about 1.4 cells wide.
+      const dx = e.trailX[t]! - p.x;
+      const dy = e.trailY[t]! - p.y;
+      if (Math.abs(e.trailX[t]! - cx) > 4 || Math.abs(e.trailY[t]! - cy) > 4) continue;
+      const along = dx * hx + dy * hy;
+      if (along < 0.3 || along > 5) continue;
+      const across = dx * hy - dy * hx;
+      if (across > -1.4 && across < 1.4) return { x: e.trailX[t]!, y: e.trailY[t]! };
+    }
+  }
+  return null;
+}
+
 /** Steer back inside when the curved fence is close. A bot's own trail is safe to cross. */
 function avoid(p: Player, view: BotView): boolean {
   const hit = view.land.fenceAt(p.x, p.y);
@@ -90,9 +119,20 @@ function avoid(p: Player, view: BotView): boolean {
  */
 export function updateBot(p: Player, view: BotView): void {
   const { cfg } = view;
+  const heat = Math.max(0, Math.min(1, view.heat || 0));
   if (p.outside) p.botMoved += cfg.speed * view.dt;
 
   if (avoid(p, view)) return;
+
+  if (p.botPhase !== 4 && view.rng() > heat * 0.8) {
+    const cut = rivalTrailAhead(p, view);
+    if (cut) {
+      // Turn away from the trail point, toward whichever side it is not on.
+      const side = Math.cos(p.heading) * (cut.y - p.y) - Math.sin(p.heading) * (cut.x - p.x) > 0 ? -1 : 1;
+      steer(p, p.heading + side * 1.4);
+      return;
+    }
+  }
 
   if (p.outside && (trailThreatened(p, view) || biggerNeighbor(p, view))) {
     goHome(p, view);
@@ -111,7 +151,7 @@ export function updateBot(p: Player, view: BotView): void {
       p.botTurns++;
       steer(p, p.heading);
       p.botMoved = 0;
-      p.botLeg = legLength(p, view);
+      p.botLeg = legLength(p, view) * (1 - heat * 0.4);
       if (p.botTurns >= 3) {
         goHome(p, view);
         return;
@@ -123,17 +163,22 @@ export function updateBot(p: Player, view: BotView): void {
 
   const thinkDue = view.tick >= p.botNextThink;
   if (thinkDue) {
-    p.botNextThink = view.tick + Math.max(1, Math.round(cfg.botThinkSec * cfg.tickHz));
-    if (view.rng() < cfg.botMistakeChance) {
+    const think = cfg.botThinkSec * (1 - heat * 0.55);
+    p.botNextThink = view.tick + Math.max(1, Math.round(think * cfg.tickHz));
+    if (view.rng() < cfg.botMistakeChance * (1 - heat * 0.85)) {
       steer(p, p.heading + (view.rng() - 0.5) * 1.4);
       return;
     }
-    const huntBias = p.botStyle === 1 ? 0.72 : 0.34;
+    const baseHunt = p.botStyle === 1 ? 0.72 : 0.34;
+    // Elimination rounds: with a full field bots mostly farm land, so the round lasts a
+    // few minutes. Heat (few pets left, or late clock) brings the hunting back.
+    const huntBias = baseHunt * (0.08 + 0.92 * heat) + (0.94 - baseHunt) * heat;
     const committed = p.botPhase === 1 && p.botTurns < 2;
     if (view.rng() < huntBias) {
       const target = nearestTrail(p, view);
-      const close = !!target && target.dist < (committed ? 11 : 18);
-      const worth = !!target && !committed && p.land > target.land * 1.4 && target.dist < 28;
+      const reach = 0.5 + 0.5 * heat;
+      const close = !!target && target.dist < (committed ? 11 : 18) * reach;
+      const worth = !!target && !committed && heat > 0.3 && p.land > target.land * 1.4 && target.dist < 28;
       if (target && (close || worth)) {
         p.botPhase = 4;
         p.desiredX = target.x - p.x;
@@ -158,7 +203,7 @@ export function updateBot(p: Player, view: BotView): void {
     p.botPhase = 1;
     p.botTurns = 0;
     p.botMoved = 0;
-    p.botLeg = legLength(p, view);
+    p.botLeg = legLength(p, view) * (1 - heat * 0.4);
     const rx = p.x - cfg.gridW / 2;
     const ry = p.y - cfg.gridH / 2;
     if (rx * rx + ry * ry < 45 * 45) {

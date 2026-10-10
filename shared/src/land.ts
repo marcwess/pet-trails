@@ -1054,6 +1054,32 @@ export class LandBook {
     return this.added.length > 0 && multiContains(this.added, x, y);
   }
 
+  /**
+   * The victor keeps every polygon the defeated pet owned. `from` is cleared.
+   * The union is smoothed the same way a claim is, so the border stays round.
+   */
+  takeAll(from: number, to: number): void {
+    if (from === to || from < 1 || to < 1 || from > this.maxId || to > this.maxId) return;
+    const src = this.multi[from]!;
+    if (src.length > 0) {
+      // Keep every piece. Smoothing a distant pair welds or drops the stolen home.
+      const next = sanitize(this.clip(safeUnion(this.multi[to]!, src)), 0.02);
+      if (next.length > 0) {
+        this.multi[to] = next;
+        this.recompute(to);
+        this.dirty.add(to);
+      }
+    }
+    this.clear(from);
+  }
+
+  /** Paint this owner across the whole blob. Other owners are cleared first. */
+  flood(id: number): void {
+    if (id < 1 || id > this.maxId || this.mapRing.length < 4) return;
+    for (let o = 1; o <= this.maxId; o++) if (o !== id) this.clear(o);
+    this.unionPolygon(id, [this.mapRing]);
+  }
+
   clear(id: number): void {
     if (id < 1 || id > this.maxId) return;
     this.multi[id] = [];

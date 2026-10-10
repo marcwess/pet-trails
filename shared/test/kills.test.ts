@@ -56,7 +56,7 @@ test('hitting the fence slides along the curve and does not kill', () => {
 
 test('cutting a trail kills the owner and credits the cutter', () => {
   const { sim, a, b } = placePair(1);
-  sim.debugGiveRect(a.id, 2, 2, 4, 4);
+  sim.debugGiveRect(a.id, 8, 18, 4, 4);
   sim.debugGiveRect(b.id, 20, 20, 4, 4);
   const trailCell = sim.idx(12, 12);
   sim.debugSetTrail(a.id, [trailCell]);
@@ -75,6 +75,8 @@ test('cutting a trail kills the owner and credits the cutter', () => {
   assert.equal(b.trainLen, 1);
   assert.equal(b.train[0], a.pet);
   assert.equal(sim.land.areaOf(a.id), 0);
+  assert.ok(sim.land.areaOf(b.id) > 30, `killer should own the stolen square, area ${sim.land.areaOf(b.id)}`);
+  assert.equal(sim.ownerAt(10, 20), b.id, 'the victim home now belongs to the cutter');
   assert.ok(b.coins >= sim.cfg.killCoins);
   assert.ok(sim.auditLand());
 });
@@ -163,7 +165,8 @@ test('head-on: more land wins, the smaller pet joins the train', () => {
   assert.equal(a.kills, 1);
   assert.equal(a.train[0], b.pet);
   assert.equal(sim.land.areaOf(b.id), 0);
-  assert.ok(a.land > 0);
+  assert.equal(sim.ownerAt(19.5, 3.5), a.id, 'the smaller pet’s land joins the winner');
+  assert.ok(a.land > 36, `winner land ${a.land} should include the stolen patch`);
 });
 
 test('head-on tie: both die and nobody is credited', () => {
@@ -185,6 +188,8 @@ test('head-on tie: both die and nobody is credited', () => {
   assert.equal(sim.stats.kills, 0);
   assert.equal(a.trainLen, 0);
   assert.equal(b.trainLen, 0);
+  assert.equal(sim.land.areaOf(a.id), 0);
+  assert.equal(sim.land.areaOf(b.id), 0);
 });
 
 test('a fresh spawn shrugs off a head-on until invulnerability ends', () => {

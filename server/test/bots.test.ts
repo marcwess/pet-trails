@@ -7,14 +7,26 @@ test('server with bots survives 60 simulated seconds and produces kills and clai
   const srv = await startServer({ port: 0, tick: false, seed: 123456 });
   try {
     const ticks = srv.room.sim.cfg.tickHz * 60;
-    for (let i = 0; i < ticks; i++) srv.room.step();
+    const dead = new Set<number>();
+    for (let i = 0; i < ticks; i++) {
+      srv.room.step();
+      for (const p of srv.room.sim.roster) {
+        if (!p.active) continue;
+        // Bots refill during the opening seconds. After the seal, out is out.
+        if (!p.alive && srv.room.sim.sealed) dead.add(p.id);
+        else if (p.alive) assert.equal(dead.has(p.id), false, `pet ${p.id} respawned after the seal`);
+      }
+    }
     const { kills, claims, deaths, claimedCells } = srv.room.sim.stats;
     assert.ok(claims > 0, `expected claims, got ${claims}`);
     assert.ok(kills > 0, `expected kills, got ${kills} (deaths ${deaths}, claimed cells ${claimedCells})`);
     assert.ok(claimedCells > 50, `expected real territory, got ${claimedCells}`);
-    let alive = 0;
-    for (const p of srv.room.sim.roster) if (p.active && p.alive) alive++;
-    assert.ok(alive >= 8, `room should stay busy, alive=${alive}`);
+    assert.ok(srv.room.sim.sealed, 'the round should close after the opening window');
+    if (srv.room.sim.over) {
+      let alive = 0;
+      for (const p of srv.room.sim.roster) if (p.active && p.alive) alive++;
+      assert.equal(alive, 1, 'a finished round has one pet left');
+    }
     assert.ok(srv.room.sim.auditLand());
   } finally {
     await srv.close();
@@ -46,20 +58,18 @@ test('websocket join receives a welcome, polygons, and deltas', async () => {
     assert.ok(deltas.length > 0, 'missing delta');
     const first = JSON.parse(deltas[0]!) as { lands?: number[] };
     assert.ok(first.lands && first.lands.length > 8, 'first delta should carry current polygons');
+    const welcomeMsg = JSON.parse(welcome as string) as { id: number };
+    const me = srv.room.sim.players[welcomeMsg.id];
+    assert.ok(me?.alive);
+    const landBefore = me!.land;
     ws.send(JSON.stringify({ t: 'input', seq: 1, x: 1, y: 0 }));
     srv.room.step();
     ws.send(JSON.stringify({ t: 'play' }));
     await new Promise((r) => setTimeout(r, 30));
-    const later = messages.filter((m) => typeof m === 'string' && m.includes('"delta"')) as string[];
-    const last = JSON.parse(later[later.length - 1]!) as { lands?: number[] };
-    assert.ok(last.lands && last.lands.length > 0, 'respawn delta should carry the new square');
-    assert.ok(last.lands.length < first.lands.length, 'respawn sends only the changed owner');
-    const respawnId = last.lands[0];
-    for (let i = 0; i < last.lands.length; ) {
-      const id = last.lands[i]!;
-      assert.equal(id, respawnId, 'respawn patch includes another owner');
-      break;
-    }
+    assert.equal(srv.rooms.length, 1, 'a second play while alive stays in the round');
+    assert.equal(me!.alive, true);
+    assert.equal(me!.id, welcomeMsg.id);
+    assert.ok(me!.land >= landBefore);
     ws.close();
   } finally {
     await srv.close();

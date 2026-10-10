@@ -1,4 +1,4 @@
-import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, mapBlob } from '@pet-trails/shared';
+import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, angleDelta, mapBlob, type MultiPolygon } from '@pet-trails/shared';
 import {
   BufferAttribute,
   BufferGeometry as BufGeo,
@@ -30,6 +30,7 @@ import {
   ShaderMaterial,
   SphereGeometry,
   TorusGeometry,
+  Vector2,
   Vector3,
   WebGLRenderer,
   type BufferGeometry,
@@ -101,6 +102,20 @@ function enableRecolor(mat: MeshBasicMaterial | MeshLambertMaterial): void {
       .replace('#include <common>', `#include <common>\nvarying float vRecolor;\n${RECOLOR_GLSL}`)
       .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);');
   };
+}
+
+/**
+ * Critically damped follow, in closed form so a long frame cannot overshoot.
+ * Omega 18 settles in about a fifth of a second.
+ */
+function dampTo(pos: number, vel: number, target: number, dt: number): [number, number] {
+  const w = 18;
+  const t = Math.max(0, dt);
+  const x = pos - target;
+  const e = Math.exp(-w * t);
+  const b = vel + w * x;
+  const next = (x + b * t) * e;
+  return [target + next, (b - w * (x + b * t)) * e];
 }
 
 function hsl(h: number, s: number, l: number): [number, number, number] {
@@ -560,10 +575,8 @@ export class Renderer {
   private readonly paths: PathBuf[] = [];
   private readonly trails: PathBuf[] = [];
   private readonly ribbonBatch: RibbonBatch;
-  private readonly pitchAxis = new Vector3(1, 0, 0);
   private holdX = 0;
   private holdZ = 0;
-  private holdH = 0;
   private lookX = 0;
   private lookZ = 0;
   private readonly fenceMeshes: Mesh[] = [];
@@ -614,6 +627,11 @@ export class Renderer {
   private readonly rainbows: InstancedMesh;
   private readonly paws: InstancedMesh;
   heroRecolor = 0;
+
+  /** Camera sample for movement metrics. Scene-space, the same clock as the frame. */
+  frameCam(): { x: number; y: number; z: number; lookX: number; lookZ: number } {
+    return { x: this.camX, y: this.camY, z: this.camZ, lookX: this.lookX, lookZ: this.lookZ };
+  }
   private readonly popLife = new Float32Array(24);
   private killFlash = 0;
   private killX = 0;
@@ -668,7 +686,15 @@ export class Renderer {
   private camX = 0;
   private camY = 28;
   private camZ = 18;
+  private camVx = 0;
+  private camVz = 0;
+  private lookVx = 0;
+  private lookVz = 0;
   private camInit = false;
+  private mirror: Group | null = null;
+  private readonly bank = new Float32Array(80);
+  private readonly prevHead = new Float32Array(80);
+  private readonly sweeps: Array<{ mesh: Mesh; life: number; max: number }> = [];
   private lastW = 0;
   private lastH = 0;
   shake = 0;
@@ -1002,6 +1028,7 @@ export class Renderer {
     // Mirror X so the south-looking camera is north-up with east on the right.
     // Three's right-handed lookAt would otherwise put east on the left.
     const mirror = new Group();
+    this.mirror = mirror;
     mirror.scale.x = -1;
     for (const child of [...this.scene.children]) {
       if (child.type === 'HemisphereLight' || child.type === 'DirectionalLight') continue;
@@ -1416,6 +1443,9 @@ export class Renderer {
     this.perf.beginFrame();
 
     if (phase === 'dead') {
+      // The out beat holds the camera, but the land wipe keeps playing, so the
+      // eliminated player watches their color drain into the victor's.
+      this.stepSweeps(dt);
       this.stepParticles(dt);
       this.stepCoins(dt);
       this.stepPops(dt);
@@ -1479,7 +1509,6 @@ export class Renderer {
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;
       let selfZ = this.holdZ;
-      let selfH = this.holdH;
       let selfAlive = false;
       for (let i = 0; i < petCount; i++) {
         const pet = pets[i]!;
@@ -1510,10 +1539,13 @@ export class Renderer {
         const wx = pet.x * WORLD;
         const wz = pet.z * WORLD;
         const feet = gfx.cpu ? this.surfaceAt(pet.id, pet.x, pet.z) : 0;
-        const wave = Math.sin(this.time * 8 + pet.id * 1.7);
-        const bob = Math.max(0, wave) * 0.1;
-        const squash = wave > 0 ? 1.07 : 0.9;
-        const roll = wave * 0.06;
+        const turn = angleDelta(this.prevHead[pet.id] ?? pet.h, pet.h);
+        this.prevHead[pet.id] = pet.h;
+        const bankTarget = Math.max(-0.2, Math.min(0.2, -turn * 2.4));
+        this.bank[pet.id] = (this.bank[pet.id] ?? 0) + (bankTarget - (this.bank[pet.id] ?? 0)) * 0.35;
+        const bob = 0;
+        const squash = 1;
+        const roll = this.bank[pet.id] ?? 0;
         const mesh = this.pets[pet.pet];
         const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
         const body = (pet.self ? 1.08 : 1) * shimmer;
@@ -1599,11 +1631,9 @@ export class Renderer {
         if (pet.self) {
           selfX = pet.x;
           selfZ = pet.z;
-          selfH = pet.h;
           selfAlive = true;
           this.holdX = pet.x;
           this.holdZ = pet.z;
-          this.holdH = pet.h;
           this.ring.visible = true;
           this.ring.position.set(wx, 0.04, wz);
           const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
@@ -1643,15 +1673,12 @@ export class Renderer {
       const elev = (64 * Math.PI) / 180;
       const back = Math.cos(elev) * dist;
       const height = Math.sin(elev) * dist - this.punch * 1.3;
-      const fx = Math.cos(selfH);
-      const fz = Math.sin(selfH);
       const px = selfX * WORLD;
       const pz = selfZ * WORLD;
-      const lx = px + fx * 1.35;
-      const lz = pz + fz * 1.35;
-      // North-up. The look point still leads the pet, but the camera stays due
-      // south of it, so steering turns the pet and never the map. The world
-      // group is mirrored on X, which puts east on the right of this view.
+      // North-up, locked to the rendered pet. Heading no longer swings the target,
+      // so a turn does not shove the pet around the screen.
+      const lx = px;
+      const lz = pz;
       const clamped = this.clampLook(lx, lz, Math.max(1, height), back);
       const lookSceneX = -clamped.x;
       const tx = lookSceneX;
@@ -1662,14 +1689,14 @@ export class Renderer {
         this.camZ = tz;
         this.lookX = lookSceneX;
         this.lookZ = clamped.z;
+        this.camVx = this.camVz = this.lookVx = this.lookVz = 0;
         this.camInit = true;
       } else {
-        const k = 1 - Math.exp(-dt * 4.2);
-        this.camX += (tx - this.camX) * k;
-        this.camY += (height - this.camY) * k;
-        this.camZ += (tz - this.camZ) * k;
-        this.lookX += (lookSceneX - this.lookX) * k;
-        this.lookZ += (clamped.z - this.lookZ) * k;
+        [this.camX, this.camVx] = dampTo(this.camX, this.camVx, tx, dt);
+        [this.camZ, this.camVz] = dampTo(this.camZ, this.camVz, tz, dt);
+        this.camY += (height - this.camY) * (1 - Math.exp(-dt * 8));
+        [this.lookX, this.lookVx] = dampTo(this.lookX, this.lookVx, lookSceneX, dt);
+        [this.lookZ, this.lookVz] = dampTo(this.lookZ, this.lookVz, clamped.z, dt);
       }
       const jx = (Math.random() - 0.5) * this.shake * 0.35;
       const jz = (Math.random() - 0.5) * this.shake * 0.35;
@@ -1684,6 +1711,7 @@ export class Renderer {
       this.layCosmetics(pets, petCount);
     }
 
+    this.stepSweeps(dt);
     this.stepParticles(dt);
     this.stepCoins(dt);
     this.stepPops(dt);
@@ -1892,6 +1920,79 @@ export class Renderer {
     this.bases.instanceColor?.setXYZ(index, c[0] / 255, c[1] / 255, c[2] / 255);
   }
 
+  /** Victim color wipes away from the bite, revealing the land the victor just took. */
+  sweepLand(mp: MultiPolygon, r: number, g: number, b: number, x: number, z: number): void {
+    const parts = buildLand(mp, WORLD, [r, g, b]);
+    if (!parts || !this.mirror) return;
+    const geo = new BufGeo();
+    geo.setAttribute('position', new BufferAttribute(parts.top.pos, 3));
+    geo.setIndex(new BufferAttribute(parts.top.idx, 1));
+    const mat = new ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      toneMapped: false,
+      uniforms: {
+        uCenter: { value: new Vector2(x * WORLD, z * WORLD) },
+        uRad: { value: 0.15 },
+        uColor: { value: new Vector3(r / 255, g / 255, b / 255) },
+      },
+      vertexShader: `
+        varying vec3 vP;
+        void main() {
+          vP = position;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec2 uCenter;
+        uniform float uRad;
+        uniform vec3 uColor;
+        varying vec3 vP;
+        void main() {
+          if (distance(vP.xz, uCenter) < uRad) discard;
+          gl_FragColor = vec4(uColor, 0.94);
+        }
+      `,
+    });
+    const mesh = new Mesh(geo, mat);
+    mesh.position.y = 0.08;
+    mesh.renderOrder = 3;
+    mesh.frustumCulled = false;
+    this.mirror.add(mesh);
+    this.sweeps.push({ mesh, life: 0.7, max: 0.7 });
+  }
+
+  confetti(x: number, z: number): void {
+    const colors: Array<[number, number, number]> = [
+      [1, 0.35, 0.55],
+      [1, 0.85, 0.2],
+      [0.35, 0.75, 1],
+      [0.55, 0.95, 0.4],
+      [0.72, 0.45, 1],
+    ];
+    for (let i = 0; i < colors.length; i++) {
+      const c = colors[i]!;
+      this.splash(x + (i - 2) * 2.2, z + ((i % 2) - 0.5) * 3, 14, c[0], c[1], c[2]);
+    }
+  }
+
+  private stepSweeps(dt: number): void {
+    for (let i = this.sweeps.length - 1; i >= 0; i--) {
+      const s = this.sweeps[i]!;
+      s.life -= dt;
+      const u = 1 - Math.max(0, s.life) / s.max;
+      const mat = s.mesh.material as ShaderMaterial;
+      const rad = mat.uniforms.uRad;
+      if (rad) rad.value = u * u * 70;
+      if (s.life <= 0) {
+        s.mesh.removeFromParent();
+        s.mesh.geometry.dispose();
+        mat.dispose();
+        this.sweeps.splice(i, 1);
+      }
+    }
+  }
+
   private stepCoins(dt: number): void {
     let n = 0;
     const floorY = SLAB_H + 0.22;
@@ -2084,8 +2185,6 @@ export class Renderer {
     }
     this.pos.set(x, y + 0.24, z);
     this.quat.setFromAxisAngle(this.up, Math.PI / 2 - heading);
-    this.quat2.setFromAxisAngle(this.pitchAxis, -0.68);
-    this.quat.multiply(this.quat2);
     if (rollAmt !== 0) {
       this.quat2.setFromAxisAngle(this.rollAxis, rollAmt);
       this.quat.multiply(this.quat2);

@@ -61,6 +61,14 @@ export class Territory {
     return ids;
   }
 
+  clearAll(): void {
+    for (let id = 1; id <= MAX_ID; id++) {
+      this.polys[id] = [];
+      this.area[id] = 0;
+      this.dirty.add(id);
+    }
+  }
+
   polygon(id: number): MultiPolygon {
     return this.polys[id] ?? [];
   }

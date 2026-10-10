@@ -1,6 +1,6 @@
 import type { ActiveId, PassiveId, RarityName } from './config.js';
 
-export type DeathReason = 'trail' | 'headon' | 'enclosed';
+export type DeathReason = 'trail' | 'headon' | 'enclosed' | 'time';
 
 export class Player {
   readonly id: number;
@@ -16,6 +16,12 @@ export class Player {
   desiredX = 1;
   desiredY = 0;
   lastSeq = 0;
+  /** Inputs waiting for the tick they were sent for. A future seq must not skip ahead. */
+  inSeq: number[] = [];
+  inX: number[] = [];
+  inY: number[] = [];
+  /** Lockstep ticks in a row with no input to apply. */
+  starved = 0;
   land = 0;
   kills = 0;
   coins = 0;
@@ -90,5 +96,11 @@ export class Player {
     this.shieldUntil = 0;
     this.slowUntil = 0;
     this.slowMul = 1;
+    // A recycled slot must accept the new client's first input. Stale seqs drop the stick.
+    this.lastSeq = 0;
+    this.inSeq.length = 0;
+    this.inX.length = 0;
+    this.inY.length = 0;
+    this.starved = 0;
   }
 }

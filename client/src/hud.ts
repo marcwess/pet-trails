@@ -20,6 +20,7 @@ const REASONS: Record<DeathReason, { title: string; icon: string }> = {
   trail: { title: 'Your trail was cut!', icon: '✂' },
   headon: { title: 'Head-on collision!', icon: '💥' },
   enclosed: { title: 'You got surrounded!', icon: '◎' },
+  time: { title: 'Time is up!', icon: '⏱' },
 };
 
 export function deathTitle(reason: string): string {
@@ -68,6 +69,13 @@ export class Hud {
   private readonly abilityBtn = must('ability') as HTMLButtonElement;
   private readonly abilityIcon = must('ability-icon');
   private readonly abilityRing = must('ability-ring') as unknown as SVGCircleElement;
+  private readonly leftEl = must('you-left');
+  private readonly winEl = must('win');
+  private readonly winText = must('win-title');
+  private readonly outEl = must('out');
+  private readonly rewardEl = must('petcard-reward');
+  private rewardKey = '';
+  private rewardFrame = 0;
 
   constructor() {
     for (let i = 0; i < 6; i++) {
@@ -172,12 +180,20 @@ export class Hud {
     this.petline.textContent = text;
   }
 
-  setPetCard(card: { name: string; level: number; xp: number; boost: number; unlocks: string[] }): void {
+  setPetCard(card: {
+    name: string;
+    level: number;
+    xp: number;
+    boost: number;
+    unlocks: string[];
+    reward: { coins: number; xp: number; levelUp: boolean } | null;
+  }): void {
     // The card already names the pet and level, so the loading line steps aside.
     this.petline.hidden = true;
     this.petCardName.textContent = `${card.name}`;
     this.petCardFill.style.width = `${Math.round(Math.max(0, Math.min(1, card.xp)) * 100)}%`;
     this.petCardBoost.textContent = card.boost > 0 ? `Abilities +${card.boost}%` : 'Abilities +0%';
+    this.showReward(card.reward);
     this.petCardUnlocks.replaceChildren();
     if (card.unlocks.length === 0) {
       const chip = document.createElement('span');
@@ -307,6 +323,72 @@ export class Hud {
     el.classList.remove('show');
     void el.offsetWidth;
     el.classList.add('show');
+  }
+
+  setLeft(n: number): void {
+    this.leftEl.textContent = `${Math.max(0, n | 0)} left`;
+  }
+
+  winBanner(text: string): void {
+    this.winText.textContent = text;
+    this.winEl.hidden = false;
+  }
+
+  hideWin(): void {
+    this.winEl.hidden = true;
+  }
+
+  showOut(text: string): void {
+    this.outEl.textContent = text;
+    this.outEl.hidden = false;
+  }
+
+  hideOut(): void {
+    this.outEl.hidden = true;
+  }
+
+  /** Count the run's coins and XP onto the pet card once per payout. */
+  private showReward(reward: { coins: number; xp: number; levelUp: boolean } | null): void {
+    const key = reward ? `${reward.coins}|${reward.xp}|${reward.levelUp ? 1 : 0}` : '';
+    if (key === this.rewardKey) return;
+    this.rewardKey = key;
+    this.rewardFrame++;
+    const frame = this.rewardFrame;
+    if (!reward || (reward.coins <= 0 && reward.xp <= 0 && !reward.levelUp)) {
+      this.rewardEl.hidden = true;
+      this.rewardEl.replaceChildren();
+      return;
+    }
+    const paint = (coins: number, xp: number) => {
+      this.rewardEl.replaceChildren();
+      if (coins > 0 || xp > 0) {
+        const line = document.createElement('b');
+        const bits: string[] = [];
+        if (reward.coins > 0) bits.push(`+${coins} coins`);
+        if (reward.xp > 0) bits.push(`+${xp} XP`);
+        line.textContent = bits.join(', ');
+        this.rewardEl.append(line);
+      }
+      if (reward.levelUp) {
+        const up = document.createElement('span');
+        up.textContent = 'Level up!';
+        this.rewardEl.append(up);
+      }
+    };
+    this.rewardEl.hidden = false;
+    this.rewardEl.classList.remove('pop');
+    paint(0, 0);
+    void this.rewardEl.offsetWidth;
+    this.rewardEl.classList.add('pop');
+    const t0 = performance.now();
+    const step = (now: number) => {
+      if (this.rewardFrame !== frame) return;
+      const u = Math.min(1, (now - t0) / 700);
+      const e = 1 - (1 - u) * (1 - u);
+      paint(Math.round(reward.coins * e), Math.round(reward.xp * e));
+      if (u < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   }
 
   setYou(pct: string, kills: number, train = 0): void {

@@ -1,6 +1,7 @@
 import {
   ABILITY_ICON,
   CONFIG,
+  cloneMulti,
   FLAG_ALIVE,
   FLAG_BOT,
   FLAG_OUTSIDE,
@@ -14,7 +15,6 @@ import {
   cooldownOf,
   equippedPet,
   kitOf,
-  gainedUnlocks,
   levelPower,
   recolorId,
   trailId,
@@ -23,6 +23,8 @@ import {
   randomSeed,
   ringArea,
   integrateBody,
+  angleDelta,
+  effectOf,
   lerpAngle,
   speedMultiplier,
   xpForLevel,
@@ -31,11 +33,12 @@ import {
   type EntSnap,
   type PetInstance,
   type Profile,
+  type Ring,
   type WelcomeMsg,
   type WireEvent,
 } from '@pet-trails/shared';
 import { Collection } from './collection.js';
-import { Hud, cssColor, deathIcon, deathTitle, type BoardRow, type DeathView } from './hud.js';
+import { Hud, cssColor, type BoardRow } from './hud.js';
 import { Input } from './input.js';
 import { NetClient } from './net.js';
 import { saveProfile } from './profileStore.js';
@@ -99,12 +102,32 @@ export class Game {
   private selfId = 0;
   private offline: Sim | null = null;
   private acc = 0;
-  private sendAcc = 0;
+  private boundary: Ring | null = null;
+  private predPrevX = 0;
+  private predPrevY = 0;
+  private predPrevH = 0;
+  private predAcc = 0;
+  private readonly predHist: Array<{ seq: number; x: number; y: number; h: number; dx: number; dy: number; mul: number }> = [];
+  private offX = 0;
+  private offY = 0;
+  private offH = 0;
+  private offVx = 0;
+  private offVy = 0;
+  private offVh = 0;
+  private localDashUntil = 0;
+  private remoteClock = 0;
+  private remoteInit = false;
+  private frameDt = 0;
+  private winTimer = 0;
+  /** Elimination beat before the title screen. The camera stays where the pet fell. */
+  private homeTimer = 0;
+  private homeReward: { coins: number; xp: number; levelUp: boolean } | null = null;
   private seq = 1;
   private alpha = 1;
   private snapCam = false;
   private serverTick = 0;
   private serverTickAt = 0;
+  private serverAck = 0;
   private steerUntil = 0;
   private hitLeft = 0;
   private previewSpecies: number | null = null;
@@ -127,6 +150,12 @@ export class Game {
   private predDX = 0;
   private predDY = 0;
   private predPrimed = false;
+  /** Last rendered own-pet position, in cells. Metrics and the trail both use this. */
+  private shownX = 0;
+  private shownY = 0;
+  private shownH = 0;
+  /** Reconciliation steps whose error exceeded half a cell. */
+  private fixCount = 0;
   private displayName = 'You';
   private arenaArea = ringArea(mapBlob(1, CONFIG.gridW, CONFIG.gridH));
   private readonly readPickup = (id: number, kind: number, x: number, y: number) => {
@@ -211,6 +240,21 @@ export class Game {
         this.input.desiredY = y;
       },
       project: (x: number, y: number) => this.renderer.project(x, 0, y),
+      feel: () => {
+        const cam = this.renderer.frameCam();
+        const screen = this.renderer.project(this.shownX, 0, this.shownY);
+        return {
+          x: this.shownX,
+          y: this.shownY,
+          h: this.shownH,
+          sx: screen.x,
+          sy: screen.y,
+          camX: cam.x,
+          camY: cam.y,
+          camZ: cam.z,
+          fixes: this.fixCount,
+        };
+      },
       showPets: () => this.collection.showPets(),
       showBoxes: () => this.collection.showBoxes(),
       cast: (kind?: string) => this.cast(kind),
@@ -236,6 +280,13 @@ export class Game {
     this.shownKills = 0;
     this.shownPct = 0;
     this.peakPct = 0;
+    this.winTimer = 0;
+    this.homeTimer = 0;
+    this.homeReward = null;
+    this.pendingWin = null;
+    this.fixCount = 0;
+    this.hud.hideWin();
+    this.hud.hideOut();
     this.hud.showDeath(null);
     this.hud.setYou('0.0%', 0, 0);
     this.displayName = readName();
@@ -262,18 +313,8 @@ export class Game {
       });
       this.net.send({ t: 'play' });
       this.phase = 'playing';
-    } else if (this.offline) {
-      const again = this.offline.players[this.selfId];
-      if (again) again.level = Math.max(1, Math.min(CONFIG.levelCap, this.equipped().level | 0));
-      this.offline.land.beginTick();
-      this.offline.respawn(this.selfId);
-      this.consume(this.offline.consumeEvents());
-      this.syncOffline(this.offline, false);
-      this.phase = 'playing';
-      this.snapCam = true;
-      this.alpha = 1;
-      this.acc = 0;
     } else {
+      this.offline = null;
       this.startOffline();
     }
   }
@@ -329,9 +370,19 @@ export class Game {
     const stick = this.input.stick();
     this.hud.setStick(stick.x, stick.y, stick.dx, stick.dy, stick.on && this.phase === 'playing');
     if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
+    this.frameDt = dt;
     if (this.phase === 'playing') {
-      if (this.offline) this.stepOffline(frame);
-      else this.stepOnline(frame);
+      if (this.offline) this.stepOffline(dt);
+      else this.stepOnline(dt);
+      this.hud.setLeft(this.aliveCount());
+    }
+    if (this.winTimer > 0) {
+      this.winTimer -= dt;
+      if (this.winTimer <= 0) this.finishWin();
+    }
+    if (this.homeTimer > 0) {
+      this.homeTimer -= dt;
+      if (this.homeTimer <= 0) this.returnHome();
     }
     this.hud.showAbility(this.phase === 'playing');
     if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
@@ -359,10 +410,9 @@ export class Game {
     if (!sim) return;
     const tickDt = sim.tickDt;
     this.acc += dt;
-    let steps = 0;
-    while (this.acc >= tickDt && steps < 4) {
+    if (this.acc > tickDt * 2) this.acc = tickDt * 2;
+    if (this.acc >= tickDt) {
       this.acc -= tickDt;
-      steps++;
       const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
       if (mag > 0.15) sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, this.seq++);
       sim.step({ humans: 1 });
@@ -380,22 +430,64 @@ export class Game {
       this.predDX = this.input.desiredX / mag;
       this.predDY = this.input.desiredY / mag;
     }
-    if (this.predPrimed) {
+    const tickDt = 1 / CONFIG.tickHz;
+    this.predAcc += dt;
+    // One local step per server step. A short lead covers the round trip; past that we wait
+    // instead of sprinting ahead and rubber-banding back. Time spent waiting must not bank
+    // up, or the next step appears all at once.
+    const lead = 8;
+    const canStep = this.predPrimed && this.seq - this.serverAck < lead;
+    if (!canStep) {
+      if (this.predAcc > tickDt) this.predAcc = tickDt;
+    } else if (this.predAcc > tickDt * 2) {
+      this.predAcc = tickDt * 2;
+    }
+    if (canStep && this.predAcc >= tickDt) {
+      this.predAcc -= tickDt;
+      this.predPrevX = this.predX;
+      this.predPrevY = this.predY;
+      this.predPrevH = this.predH;
+      const mul = this.predSpeedMul();
       this.body.x = this.predX;
       this.body.y = this.predY;
       this.body.heading = this.predH;
       this.body.desiredX = this.predDX;
       this.body.desiredY = this.predDY;
-      const mul = this.predSpeedMul();
-      integrateBody(this.body, dt, mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul });
+      const cfg = mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul };
+      integrateBody(this.body, tickDt, cfg, undefined, this.boundary ?? undefined);
       this.predX = this.body.x;
       this.predY = this.body.y;
       this.predH = this.body.heading;
+      this.seq++;
+      this.net.send({ t: 'input', seq: this.seq, x: this.predDX, y: this.predDY });
+      this.predHist.push({
+        seq: this.seq,
+        x: this.predX,
+        y: this.predY,
+        h: this.predH,
+        dx: this.predDX,
+        dy: this.predDY,
+        mul,
+      });
+      if (this.predHist.length > 48) this.predHist.shift();
     }
-    this.sendAcc += dt;
-    if (this.sendAcc >= CONFIG.tickHz ** -1) {
-      this.sendAcc = 0;
-      this.net.send({ t: 'input', seq: this.seq++, x: this.predDX, y: this.predDY });
+    this.decayOffset(dt);
+  }
+
+  private decayOffset(dt: number): void {
+    const w = 20;
+    [this.offX, this.offVx] = springTo(this.offX, this.offVx, 0, dt, w);
+    [this.offY, this.offVy] = springTo(this.offY, this.offVy, 0, dt, w);
+    [this.offH, this.offVh] = springTo(this.offH, this.offVh, 0, dt, w);
+    if (this.offX * this.offX + this.offY * this.offY < 1e-4 && this.offVx * this.offVx + this.offVy * this.offVy < 1e-3) {
+      this.offX = 0;
+      this.offY = 0;
+      this.offVx = 0;
+      this.offVy = 0;
+    }
+    if (Math.abs(this.offH) < 1e-3 && Math.abs(this.offVh) < 1e-2) {
+      this.offH = 0;
+      this.offVh = 0;
     }
   }
 
@@ -466,12 +558,21 @@ export class Game {
 
   private applyArena(seed: number): void {
     const ring = mapBlob(seed >>> 0, CONFIG.gridW, CONFIG.gridH);
+    this.boundary = ring;
     this.arenaArea = ringArea(ring);
     this.renderer.setBoundary(ring);
   }
 
   private onWelcome(msg: WelcomeMsg): void {
     this.selfId = msg.id;
+    this.seq = 0;
+    this.predPrimed = false;
+    this.predHist.length = 0;
+    this.offX = this.offY = this.offH = 0;
+    this.offVx = this.offVy = this.offVh = 0;
+    this.fixCount = 0;
+    this.remoteInit = false;
+    this.territory.clearAll();
     if (Number.isFinite(msg.seed)) this.applyArena(msg.seed);
     for (const n of msg.names) {
       const ent = this.ents[n.i];
@@ -487,6 +588,16 @@ export class Game {
   private onDelta(msg: DeltaMsg): void {
     this.serverTick = msg.tick;
     this.serverTickAt = performance.now();
+    this.serverAck = msg.ack;
+    if (msg.events) {
+      for (const ev of msg.events) {
+        if (ev.e !== 'kill') continue;
+        const stolen = cloneMulti(this.territory.polygon(ev.victim));
+        if (stolen.length === 0) continue;
+        const rgb = PALETTE[(Math.max(1, ev.victim) - 1) % PALETTE.length]!;
+        this.renderer.sweepLand(stolen, rgb[0], rgb[1], rgb[2], ev.x, ev.y);
+      }
+    }
     if (msg.lands && msg.lands.length > 0) this.territory.applyEncoded(msg.lands);
     if (msg.events) this.applyEvents(msg.events);
     for (const snap of msg.ents) this.applySnap(snap);
@@ -503,33 +614,99 @@ export class Game {
     const self = this.ents[this.selfId];
     if (self && msg.you) {
       if (!this.predPrimed) {
-        this.predX = msg.you[0];
-        this.predY = msg.you[1];
-        this.predH = msg.you[2];
+        this.predX = this.predPrevX = msg.you[0];
+        this.predY = this.predPrevY = msg.you[1];
+        this.predH = this.predPrevH = msg.you[2];
+        this.predAcc = 0;
+        this.seq = msg.ack;
+        this.serverAck = msg.ack;
+        this.predDX = Math.cos(this.predH);
+        this.predDY = Math.sin(this.predH);
+        this.offX = this.offY = this.offH = 0;
         this.predPrimed = true;
         this.snapCam = true;
       } else if (self.alive) {
-        this.reconcile(msg.you[0], msg.you[1], msg.you[2]);
+        this.reconcile(msg.you[0], msg.you[1], msg.you[2], msg.ack);
       }
     }
   }
 
-  private reconcile(sx: number, sy: number, sh: number): void {
-    const dx = sx - this.predX;
-    const dy = sy - this.predY;
-    const err = Math.hypot(dx, dy);
-    const lead = CONFIG.speed * this.predSpeedMul() * Math.min(0.3, Math.max(0.05, this.net.ping / 1000));
-    if (err > lead + 1.8) {
+  /** Blend a server correction into the predicted pet. The picture never snaps. */
+  private reconcile(sx: number, sy: number, sh: number, ack: number): void {
+    let sample: (typeof this.predHist)[number] | null = null;
+    for (let i = this.predHist.length - 1; i >= 0; i--) {
+      if (this.predHist[i]!.seq <= ack) {
+        sample = this.predHist[i]!;
+        break;
+      }
+    }
+    if (!sample) return;
+    const err = Math.hypot(sx - sample.x, sy - sample.y);
+    const herr = Math.abs(angleDelta(sample.h, sh));
+    if (err < 0.28 && herr < 0.1) return;
+    if (err > 0.5) this.fixCount++;
+    if (err > 8) {
+      this.snapPredict(sx, sy, sh);
+      return;
+    }
+    const shown = this.renderedPredict();
+    let x = sx;
+    let y = sy;
+    let h = sh;
+    const future = this.predHist.filter((s) => s.seq > sample.seq);
+    const tickDt = 1 / CONFIG.tickHz;
+    for (const s of future) {
+      const body = { x, y, heading: h, desiredX: s.dx, desiredY: s.dy };
+      const mul = s.mul;
+      const cfg = mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul };
+      integrateBody(body, tickDt, cfg, undefined, this.boundary ?? undefined);
+      x = body.x;
+      y = body.y;
+      h = body.heading;
+      s.x = x;
+      s.y = y;
+      s.h = h;
+    }
+    if (future.length > 0) {
+      const last = future[future.length - 1]!;
+      const prev = future.length > 1 ? future[future.length - 2]! : { x: sx, y: sy, h: sh };
+      this.predPrevX = prev.x;
+      this.predPrevY = prev.y;
+      this.predPrevH = prev.h;
+      this.predX = last.x;
+      this.predY = last.y;
+      this.predH = last.h;
+    } else {
+      this.predPrevX = sx;
+      this.predPrevY = sy;
+      this.predPrevH = sh;
       this.predX = sx;
       this.predY = sy;
       this.predH = sh;
-      return;
     }
-    if (err > lead + 0.55 && err > 0.001) {
-      const extra = err - lead;
-      this.predX += (dx / err) * extra * 0.35;
-      this.predY += (dy / err) * extra * 0.35;
-    }
+    const next = this.renderedPredict();
+    this.offX += shown.x - next.x;
+    this.offY += shown.y - next.y;
+    this.offH += angleDelta(next.h, shown.h);
+  }
+
+  private renderedPredict(): { x: number; y: number; h: number } {
+    const tickDt = 1 / CONFIG.tickHz;
+    const t = tickDt > 0 ? Math.min(1, this.predAcc / tickDt) : 1;
+    return {
+      x: this.predPrevX + (this.predX - this.predPrevX) * t + this.offX,
+      y: this.predPrevY + (this.predY - this.predPrevY) * t + this.offY,
+      h: lerpAngle(this.predPrevH, this.predH, t) + this.offH,
+    };
+  }
+
+  private snapPredict(x: number, y: number, h: number): void {
+    this.predPrevX = this.predX = x;
+    this.predPrevY = this.predY = y;
+    this.predPrevH = this.predH = h;
+    this.offX = this.offY = this.offH = 0;
+    this.offVx = this.offVy = this.offVh = 0;
+    this.predHist.length = 0;
   }
 
   private applySnap(snap: EntSnap): void {
@@ -571,6 +748,12 @@ export class Game {
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
     for (let i = 0; i < ent.trainShown; i++) ent.train[i] = snap.tr[i] ?? 0;
+    if (ent.sn > 0) {
+      // A respawn or a recall moves farther in one tick than any glide can. Pop to the
+      // new spot instead of sliding across the map between the two snapshots.
+      const last = (ent.sc + 7) % 8;
+      if (Math.hypot(snap.x - ent.sx[last]!, snap.y - ent.sz[last]!) > 6) ent.sn = 0;
+    }
     ent.sx[ent.sc] = snap.x;
     ent.sz[ent.sc] = snap.y;
     ent.sh[ent.sc] = snap.h;
@@ -585,7 +768,16 @@ export class Game {
   }
 
   private consume(events: WireEvent[]): void {
-    if (this.offline) this.territory.adopt(this.offline.land, this.offline.land.changedIds());
+    if (this.offline) {
+      for (const ev of events) {
+        if (ev.e !== 'kill') continue;
+        const stolen = cloneMulti(this.territory.polygon(ev.victim));
+        if (stolen.length === 0) continue;
+        const rgb = PALETTE[(Math.max(1, ev.victim) - 1) % PALETTE.length]!;
+        this.renderer.sweepLand(stolen, rgb[0], rgb[1], rgb[2], ev.x, ev.y);
+      }
+      this.territory.adopt(this.offline.land, this.offline.land.changedIds());
+    }
     this.applyEvents(events);
   }
 
@@ -635,6 +827,9 @@ export class Game {
         }
       } else if (ev.e === 'die') {
         if (ev.id === this.selfId && !this.died) this.onDeath(ev);
+      } else if (ev.e === 'win') {
+        if (ev.id === this.selfId) this.onWin(ev);
+        else this.hud.winBanner(`${ev.name} conquered the map!`);
       } else if (ev.e === 'pickup' && ev.id === this.selfId) {
         const p = this.renderer.project(ev.x, 1.2, ev.y);
         if (ev.kind === 2) this.hud.popup(p.x, p.y, 'Loot!', 'loot');
@@ -656,32 +851,19 @@ export class Game {
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     if (me) me.alive = false;
     this.updateBoard();
-    const before = this.equipped().level;
-    const levels = applyXp(this.equipped(), Math.round(ev.xp), CONFIG.levelCap);
-    this.profile.coins += ev.coins;
-    saveProfile(this.profile);
+    this.grantRun(ev.coins, ev.xp);
     this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills, ev.train);
-    const need = xpForLevel(this.equipped().level);
-    const rows: DeathView['rows'] = [
-      { k: 'Territory', v: `${pctNum.toFixed(1)}%`, icon: '▣' },
-      { k: 'Rank', v: `#${ev.rank}`, icon: '#' },
-      { k: 'Kills', v: String(ev.kills), icon: '⚔' },
-      { k: 'Train', v: String(ev.train), icon: '🐾' },
-      { k: 'Coins', v: `+${ev.coins}`, icon: '🪙' },
-      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.equipped().xp / need : 1 },
-      { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
-    ];
-    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.equipped().level}`, icon: '▲', up: true });
-    const unlocked = levels > 0 ? gainedUnlocks(before, this.equipped().level) : [];
-    const celebrate = levels > 0 ? `Level ${this.equipped().level}${unlocked.length ? ' · ' + unlocked.join(' · ') : ''}` : '';
     this.hud.hideSteer();
-    this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows, celebrate });
+    this.hud.showHud(false);
+    this.hud.showDeath(null);
+    this.hud.showOut(`Out - ${placeLabel(ev.rank, ev.total)}`);
+    this.homeTimer = 1.3;
     buzz(20);
   }
 
   private fillDraw(): number {
     let n = 0;
-    const renderTick = this.offline ? 0 : this.serverTick + ((performance.now() - this.serverTickAt) / 1000) * CONFIG.tickHz - 2;
+    const renderTick = this.offline ? 0 : this.presentationTick();
     for (let id = 1; id < this.ents.length && n < this.drawPets.length; id++) {
       const ent = this.ents[id]!;
       if (!ent.used) continue;
@@ -715,11 +897,18 @@ export class Game {
         draw.z = ent.prevZ + (ent.z - ent.prevZ) * t;
         draw.h = lerpAngle(ent.prevH, ent.h, t);
       } else if (draw.self && this.predPrimed) {
-        draw.x = this.predX;
-        draw.z = this.predY;
-        draw.h = this.predH;
+        const tickDt = 1 / CONFIG.tickHz;
+        const t = tickDt > 0 ? Math.min(1, this.predAcc / tickDt) : 1;
+        draw.x = this.predPrevX + (this.predX - this.predPrevX) * t + this.offX;
+        draw.z = this.predPrevY + (this.predY - this.predPrevY) * t + this.offY;
+        draw.h = lerpAngle(this.predPrevH, this.predH, t) + this.offH;
       } else {
         sampleEnt(ent, renderTick, draw);
+      }
+      if (draw.self) {
+        this.shownX = draw.x;
+        this.shownY = draw.z;
+        this.shownH = draw.h;
       }
     }
     return n;
@@ -903,6 +1092,7 @@ export class Game {
       xp: pet.level >= CONFIG.levelCap ? 1 : need > 0 ? pet.xp / need : 0,
       boost,
       unlocks: unlockNames(pet.level),
+      reward: this.homeReward,
     };
   }
 
@@ -917,14 +1107,92 @@ export class Game {
   private predSpeedMul(): number {
     const pet = this.equipped();
     const status = this.ents[this.selfId]?.status ?? 0;
+    const dashing = (status & 1) !== 0 || performance.now() < this.localDashUntil;
     return speedMultiplier(
       pet.rarity,
       pet.passives[pet.equippedPassive],
-      (status & 1) !== 0,
+      dashing,
       (status & 4) !== 0 ? CONFIG.abilities.frostSlow : null,
       CONFIG,
       pet.level,
     );
+  }
+
+  private presentationTick(): number {
+    const target = this.serverTick + ((performance.now() - this.serverTickAt) / 1000) * CONFIG.tickHz - 2;
+    if (!this.remoteInit) {
+      this.remoteClock = target;
+      this.remoteInit = true;
+      return this.remoteClock;
+    }
+    const step = Math.max(0, this.frameDt) * CONFIG.tickHz;
+    const err = target - this.remoteClock;
+    if (Math.abs(err) > 10) {
+      // Far off (tab was hidden, room changed): jump once instead of fast-forwarding.
+      this.remoteClock = target;
+      return this.remoteClock;
+    }
+    // Slew, never jump. A late packet slows the clock a little; a burst speeds it up a
+    // little. Snapping to the target made every remote pet hop on each hiccup.
+    let rate = Math.max(0.6, Math.min(1.4, 1 + err * 0.35));
+    // Ease off as the clock nears the newest snapshot, so a long stall glides to a stop
+    // rather than running out of buffer and then leaping when data returns.
+    const lead = this.serverTick - this.remoteClock;
+    if (lead < 1) rate *= Math.max(0, lead);
+    this.remoteClock += step * rate;
+    return this.remoteClock;
+  }
+
+  private aliveCount(): number {
+    let n = 0;
+    for (const ent of this.ents) if (ent.used && ent.alive) n++;
+    return n;
+  }
+
+  private pendingWin: Extract<WireEvent, { e: 'win' }> | null = null;
+
+  private onWin(ev: Extract<WireEvent, { e: 'win' }>): void {
+    this.pendingWin = ev;
+    this.winTimer = 1.7;
+    this.hud.winBanner('You conquered the map!');
+    this.renderer.confetti(ev.id === this.selfId ? this.shownX : 0, ev.id === this.selfId ? this.shownY : 0);
+  }
+
+  private finishWin(): void {
+    const ev = this.pendingWin;
+    this.pendingWin = null;
+    this.hud.hideWin();
+    if (!ev || this.died) return;
+    this.died = true;
+    this.grantRun(ev.coins, ev.xp);
+    this.returnHome();
+  }
+
+  /** Bank a run's coins and XP, and remember the line the home card will count up. */
+  private grantRun(coins: number, xp: number): void {
+    const levels = applyXp(this.equipped(), Math.round(xp), CONFIG.levelCap);
+    this.profile.coins += Math.round(coins);
+    saveProfile(this.profile);
+    this.homeReward = {
+      coins: Math.max(0, Math.round(coins)),
+      xp: Math.max(0, Math.round(xp)),
+      levelUp: levels > 0,
+    };
+  }
+
+  /** Leave the held camera and sit on the title menu. Play starts a fresh round. */
+  private returnHome(): void {
+    this.homeTimer = 0;
+    this.winTimer = 0;
+    this.pendingWin = null;
+    this.phase = 'title';
+    this.api.phase = 'title';
+    this.hud.hideWin();
+    this.hud.hideOut();
+    this.hud.showDeath(null);
+    this.hud.showHud(false);
+    this.hud.showTitle(true);
+    this.hud.setPetCard(this.cardView());
   }
 
   private equipped(): PetInstance {
@@ -934,6 +1202,10 @@ export class Game {
   private cast(kind?: string): void {
     if (this.phase !== 'playing') return;
     if (!this.offline) {
+      const pet = this.equipped();
+      if (pet.actives[pet.equippedActive] === 'dash') {
+        this.localDashUntil = performance.now() + effectOf(CONFIG.abilities.dashSec, pet.rarity, CONFIG, pet.level) * 1000;
+      }
       this.net.send({ t: 'ability' });
       return;
     }
@@ -1058,9 +1330,22 @@ function readName(): string {
   return name || 'You';
 }
 
-function formatTime(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`;
+/** Critically damped spring toward `target`. Closed form, so a hitch cannot ring. */
+function springTo(pos: number, vel: number, target: number, dt: number, w: number): [number, number] {
+  const t = Math.max(0, dt);
+  const x = pos - target;
+  const e = Math.exp(-w * t);
+  const b = vel + w * x;
+  const next = (x + b * t) * e;
+  return [target + next, (b - w * (x + b * t)) * e];
+}
+
+function placeLabel(rank: number, total: number): string {
+  const n = Math.max(1, rank | 0);
+  const mod = n % 100;
+  const suf = mod >= 11 && mod <= 13 ? 'th' : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th';
+  const of = Math.max(n, total | 0);
+  return `${n}${suf} of ${of}`;
 }
 
 function buzz(ms: number): void {
@@ -1111,6 +1396,17 @@ declare global {
       landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
       steer: (x: number, y: number) => void;
       project: (x: number, y: number) => { x: number; y: number; ok: boolean };
+      feel: () => {
+        x: number;
+        y: number;
+        h: number;
+        sx: number;
+        sy: number;
+        camX: number;
+        camY: number;
+        camZ: number;
+        fixes: number;
+      };
       showPets: () => void;
       showBoxes: () => void;
       cast: (kind?: string) => void;
