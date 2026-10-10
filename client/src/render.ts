@@ -46,10 +46,15 @@ import type { Territory } from './territory.js';
 
 const WORLD = CONFIG.worldScale;
 /**
- * Kenney pets face +Z, and placePet turns them by π/2 − heading.
- * Heading ≈ 0.6 showed the back. π past that is a 3/4 front.
+ * Kenney cube pets face +Z. On the tiger, lion, pig, and cat the front
+ * legs and the painted face sit on +Z and the tail sits on −Z.
+ * placePet yaws by π/2 − heading, then the scene mirror flips X.
+ * 2π/3 aims that +Z face at the home camera, 30° off axis, so the
+ * eyes read in a 3/4 view on Home, portraits, detail, and the reveal.
  */
-const HOME_FACE = Math.PI + 0.55;
+const HOME_FACE = Math.PI / 2 + Math.PI / 6;
+/** Top of the home pedestal. placePet adds 0.24, so feet use this minus 0.24. */
+const PODIUM_TOP = 0.23;
 /** Pale playable ground. Inside the blob this is the clear color, so it costs no fragments. */
 const FLOOR_COLOR = 0xe7edf3;
 /** Dark surround. Drawn only as the ring outside the blob. */
@@ -808,21 +813,21 @@ export class Renderer {
     for (let id = 0; id <= 16; id++) this.landParts.push(null);
     this.setBoundary(mapBlob(1, territory.gridW, territory.gridH));
 
-    const foot = new Mesh(new CylinderGeometry(0.98, 1.08, 0.16, 40), new MeshLambertMaterial({ color: 0xffe4c4 }));
-    foot.position.y = 0.08;
-    const platformGeo = new CylinderGeometry(0.58, 0.74, 0.28, 40);
+    const foot = new Mesh(new CylinderGeometry(0.62, 0.7, 0.07, 40), new MeshLambertMaterial({ color: 0xffe4c4 }));
+    foot.position.y = 0.035;
+    const platformGeo = new CylinderGeometry(0.56, 0.66, 0.16, 40);
     this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: 0xfff6e4 }));
-    this.platform.position.y = 0.3;
+    this.platform.position.y = 0.15;
     const podiumRing = new Mesh(
-      new TorusGeometry(0.64, 0.045, 10, 48),
+      new TorusGeometry(0.58, 0.032, 10, 48),
       new MeshBasicMaterial({ color: 0xffd23f, toneMapped: false }),
     );
     podiumRing.rotation.x = Math.PI / 2;
-    podiumRing.position.y = 0.45;
+    podiumRing.position.y = PODIUM_TOP + 0.01;
     this.podium = podiumRing;
     const podiumShadow = new Mesh(
-      new CircleGeometry(1.25, 32),
-      new MeshBasicMaterial({ color: 0x6e88aa, transparent: true, opacity: 0.28, depthWrite: false, toneMapped: false }),
+      new CircleGeometry(0.58, 32),
+      new MeshBasicMaterial({ color: 0x6e88aa, transparent: true, opacity: 0.22, depthWrite: false, toneMapped: false }),
     );
     podiumShadow.rotation.x = -Math.PI / 2;
     podiumShadow.position.y = 0.012;
@@ -954,14 +959,16 @@ export class Renderer {
       new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false }),
     );
     this.ring.visible = false;
+    this.ring.renderOrder = 4;
     this.scene.add(this.ring);
-    const pulseGeo = new RingGeometry(0.78, 1.05, 32);
+    const pulseGeo = new RingGeometry(0.9, 1.28, 40);
     pulseGeo.rotateX(-Math.PI / 2);
     this.pulse = new Mesh(
       pulseGeo,
       new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false }),
     );
     this.pulse.visible = false;
+    this.pulse.renderOrder = 4;
     this.scene.add(this.pulse);
     const arrow = new Shape();
     arrow.moveTo(0.48, 0);
@@ -976,6 +983,7 @@ export class Renderer {
       new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false, side: DoubleSide }),
     );
     this.nudge.visible = false;
+    this.nudge.renderOrder = 5;
     this.scene.add(this.nudge);
 
     const flashGeo = new RingGeometry(0.7, 0.95, 36);
@@ -1609,7 +1617,7 @@ export class Renderer {
       const hop = wig > 0 ? Math.sin(Math.min(1, wig) * Math.PI) * 0.42 : 0;
       const bounce = Math.abs(Math.sin(this.time * 3.2));
       const squash = 1 + (1 - bounce) * 0.06 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
-      // About 55% of a portrait width. The pet sits on the pedestal, face toward the camera.
+      // Feet rest on the pedestal. The bounce is a small hop, not a hover.
       const portrait = this.camera.aspect < 0.95;
       let lookX = portrait ? 0 : 1.15;
       let lookY = portrait ? 0.48 : 0.62;
@@ -1629,13 +1637,14 @@ export class Renderer {
         camZ = 5.1;
         body = 0.72;
       }
-      const yaw = HOME_FACE + Math.sin(this.time * 0.7) * 0.1;
+      const yaw = HOME_FACE + Math.sin(this.time * 0.7) * 0.08;
+      const feetY = PODIUM_TOP - 0.24 - 0.02 + bounce * bounce * 0.03 + hop;
       if (mesh) {
-        this.placePet(mesh, 0, 0, 0.22 + bounce * bounce * 0.2 + hop, 0, yaw + wig * 0.5, wig * 0.28, body, squash, this.heroRecolor);
+        this.placePet(mesh, 0, 0, feetY, -0.05, yaw + wig * 0.5, wig * 0.28, body, squash, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      this.place(this.shadows, 0, 0, 0.46, 0, 0, 0, 0.55);
+      this.place(this.shadows, 0, 0, PODIUM_TOP + 0.012, 0, 0, 0, 0.34);
       this.shadows.count = 1;
       this.shadows.instanceMatrix.needsUpdate = true;
       this.camera.up.set(0, 1, 0);
@@ -1782,31 +1791,34 @@ export class Renderer {
           this.holdX = pet.x;
           this.holdZ = pet.z;
           this.ring.visible = true;
-          this.ring.position.set(wx, 0.04, wz);
+          const floorY = SLAB_H + 0.08;
+          this.ring.position.set(wx, floorY, wz);
           const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
           const ringMat = this.ring.material as MeshBasicMaterial;
           ringMat.color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
           if (this.parkHint) {
             const beat = 0.5 + 0.5 * Math.sin(this.time * 5.4);
-            const ringScale = 0.76 + beat * 0.46;
+            const ringScale = 2.15 + beat * 0.45;
             this.ring.scale.set(ringScale, 1, ringScale);
-            ringMat.opacity = 0.38 + beat * 0.55;
+            ringMat.color.set(0xffffff);
+            ringMat.opacity = 0.95;
             this.pulse.visible = true;
-            const wave = (this.time * 0.9) % 1;
-            const ps = 0.82 + wave * 1.2;
-            this.pulse.position.set(wx, 0.05, wz);
+            const wave = (this.time * 0.85) % 1;
+            const ps = 1.7 + wave * 2.1;
+            this.pulse.position.set(wx, floorY + 0.02, wz);
             this.pulse.scale.set(ps, 1, ps);
             const pulseMat = this.pulse.material as MeshBasicMaterial;
-            pulseMat.color.copy(ringMat.color);
-            pulseMat.opacity = (1 - wave) * 0.55;
+            pulseMat.color.set(0xffe14a);
+            pulseMat.opacity = 0.35 + (1 - wave) * 0.6;
             this.nudge.visible = true;
             const h = pet.h;
-            const dist = 1.12 + beat * 0.18;
-            this.nudge.position.set(wx + Math.cos(h) * dist, 0.08, wz + Math.sin(h) * dist);
+            const dist = 2.15 + beat * 0.28;
+            this.nudge.position.set(wx + Math.cos(h) * dist, floorY + 0.04, wz + Math.sin(h) * dist);
             this.nudge.rotation.y = -h;
-            this.nudge.scale.setScalar(0.92 + beat * 0.22);
+            this.nudge.scale.setScalar(2.6 + beat * 0.45);
             const nudgeMat = this.nudge.material as MeshBasicMaterial;
-            nudgeMat.color.copy(ringMat.color);
+            nudgeMat.color.set(0xffffff);
+            nudgeMat.opacity = 1;
           } else {
             const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
             this.ring.scale.set(ringScale, 1, ringScale);
@@ -2502,9 +2514,10 @@ export class Renderer {
     for (const mesh of this.pets) mesh.material = mat;
     const size = 180;
     const rt = new WebGLRenderTarget(size, size);
-    this.camera.position.set(0.72, 0.78, 2.55);
+    // On the +Z axis, same 30° the home camera sees. High enough that ears stay in frame.
+    this.camera.position.set(0, 1.02, 2.85);
     this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(0, 0.52, 0);
+    this.camera.lookAt(0, 0.92, 0);
     this.camera.aspect = 1;
     this.camera.updateProjectionMatrix();
     this.renderer.setClearColor(0xf4fbff, 1);

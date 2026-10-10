@@ -84,24 +84,46 @@ export class Collection {
   private paintGrid(): void {
     const grid = must('pet-grid');
     grid.replaceChildren();
-    const equipped = equippedPet(this.profile).instanceId;
+    const equipped = equippedPet(this.profile);
+    const owned = new Map<number, PetInstance>();
     for (const pet of this.profile.pets) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'pcard' + (pet.rarity === 'legendary' ? ' legendary' : '') + (pet.instanceId === equipped ? ' on' : '');
-      card.style.borderColor = RARITY_COLOR[pet.rarity];
-      const species = SPECIES[pet.species] ?? 'cat';
-      const portrait = this.host.portrait(pet.species);
-      card.classList.add(`rarity-${pet.rarity}`);
-      card.innerHTML =
+      const prev = owned.get(pet.species);
+      if (!prev || pet.instanceId === equipped.instanceId || (prev.instanceId !== equipped.instanceId && pet.level > prev.level)) {
+        owned.set(pet.species, pet);
+      }
+    }
+    must('pet-count').textContent = `Collected ${owned.size}/${SPECIES.length}`;
+    for (let speciesId = 0; speciesId < SPECIES.length; speciesId++) {
+      const pet = owned.get(speciesId);
+      const species = SPECIES[speciesId] ?? 'cat';
+      const portrait = this.host.portrait(speciesId);
+      if (pet) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'pcard' + (pet.rarity === 'legendary' ? ' legendary' : '') + (pet.instanceId === equipped.instanceId ? ' on' : '');
+        card.style.borderColor = RARITY_COLOR[pet.rarity];
+        card.classList.add(`rarity-${pet.rarity}`);
+        card.innerHTML =
+          `<span class="portrait-wrap">` +
+          (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
+          `<span class="lv-badge">${pet.level}</span>` +
+          `</span>` +
+          `<b>${SPECIES_LABEL[species]}</b>` +
+          `<span class="rare-name">${label(pet.rarity)}</span>`;
+        card.addEventListener('click', () => this.showDetail(pet));
+        grid.appendChild(card);
+        continue;
+      }
+      const locked = document.createElement('div');
+      locked.className = 'pcard locked';
+      locked.innerHTML =
         `<span class="portrait-wrap">` +
         (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
-        `<span class="lv-badge">${pet.level}</span>` +
+        `<span class="lock-mark">?</span>` +
         `</span>` +
         `<b>${SPECIES_LABEL[species]}</b>` +
-        `<span class="rare-name">${label(pet.rarity)}</span>`;
-      card.addEventListener('click', () => this.showDetail(pet));
-      grid.appendChild(card);
+        `<span class="find">Find in Mystery Boxes</span>`;
+      grid.appendChild(locked);
     }
   }
 

@@ -69,7 +69,12 @@
             <span id="you-train">0</span>
           </div>
         </div>
-        <div id="steer" class="steer hide">Drag anywhere to move</div>
+        <div id="steer" class="steer hide">
+          <svg class="steer-hand" viewBox="0 0 48 48" aria-hidden="true">
+            <path fill="currentColor" d="M22 4c-1.8 0-3.2 1.4-3.2 3.2v12.4c-1.3-.9-3-1.1-4.5-.2-2 1.1-2.7 3.6-1.6 5.6l6.4 10.6C21.2 39.6 24.6 42 28.4 42H35c3.9 0 7-3.1 7-7V22.2c0-1.8-1.4-3.2-3.2-3.2-.5 0-1 .1-1.4.3v-3.1c0-1.8-1.4-3.2-3.2-3.2s-3.2 1.4-3.2 3.2v2.6c-.4-.2-.9-.3-1.4-.3-1.8 0-3.2 1.4-3.2 3.2V7.2C26.4 5.4 25 4 23.2 4H22z"/>
+          </svg>
+          <span>Drag anywhere to move</span>
+        </div>
         <button id="ability" class="ability" type="button" aria-label="Ability">
           <svg class="cd" viewBox="0 0 100 100" aria-hidden="true">
             <circle class="cd-track" cx="50" cy="50" r="44"></circle>
@@ -103,6 +108,7 @@
         <div class="meta-bar">
           <button id="pets-back" class="back" type="button">Back</button>
           <h2>Pets</h2>
+          <p id="pet-count" class="pet-count">Collected 0/24</p>
         </div>
         <div id="pet-grid" class="pet-grid"></div>
         <div id="pet-detail" class="pet-detail" hidden>

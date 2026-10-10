@@ -63,9 +63,22 @@ export async function loadPetGeometries(
     merged.computeBoundingBox();
     const bb = merged.boundingBox!;
     const height = Math.max(0.001, bb.max.y - bb.min.y);
-    // Pets are the focus. The ground-color check starts outside this body.
+    // Center on the paws, not the tail. A bbox center leaves the feet hanging off a pedestal.
+    const pos = merged.getAttribute('position');
+    const yCut = bb.min.y + height * 0.12;
+    let sx = 0;
+    let sz = 0;
+    let n = 0;
+    for (let v = 0; v < pos.count; v++) {
+      if (pos.getY(v) > yCut) continue;
+      sx += pos.getX(v);
+      sz += pos.getZ(v);
+      n++;
+    }
+    const cx = n > 0 ? sx / n : (bb.min.x + bb.max.x) / 2;
+    const cz = n > 0 ? sz / n : (bb.min.z + bb.max.z) / 2;
     const scale = 1.32 / height;
-    merged.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+    merged.translate(-cx, -bb.min.y, -cz);
     merged.scale(scale, scale, scale);
     merged.computeVertexNormals();
     geos.push(merged);
