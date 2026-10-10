@@ -38,6 +38,7 @@ export class Room {
   private readonly conns: Conn[] = [];
   constructor(seed = (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0) {
     this.sim = new Sim({}, seed);
+    this.sim.lockstep = true;
   }
 
   hasSlot(): boolean {

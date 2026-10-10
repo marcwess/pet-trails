@@ -16,6 +16,10 @@ export class Player {
   desiredX = 1;
   desiredY = 0;
   lastSeq = 0;
+  /** Inputs waiting for the tick they were sent for. A future seq must not skip ahead. */
+  inSeq: number[] = [];
+  inX: number[] = [];
+  inY: number[] = [];
   land = 0;
   kills = 0;
   coins = 0;
@@ -92,5 +96,8 @@ export class Player {
     this.slowMul = 1;
     // A recycled slot must accept the new client's first input. Stale seqs drop the stick.
     this.lastSeq = 0;
+    this.inSeq.length = 0;
+    this.inX.length = 0;
+    this.inY.length = 0;
   }
 }

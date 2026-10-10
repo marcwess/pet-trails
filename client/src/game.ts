@@ -125,6 +125,7 @@ export class Game {
   private snapCam = false;
   private serverTick = 0;
   private serverTickAt = 0;
+  private serverAck = 0;
   private steerUntil = 0;
   private hitLeft = 0;
   private previewSpecies: number | null = null;
@@ -422,8 +423,17 @@ export class Game {
     }
     const tickDt = 1 / CONFIG.tickHz;
     this.predAcc += dt;
-    if (this.predAcc > tickDt * 2) this.predAcc = tickDt * 2;
-    if (this.predPrimed && this.predAcc >= tickDt) {
+    // One local step per server step. A short lead covers the round trip; past that we wait
+    // instead of sprinting ahead and rubber-banding back. Time spent waiting must not bank
+    // up, or the next step appears all at once.
+    const lead = 8;
+    const canStep = this.predPrimed && this.seq - this.serverAck < lead;
+    if (!canStep) {
+      if (this.predAcc > tickDt) this.predAcc = tickDt;
+    } else if (this.predAcc > tickDt * 2) {
+      this.predAcc = tickDt * 2;
+    }
+    if (canStep && this.predAcc >= tickDt) {
       this.predAcc -= tickDt;
       this.predPrevX = this.predX;
       this.predPrevY = this.predY;
@@ -569,6 +579,7 @@ export class Game {
   private onDelta(msg: DeltaMsg): void {
     this.serverTick = msg.tick;
     this.serverTickAt = performance.now();
+    this.serverAck = msg.ack;
     if (msg.events) {
       for (const ev of msg.events) {
         if (ev.e !== 'kill') continue;
@@ -598,6 +609,10 @@ export class Game {
         this.predY = this.predPrevY = msg.you[1];
         this.predH = this.predPrevH = msg.you[2];
         this.predAcc = 0;
+        this.seq = msg.ack;
+        this.serverAck = msg.ack;
+        this.predDX = Math.cos(this.predH);
+        this.predDY = Math.sin(this.predH);
         this.offX = this.offY = this.offH = 0;
         this.predPrimed = true;
         this.snapCam = true;

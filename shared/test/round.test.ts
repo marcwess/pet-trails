@@ -2,6 +2,49 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Sim } from '../src/sim.ts';
 
+test('queued inputs apply one per tick in order', () => {
+  const sim = new Sim(
+    { gridW: 80, gridH: 80, targetPopulation: 1, pickupTarget: 0, speed: 16.2, turnRate: 6.12, tickHz: 20 },
+    2,
+  );
+  const a = sim.addHuman('A', 0);
+  assert.ok(a);
+  sim.lockstep = true;
+  sim.debugPlace(a.id, 40, 40, 0);
+  sim.setInput(a.id, 1, 0, 1);
+  sim.setInput(a.id, 0, 1, 2);
+  sim.setInput(a.id, -1, 0, 3);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 1);
+  assert.ok(a.x > 40.5, 'first input moves east');
+  const h1 = a.heading;
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 2);
+  assert.ok(a.heading > h1, 'second input starts the turn north');
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 3);
+  const heldX = a.x;
+  const heldY = a.y;
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 3, 'an empty queue does not invent a newer ack');
+  assert.equal(a.x, heldX, 'lockstep holds still until the next input arrives');
+  assert.equal(a.y, heldY);
+  sim.setInput(a.id, 0, 0, 4);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 4, 'a quiet stick still spends the tick');
+  assert.ok(a.x !== heldX || a.y !== heldY);
+  const beforeGap = a.x;
+  sim.setInput(a.id, 0, 1, 6);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 4, 'a missing seq waits instead of skipping ahead');
+  assert.equal(a.x, beforeGap);
+  sim.setInput(a.id, 1, 0, 5);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 5);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 6);
+});
+
 test('last pet standing floods the map and is the winner', () => {
   const sim = new Sim(
     {

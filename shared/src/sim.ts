@@ -76,6 +76,11 @@ export class Sim {
 
   /** Round is closed to new players and dead pets stay dead. */
   sealed = false;
+  /**
+   * Server rooms set this. A human only advances on a tick that consumes one
+   * queued input, so prediction and the ack describe the same steps.
+   */
+  lockstep = false;
   /** 0 while the field is full and the clock is young. 1 when bots should press. */
   heat = 0;
   /** Someone has conquered the map, or the clock named a winner. */
@@ -235,12 +240,49 @@ export class Sim {
   setInput(id: number, x: number, y: number, seq: number): void {
     const p = this.players[id];
     if (!p || !p.active || !p.alive) return;
+    if (seq <= p.lastSeq) return;
+    let nx = x;
+    let ny = y;
     const mag = Math.hypot(x, y);
-    if (mag > 0.15) {
-      p.desiredX = x / mag;
-      p.desiredY = y / mag;
+    if (mag <= 0.15) {
+      // A quiet stick still spends a tick, along the heading already held.
+      // Dropping it would freeze the server while the client keeps gliding.
+      nx = p.desiredX;
+      ny = p.desiredY;
+      const hold = Math.hypot(nx, ny);
+      if (hold <= 1e-6) {
+        nx = Math.cos(p.heading);
+        ny = Math.sin(p.heading);
+      } else {
+        nx /= hold;
+        ny /= hold;
+      }
+    } else {
+      nx /= mag;
+      ny /= mag;
     }
-    if (seq > p.lastSeq) p.lastSeq = seq;
+    const at = p.inSeq.findIndex((s) => s >= seq);
+    if (at >= 0 && p.inSeq[at] === seq) {
+      p.inX[at] = nx;
+      p.inY[at] = ny;
+      return;
+    }
+    const insert = at < 0 ? p.inSeq.length : at;
+    p.inSeq.splice(insert, 0, seq);
+    p.inX.splice(insert, 0, nx);
+    p.inY.splice(insert, 0, ny);
+  }
+
+  /**
+   * One queued input per tick, in seq order. A burst cannot collapse several turns
+   * into one step, and a packet that arrives early waits so a later seq cannot skip ahead.
+   */
+  private applyDueInput(p: Player): boolean {
+    if (p.inSeq.length === 0 || p.inSeq[0] !== p.lastSeq + 1) return false;
+    p.lastSeq = p.inSeq.shift()!;
+    p.desiredX = p.inX.shift()!;
+    p.desiredY = p.inY.shift()!;
+    return true;
   }
 
   maintainBots(humanCount: number): void {
@@ -278,6 +320,10 @@ export class Sim {
 
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
+      if (!p.bot) {
+        const consumed = this.applyDueInput(p);
+        if (this.lockstep && !consumed) continue;
+      }
       p.aliveMs += dt * 1000;
       const x0 = p.x;
       const y0 = p.y;
@@ -894,7 +940,14 @@ export class Sim {
   }
 
   private speedMul(p: Player): number {
-    return speedMultiplier(p.rarity, p.passiveId, this.tick < p.dashUntil, this.tick < p.slowUntil ? p.slowMul : null, this.cfg);
+    return speedMultiplier(
+      p.rarity,
+      p.passiveId,
+      this.tick < p.dashUntil,
+      this.tick < p.slowUntil ? p.slowMul : null,
+      this.cfg,
+      p.level,
+    );
   }
 
   private coinBonus(p: Player, base: number): number {
