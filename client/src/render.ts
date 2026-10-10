@@ -1443,6 +1443,9 @@ export class Renderer {
     this.perf.beginFrame();
 
     if (phase === 'dead') {
+      // The out beat holds the camera, but the land wipe keeps playing, so the
+      // eliminated player watches their color drain into the victor's.
+      this.stepSweeps(dt);
       this.stepParticles(dt);
       this.stepCoins(dt);
       this.stepPops(dt);
