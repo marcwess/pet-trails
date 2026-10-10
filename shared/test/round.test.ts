@@ -23,11 +23,43 @@ test('a late burst of inputs drains two per tick, and a silent client keeps glid
   assert.equal(a.x, x, 'a short gap waits');
   sim.step({ humans: 1 });
   assert.ok(a.x > x, 'a long silence moves along the held heading');
-  assert.equal(a.lastSeq, 6, 'and spends the next seq');
+  assert.equal(a.lastSeq, 5, 'silence does not burn the next sequence number');
   sim.setInput(a.id, 0, 1, 6);
-  sim.setInput(a.id, 1, 0, 7);
   sim.step({ humans: 1 });
-  assert.equal(a.lastSeq, 7, 'the stale input is dropped');
+  assert.equal(a.lastSeq, 6, 'the late stick packet still applies');
+  assert.ok(a.heading > 0.05, 'and it starts the turn');
+});
+
+test('a human with no real input stays put and is never bot-driven', () => {
+  const sim = new Sim(
+    { gridW: 80, gridH: 80, targetPopulation: 1, pickupTarget: 0, speed: 16.2, turnRate: 6.12, tickHz: 20 },
+    4,
+  );
+  sim.lockstep = true;
+  const a = sim.addHuman('A', 0);
+  assert.ok(a);
+  sim.debugPlace(a.id, 40, 40, 0.4);
+  const x = a.x;
+  const y = a.y;
+  const h = a.heading;
+  for (let i = 0; i < 40; i++) sim.step({ humans: 1 });
+  assert.equal(a.bot, false);
+  assert.equal(a.botPhase, 0);
+  assert.equal(a.x, x, 'spawn heading must not walk the pet');
+  assert.equal(a.y, y);
+  assert.equal(a.heading, h);
+  sim.setInput(a.id, 0, 0, 1);
+  sim.step({ humans: 1 });
+  assert.equal(a.x, x, 'a heartbeat is not a steer');
+  assert.equal(a.lastSeq, 1);
+  const leftX = -Math.sin(h);
+  const leftY = Math.cos(h);
+  sim.setInput(a.id, leftX, leftY, 2);
+  sim.step({ humans: 1 });
+  sim.step({ humans: 1 });
+  assert.equal(a.bot, false);
+  assert.equal(a.botPhase, 0);
+  assert.ok(Math.abs(a.heading - h) > 0.1, 'the first real input turns within 100ms');
 });
 
 test('queued inputs apply one per tick in order', () => {

@@ -246,9 +246,16 @@ export class Sim {
     const p = this.players[id];
     if (!p || !p.active || !p.alive) return;
     if (seq <= p.lastSeq) return;
+    const mag = Math.hypot(x, y);
+    const real = mag > 0.15;
+    // A heartbeat before the player has ever steered must not start the pet
+    // walking its spawn heading. Take the seq so the next packet still lines up.
+    if (!real && !p.steered && p.inSeq.length === 0 && seq === p.lastSeq + 1) {
+      p.lastSeq = seq;
+      return;
+    }
     let nx = x;
     let ny = y;
-    const mag = Math.hypot(x, y);
     if (mag <= 0.15) {
       // A quiet stick still spends a tick, along the heading already held.
       // Dropping it would freeze the server while the client keeps gliding.
@@ -270,17 +277,20 @@ export class Sim {
     if (at >= 0 && p.inSeq[at] === seq) {
       p.inX[at] = nx;
       p.inY[at] = ny;
+      p.inReal[at] = real ? 1 : 0;
       return;
     }
     const insert = at < 0 ? p.inSeq.length : at;
     p.inSeq.splice(insert, 0, seq);
     p.inX.splice(insert, 0, nx);
     p.inY.splice(insert, 0, ny);
+    p.inReal.splice(insert, 0, real ? 1 : 0);
     // A client cannot grow the queue without bound.
     if (p.inSeq.length > 64) {
       p.inSeq.splice(0, p.inSeq.length - 64);
       p.inX.splice(0, p.inX.length - 64);
       p.inY.splice(0, p.inY.length - 64);
+      p.inReal.splice(0, p.inReal.length - 64);
       p.lastSeq = p.inSeq[0]! - 1;
     }
   }
@@ -301,6 +311,7 @@ export class Sim {
     p.lastSeq = p.inSeq.shift()!;
     p.desiredX = p.inX.shift()!;
     p.desiredY = p.inY.shift()!;
+    if (p.inReal.shift() === 1) p.steered = true;
     return true;
   }
 
@@ -348,18 +359,15 @@ export class Sim {
             // A burst that arrived late is spent over a few ticks instead of banking a
             // permanent lag between the client's steps and the server's.
             if (this.dueInputs(p) >= LOCKSTEP_SLACK) steps = 2;
-          } else if (++p.starved > LOCKSTEP_WAIT) {
-            // A silent client (backgrounded tab, dead radio) keeps gliding along the held
-            // heading. That step uses up the next seq, so its late input is dropped.
-            p.lastSeq++;
-            while (p.inSeq.length > 0 && p.inSeq[0]! <= p.lastSeq) {
-              p.inSeq.shift();
-              p.inX.shift();
-              p.inY.shift();
-            }
+          } else if (++p.starved > LOCKSTEP_WAIT && p.steered) {
+            // A silent client keeps gliding on the heading it already held.
+            // The next sequence number stays free: burning it here made a late
+            // packet look stale, and the stick went dead until the next round.
+            // A pet that has never been steered stays put instead of wandering.
           } else {
             continue;
           }
+          if (!p.steered) continue;
         }
       }
       p.aliveMs += dt * 1000;

@@ -67,6 +67,61 @@ export class Room {
     ws.on('error', () => conn.home.drop(conn));
   }
 
+  /**
+   * Hold the socket out of every match until Play. Seating on page load put the
+   * player in a room that filled with bots and sealed while they were still on Home.
+   */
+  static park(ws: WebSocket, join: () => Room): void {
+    const conn: Conn = {
+      ws,
+      id: null,
+      name: 'You',
+      pet: -1,
+      kit: null,
+      level: 1,
+      wantPlay: false,
+      home: undefined as unknown as Room,
+    };
+    let seated = false;
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return;
+      const text = typeof data === 'string' ? data : data.toString();
+      if (!seated) {
+        const msg = parseClientMsg(text);
+        if (!msg) return;
+        if (msg.t === 'hello') {
+          conn.name = msg.name ?? 'You';
+          if (msg.pet !== undefined) conn.pet = msg.pet;
+          if (msg.kit !== undefined) conn.kit = msg.kit;
+          if (msg.level !== undefined) conn.level = msg.level;
+          return;
+        }
+        if (msg.t === 'ping') {
+          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ t: 'pong', n: msg.n }));
+          return;
+        }
+        if (msg.t === 'play') {
+          seated = true;
+          conn.wantPlay = true;
+          join().seat(conn);
+          return;
+        }
+        return;
+      }
+      conn.home.onMessage(conn, text);
+    });
+    const leave = () => {
+      if (seated) conn.home.drop(conn);
+    };
+    ws.on('close', leave);
+    ws.on('error', leave);
+  }
+
+  /** First Play, or a move from another room. */
+  seat(conn: Conn): void {
+    this.receive(conn);
+  }
+
   /** Drop the player out of this room without closing the socket, then join `next`. */
   moveTo(conn: Conn, next: Room): void {
     this.detach(conn);
@@ -142,6 +197,10 @@ export class Room {
       }
       const p = this.sim.addHuman(conn.name, pet, conn.kit, conn.level);
       if (!p) {
+        if (this.onRejoin) {
+          this.onRejoin(conn);
+          return;
+        }
         this.send(conn, { t: 'full' });
         return;
       }

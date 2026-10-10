@@ -20,8 +20,12 @@ export class Player {
   inSeq: number[] = [];
   inX: number[] = [];
   inY: number[] = [];
+  /** 1 when that queued packet was a real direction, 0 for a hold. */
+  inReal: number[] = [];
   /** Lockstep ticks in a row with no input to apply. */
   starved = 0;
+  /** Set when a real direction has been applied. Until then the pet does not wander. */
+  steered = false;
   land = 0;
   kills = 0;
   coins = 0;
@@ -101,6 +105,8 @@ export class Player {
     this.inSeq.length = 0;
     this.inX.length = 0;
     this.inY.length = 0;
+    this.inReal.length = 0;
     this.starved = 0;
+    this.steered = false;
   }
 }

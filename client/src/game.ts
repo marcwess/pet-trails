@@ -150,6 +150,10 @@ export class Game {
   private predDX = 0;
   private predDY = 0;
   private predPrimed = false;
+  /** Welcome for this Play has arrived. Deltas from the previous room are ignored. */
+  private joined = false;
+  /** A real stick direction has been sent. Spawn heading is not a steer. */
+  private sentSteer = false;
   /** Last rendered own-pet position, in cells. Metrics and the trail both use this. */
   private shownX = 0;
   private shownY = 0;
@@ -210,7 +214,7 @@ export class Game {
     this.net.onWelcome = (msg) => this.onWelcome(msg);
     this.net.onDelta = (msg) => this.onDelta(msg);
     this.net.onFull = () => {
-      if (this.phase !== 'title') this.startOffline();
+      if (this.phase !== 'title' && this.net.mode !== 'online') this.startOffline();
     };
     this.hud.onPlay(() => void this.play());
     this.hud.onAbility(() => this.cast());
@@ -285,6 +289,17 @@ export class Game {
     this.homeReward = null;
     this.pendingWin = null;
     this.fixCount = 0;
+    // Drop the previous seat before the socket can deliver another delta.
+    this.joined = false;
+    this.sentSteer = false;
+    this.predPrimed = false;
+    this.selfId = 0;
+    this.seq = 0;
+    this.serverAck = 0;
+    this.predDX = 0;
+    this.predDY = 0;
+    this.predHist.length = 0;
+    for (const ent of this.ents) ent.used = false;
     this.hud.hideWin();
     this.hud.hideOut();
     this.hud.showDeath(null);
@@ -330,6 +345,7 @@ export class Game {
           : {},
       randomSeed(),
     );
+    sim.lockstep = true;
     const player = sim.addHuman(this.displayName, this.equipped().species, kitOf(this.equipped()), this.equipped().level);
     if (!player) return;
     this.offline = sim;
@@ -414,7 +430,10 @@ export class Game {
     if (this.acc >= tickDt) {
       this.acc -= tickDt;
       const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
-      if (mag > 0.15) sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, this.seq++);
+      if (mag > 0.15) {
+        this.sentSteer = true;
+        sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, ++this.seq);
+      }
       sim.step({ humans: 1 });
       this.consume(sim.consumeEvents());
       this.syncOffline(sim, false);
@@ -425,10 +444,12 @@ export class Game {
   }
 
   private stepOnline(dt: number): void {
+    if (!this.joined) return;
     const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
     if (mag > 0.15) {
       this.predDX = this.input.desiredX / mag;
       this.predDY = this.input.desiredY / mag;
+      this.sentSteer = true;
     }
     const tickDt = 1 / CONFIG.tickHz;
     this.predAcc += dt;
@@ -436,7 +457,9 @@ export class Game {
     // instead of sprinting ahead and rubber-banding back. Time spent waiting must not bank
     // up, or the next step appears all at once.
     const lead = 8;
-    const canStep = this.predPrimed && this.seq - this.serverAck < lead;
+    // Stay parked until the player actually steers. Sending the spawn heading
+    // made the pet walk itself the moment the first snapshot arrived.
+    const canStep = this.sentSteer && this.predPrimed && this.seq - this.serverAck < lead;
     if (!canStep) {
       if (this.predAcc > tickDt) this.predAcc = tickDt;
     } else if (this.predAcc > tickDt * 2) {
@@ -564,10 +587,16 @@ export class Game {
   }
 
   private onWelcome(msg: WelcomeMsg): void {
+    this.joined = true;
+    this.sentSteer = false;
     this.selfId = msg.id;
     this.seq = 0;
+    this.serverAck = 0;
+    this.predDX = 0;
+    this.predDY = 0;
     this.predPrimed = false;
     this.predHist.length = 0;
+    for (const ent of this.ents) ent.used = false;
     this.offX = this.offY = this.offH = 0;
     this.offVx = this.offVy = this.offVh = 0;
     this.fixCount = 0;
@@ -586,6 +615,7 @@ export class Game {
   }
 
   private onDelta(msg: DeltaMsg): void {
+    if (!this.joined) return;
     this.serverTick = msg.tick;
     this.serverTickAt = performance.now();
     this.serverAck = msg.ack;
@@ -618,10 +648,12 @@ export class Game {
         this.predY = this.predPrevY = msg.you[1];
         this.predH = this.predPrevH = msg.you[2];
         this.predAcc = 0;
-        this.seq = msg.ack;
+        if (this.seq < msg.ack) this.seq = msg.ack;
         this.serverAck = msg.ack;
-        this.predDX = Math.cos(this.predH);
-        this.predDY = Math.sin(this.predH);
+        if (!this.sentSteer) {
+          this.predDX = 0;
+          this.predDY = 0;
+        }
         this.offX = this.offY = this.offH = 0;
         this.predPrimed = true;
         this.snapCam = true;
