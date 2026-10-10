@@ -46,12 +46,24 @@ async function main(): Promise<void> {
   ]);
   const renderer = new Renderer(territory, loaded.geos, loaded.material, perf, coin);
   renderer.warmup();
+  await document.fonts.ready;
   renderer.buildSheet();
-  if (params.get('sheet') === '1' && renderer.sheet) {
-    renderer.sheet.id = 'contact-sheet';
-    renderer.sheet.style.cssText =
-      'position:fixed;left:8px;right:8px;bottom:8px;width:calc(100% - 16px);height:auto;z-index:30;border-radius:18px;pointer-events:none;background:#fff';
-    document.body.appendChild(renderer.sheet);
+  if (params.get('sheet') === '1' && renderer.sheet && renderer.sheetMenu) {
+    const wrap = document.createElement('div');
+    wrap.id = 'contact-sheet';
+    wrap.style.cssText =
+      'position:fixed;inset:0;z-index:40;overflow:auto;background:#f4fbff;padding:12px 12px 28px';
+    for (const [heading, canvas] of [
+      ['Menus', renderer.sheetMenu],
+      ['In game', renderer.sheet],
+    ] as const) {
+      const h = document.createElement('h2');
+      h.textContent = heading;
+      h.style.cssText = 'margin:12px 0 8px;font:700 22px Fredoka,sans-serif;color:#1c2430';
+      canvas.style.cssText = 'width:880px;max-width:none;height:auto;display:block;background:#fff;border-radius:18px';
+      wrap.append(h, canvas);
+    }
+    document.body.appendChild(wrap);
   }
   if (params.get('hz120') === '1') {
     window.requestAnimationFrame = (cb: FrameRequestCallback) =>

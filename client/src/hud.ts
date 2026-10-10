@@ -134,6 +134,8 @@ export class Hud {
     }
     this.debugOn = new URLSearchParams(location.search).get('debug') === '1';
     this.debugEl.hidden = !this.debugOn;
+    this.debugEl.classList.toggle('on', this.debugOn);
+    if (!this.debugOn) this.debugEl.textContent = '';
     this.nameBtn.textContent = this.nameInput.value.trim() || 'You';
     this.nameBtn.addEventListener('click', () => {
       this.namePop.hidden = false;
@@ -224,7 +226,12 @@ export class Hud {
   }
 
   setDebug(text: string): void {
-    if (!this.debugOn) return;
+    if (!this.debugOn) {
+      this.debugEl.hidden = true;
+      this.debugEl.textContent = '';
+      return;
+    }
+    this.debugEl.hidden = false;
     if (this.debugEl.textContent !== text) this.debugEl.textContent = text;
   }
 

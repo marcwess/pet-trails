@@ -1,4 +1,4 @@
-import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, angleDelta, mapBlob, type MultiPolygon } from '@pet-trails/shared';
+import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, SPECIES_LABEL, angleDelta, mapBlob, type MultiPolygon } from '@pet-trails/shared';
 import {
   BufferAttribute,
   BufferGeometry as BufGeo,
@@ -643,7 +643,16 @@ export class Renderer {
   /** 1 right after a tap on the podium pet, then it decays. */
   wiggle = 0;
   portraitURLs: string[] = [];
+  /** In-game lighting, one labeled cell per species. */
   sheet: HTMLCanvasElement | null = null;
+  /** Unlit menu portraits, one labeled cell per species. */
+  sheetMenu: HTMLCanvasElement | null = null;
+  /** Dominant Kenney colormap swatch per species, sampled from the atlas. */
+  referenceRGB: Array<[number, number, number]> = [];
+  private hemi!: HemisphereLight;
+  private keyLight!: DirectionalLight;
+  private petMaterial!: MeshLambertMaterial | MeshBasicMaterial;
+  private menuMaterial!: MeshBasicMaterial;
   private winLife = 0;
   private readonly winDisc: Mesh;
   private readonly decor: Group;
@@ -754,11 +763,12 @@ export class Renderer {
 
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
     // Pets stay Lambert. Land is unlit vertex color, so it does not need a fill light.
-    this.scene.add(new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.05));
-    const key = new DirectionalLight(0xfffaf4, 0.72);
-    key.position.set(26, 42, 18);
-    key.castShadow = gfx.shadow;
-    this.scene.add(key);
+    this.hemi = new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.15);
+    this.scene.add(this.hemi);
+    this.keyLight = new DirectionalLight(0xfffaf4, 0.85);
+    this.keyLight.position.set(26, 42, 18);
+    this.keyLight.castShadow = gfx.shadow;
+    this.scene.add(this.keyLight);
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
@@ -787,40 +797,46 @@ export class Renderer {
     for (let id = 0; id <= 16; id++) this.landParts.push(null);
     this.setBoundary(mapBlob(1, territory.gridW, territory.gridH));
 
-    const hero = PALETTE[0]!;
-    const heroHex = (hero[0] << 16) | (hero[1] << 8) | hero[2];
-    const platformGeo = new CylinderGeometry(1.7, 1.95, 0.42, 36);
-    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: heroHex }));
-    this.platform.position.y = 0.21;
+    const platformGeo = new CylinderGeometry(0.7, 0.82, 0.24, 40);
+    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: 0xfff6e4 }));
+    this.platform.position.y = 0.12;
     const podiumRing = new Mesh(
-      new TorusGeometry(1.85, 0.07, 8, 40),
-      new MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
+      new TorusGeometry(0.76, 0.04, 10, 48),
+      new MeshBasicMaterial({ color: 0xffd23f, toneMapped: false }),
     );
     podiumRing.rotation.x = Math.PI / 2;
-    podiumRing.position.y = 0.44;
+    podiumRing.position.y = 0.25;
     this.podium = podiumRing;
+    // A vertical sky behind the pet. The old floor disc filled the lens with one blue blob.
     const backdrop = new Mesh(
-      new CircleGeometry(42, 48),
-      new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false }),
+      new PlaneGeometry(18, 11),
+      new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false, depthWrite: false }),
     );
-    backdrop.rotation.x = -Math.PI / 2;
-    backdrop.position.y = -0.35;
+    backdrop.position.set(0, 2.35, -4.8);
     this.stage = new Group();
     this.stage.add(backdrop, this.platform, this.podium);
     this.scene.add(this.stage);
     this.decor = new Group();
-    const decorMat = [
-      0xff8ec8, 0xffd23f, 0x7ec8ff, 0xc9b6ff, 0xffb703, 0x3dde7a,
+    const decorMat = [0xff8ec8, 0xffd23f, 0x7ec8ff, 0xc9b6ff, 0xffb703, 0x3dde7a, 0xfff1c9];
+    const spots: Array<[number, number, number, number]> = [
+      [-2.6, 3.1, -3.7, 0.38],
+      [2.7, 2.8, -3.9, 0.34],
+      [-3.15, 1.5, -3.4, 0.3],
+      [3.2, 1.7, -3.5, 0.36],
+      [0.15, 3.7, -4.3, 0.32],
+      [-1.7, 3.45, -4.15, 0.24],
+      [1.85, 3.5, -4.2, 0.26],
+      [2.9, 3.05, -3.6, 0.22],
     ];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < spots.length; i++) {
+      const [x, y, z, rad] = spots[i]!;
       const blob = new Mesh(
-        new SphereGeometry(0.35 + (i % 3) * 0.18, 16, 12),
+        new SphereGeometry(rad, 16, 12),
         new MeshBasicMaterial({ color: decorMat[i % decorMat.length]!, toneMapped: false }),
       );
-      const ang = (i / 8) * Math.PI * 2;
-      blob.position.set(Math.cos(ang) * (4.2 + (i % 3)), 0.4 + (i % 4) * 0.35, Math.sin(ang) * 3.4);
-      blob.userData.spin = 0.3 + (i % 5) * 0.12;
-      blob.userData.base = blob.position.y;
+      blob.position.set(x, y, z);
+      blob.userData.spin = 0.25 + (i % 5) * 0.08;
+      blob.userData.base = y;
       this.decor.add(blob);
     }
     this.scene.add(this.decor);
@@ -837,6 +853,8 @@ export class Renderer {
     const petMat = gfx.basic
       ? new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false })
       : material;
+    this.petMaterial = petMat;
+    this.menuMaterial = new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false });
     enableRecolor(petMat);
     for (let i = 0; i < geos.length; i++) {
       const rec = new InstancedBufferAttribute(new Float32Array(PET_CAP), 1);
@@ -1481,7 +1499,7 @@ export class Renderer {
     snapCam: boolean,
   ): void {
     this.time += dt;
-    this.renderer.setClearColor(phase === 'title' ? 0xffc8ea : FLOOR_COLOR, 1);
+    this.renderer.setClearColor(phase === 'title' ? 0x9ed8ff : FLOOR_COLOR, 1);
     this.territory.update(dt);
     this.syncLand();
     this.riseSlabs();
@@ -1534,40 +1552,45 @@ export class Renderer {
       this.hearts.count = 0;
       this.rainbows.count = 0;
       this.paws.count = 0;
-      const spin = this.time * 0.45;
-      this.podium.rotation.z = spin;
+      this.podium.rotation.z = this.time * 0.35;
       const mesh = this.pets[hero];
       const wave = Math.sin(this.time * 2.4);
       const wig = this.wiggle;
       this.wiggle = Math.max(0, this.wiggle - dt * 1.6);
       const hop = wig > 0 ? Math.sin(Math.min(1, wig) * Math.PI) * 0.42 : 0;
       const squash = 1 + wave * 0.035 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
-      let camDist = 6.5;
-      let camH = 2.15;
-      let lookY = -0.15;
-      let body = 0.96;
+      // Fixed north-up camera. The pet stays in the open band above the buttons.
+      const portrait = this.camera.aspect < 0.95;
+      let lookX = portrait ? 0 : 1.65;
+      let lookY = portrait ? 0.38 : 0.78;
+      let camY = portrait ? 1.18 : 1.12;
+      let camZ = portrait ? 5.7 : 6.15;
+      let body = portrait ? 1.12 : 0.96;
       if (this.stageKind === 'detail') {
-        camDist = 4.6;
-        camH = 1.55;
-        lookY = -0.55;
-        body = 1.02;
+        lookX = 0;
+        lookY = 0.15;
+        camY = 1.05;
+        camZ = 3.55;
+        body = 1.16;
       } else if (this.stageKind === 'reveal') {
-        camDist = 5.0;
-        camH = 1.85;
-        lookY = -0.35;
-        body = 1.08;
+        lookX = 0;
+        lookY = 0.55;
+        camY = 1.2;
+        camZ = 4.4;
+        body = 1.16;
       }
+      const yaw = 0.62 + Math.sin(this.time * 0.7) * 0.16;
       if (mesh) {
-        this.placePet(mesh, 0, 0, 0.22 + wave * 0.04 + hop, 0, spin + wig * 0.8, wig * 0.4, body, squash, this.heroRecolor);
+        this.placePet(mesh, 0, 0, 0.02 + wave * 0.03 + hop, 0, yaw + wig * 0.8, wig * 0.35, body, squash, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      this.place(this.shadows, 0, 0, 0.03, 0, 0, 0, 1.2);
+      this.place(this.shadows, 0, 0, 0.26, 0, 0, 0, 0.72);
       this.shadows.count = 1;
       this.shadows.instanceMatrix.needsUpdate = true;
-      const ang = this.time * 0.28;
-      this.camera.position.set(Math.sin(ang) * camDist, camH, Math.cos(ang) * camDist);
-      this.camera.lookAt(0, lookY, 0);
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(lookX, camY, camZ);
+      this.camera.lookAt(lookX, lookY, 0);
       this.coins.count = 0;
       this.orbs.count = 0;
       this.loot.count = 0;
@@ -2291,78 +2314,157 @@ export class Renderer {
     return next;
   }
 
-  /** One still of every species, plus a portrait URL per roster slot. */
+  /**
+   * One close, labeled still per species. Menus use the unlit colormap.
+   * In-game uses the same Lambert pets the match draws, with no recolor.
+   */
   buildSheet(): void {
-    const cols = 6;
-    const rows = 4;
-    const cell = 180;
-    const w = cols * cell;
-    const h = rows * cell;
-    const rt = new WebGLRenderTarget(w, h);
+    const refs = this.kenneySwatches();
+    this.referenceRGB = refs;
+    const menu = this.captureSpecies(true);
+    const game = this.captureSpecies(false);
+    this.sheetMenu = composeContact('Menus', menu, refs);
+    this.sheet = composeContact('In game', game, refs);
+    this.portraitURLs = menu.map((tile) => tile.toDataURL('image/png'));
+  }
+
+  private kenneySwatches(): Array<[number, number, number]> {
+    const map = this.petMaterial.map;
+    const image = map?.image as CanvasImageSource | undefined;
+    const blank: Array<[number, number, number]> = SPECIES.map(() => [180, 180, 180]);
+    if (!image) return blank;
+    const src = document.createElement('canvas');
+    const iw = (image as HTMLImageElement).width || (image as ImageBitmap).width || 512;
+    const ih = (image as HTMLImageElement).height || (image as ImageBitmap).height || 512;
+    src.width = iw;
+    src.height = ih;
+    const sctx = src.getContext('2d', { willReadFrequently: true });
+    if (!sctx) return blank;
+    sctx.drawImage(image, 0, 0, iw, ih);
+    const pixels = sctx.getImageData(0, 0, iw, ih).data;
+    return this.pets.map((mesh) => {
+      const uv = mesh.geometry.getAttribute('uv');
+      if (!uv || uv.count === 0) return [180, 180, 180] as [number, number, number];
+      const bins = new Map<number, number>();
+      const cols = 16;
+      for (let i = 0; i < uv.count; i++) {
+        const u = uv.getX(i);
+        const v = uv.getY(i);
+        const cx = Math.min(cols - 1, Math.max(0, Math.floor(u * cols)));
+        const cy = Math.min(cols - 1, Math.max(0, Math.floor((1 - v) * cols)));
+        const key = cy * cols + cx;
+        bins.set(key, (bins.get(key) ?? 0) + 1);
+      }
+      let best = 0;
+      let bestN = -1;
+      let fallback = 0;
+      let fallbackN = -1;
+      for (const [key, n] of bins) {
+        const cx = key % cols;
+        const cy = (key / cols) | 0;
+        const px = Math.min(iw - 1, Math.floor(((cx + 0.5) / cols) * iw));
+        const py = Math.min(ih - 1, Math.floor(((cy + 0.5) / cols) * ih));
+        const i = (py * iw + px) * 4;
+        const r = pixels[i] ?? 0;
+        const g = pixels[i + 1] ?? 0;
+        const b = pixels[i + 2] ?? 0;
+        // Outline cells are near-black. The reference color is the body swatch.
+        const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (luma > 36 && n > bestN) {
+          best = key;
+          bestN = n;
+        }
+        if (n > fallbackN) {
+          fallback = key;
+          fallbackN = n;
+        }
+      }
+      const chosen = bestN >= 0 ? best : fallback;
+      const cx = chosen % cols;
+      const cy = (chosen / cols) | 0;
+      const px = Math.min(iw - 1, Math.floor(((cx + 0.5) / cols) * iw));
+      const py = Math.min(ih - 1, Math.floor(((cy + 0.5) / cols) * ih));
+      const i = (py * iw + px) * 4;
+      return [pixels[i] ?? 180, pixels[i + 1] ?? 180, pixels[i + 2] ?? 180];
+    });
+  }
+
+  /** Close-up of every species. `menu` draws the raw atlas; otherwise Lambert, recolor 0. */
+  private captureSpecies(menu: boolean): HTMLCanvasElement[] {
     const prevX = this.camera.position.x;
     const prevY = this.camera.position.y;
     const prevZ = this.camera.position.z;
     const prevAspect = this.camera.aspect;
+    const hemiI = this.hemi.intensity;
+    const keyI = this.keyLight.intensity;
+    const keyX = this.keyLight.position.x;
+    const keyY = this.keyLight.position.y;
+    const keyZ = this.keyLight.position.z;
     this.ground.visible = false;
     this.land.visible = false;
     this.stage.visible = false;
     this.decor.visible = false;
     this.winDisc.visible = false;
+    this.gridLines.visible = false;
     for (const wall of this.fenceMeshes) wall.visible = false;
-    for (const mesh of this.pets) mesh.count = 0;
-    const gap = 2.2;
-    for (let i = 0; i < this.pets.length && i < cols * rows; i++) {
-      const col = i % cols;
-      const row = (i / cols) | 0;
+    this.shadows.count = 0;
+    this.coins.count = 0;
+    this.orbs.count = 0;
+    this.loot.count = 0;
+    const mat = menu ? this.menuMaterial : this.petMaterial;
+    if (!menu) {
+      this.hemi.intensity = 1.55;
+      this.keyLight.intensity = 1.35;
+      this.keyLight.position.set(2.5, 5.5, 7);
+    }
+    for (const mesh of this.pets) mesh.material = mat;
+    const size = 180;
+    const rt = new WebGLRenderTarget(size, size);
+    this.camera.position.set(1.2, 0.92, 2.45);
+    this.camera.up.set(0, 1, 0);
+    this.camera.lookAt(0, 0.62, 0);
+    this.camera.aspect = 1;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setClearColor(0xf4fbff, 1);
+    const tiles: HTMLCanvasElement[] = [];
+    for (let i = 0; i < this.pets.length; i++) {
+      for (const mesh of this.pets) mesh.count = 0;
       const mesh = this.pets[i]!;
-      const x = (col - (cols - 1) / 2) * gap;
-      const z = ((rows - 1) / 2 - row) * gap;
-      this.placePet(mesh, 0, x, 0, z, 0.6, 0, 0.95, 1, 0);
+      this.placePet(mesh, 0, 0, 0, 0, 0.7, 0, 1.08, 1, 0);
       mesh.count = 1;
       mesh.instanceMatrix.needsUpdate = true;
-    }
-    this.camera.position.set(0, 2.35, 8.2);
-    this.camera.lookAt(0, 0.45, 0);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setClearColor(0xf4f8ff, 1);
-    this.renderer.setRenderTarget(rt);
-    this.renderer.clear();
-    this.renderer.render(this.scene, this.camera);
-    const buf = new Uint8Array(w * h * 4);
-    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
-    this.renderer.setRenderTarget(null);
-    rt.dispose();
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const img = ctx.createImageData(w, h);
-    for (let y = 0; y < h; y++) {
-      const src = (h - 1 - y) * w * 4;
-      img.data.set(buf.subarray(src, src + w * 4), y * w * 4);
-    }
-    ctx.putImageData(img, 0, 0);
-    this.sheet = canvas;
-    const urls: string[] = [];
-    for (let i = 0; i < SPECIES.length; i++) {
-      const col = i % cols;
-      const row = (i / cols) | 0;
+      this.renderer.setRenderTarget(rt);
+      this.renderer.clear();
+      this.renderer.render(this.scene, this.camera);
+      const buf = new Uint8Array(size * size * 4);
+      this.renderer.readRenderTargetPixels(rt, 0, 0, size, size, buf);
       const tile = document.createElement('canvas');
-      tile.width = cell;
-      tile.height = cell;
+      tile.width = size;
+      tile.height = size;
       const tctx = tile.getContext('2d');
       if (!tctx) continue;
-      tctx.drawImage(canvas, col * cell, row * cell, cell, cell, 0, 0, cell, cell);
-      urls.push(tile.toDataURL('image/png'));
+      const img = tctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        const src = (size - 1 - y) * size * 4;
+        img.data.set(buf.subarray(src, src + size * 4), y * size * 4);
+      }
+      tctx.putImageData(img, 0, 0);
+      tiles.push(tile);
     }
-    this.portraitURLs = urls;
-    for (const mesh of this.pets) mesh.count = 0;
+    this.renderer.setRenderTarget(null);
+    rt.dispose();
+    for (const mesh of this.pets) {
+      mesh.material = this.petMaterial;
+      mesh.count = 0;
+    }
+    this.hemi.intensity = hemiI;
+    this.keyLight.intensity = keyI;
+    this.keyLight.position.set(keyX, keyY, keyZ);
     this.camera.position.set(prevX, prevY, prevZ);
     this.camera.aspect = prevAspect;
     this.camera.updateProjectionMatrix();
     this.camera.lookAt(0, 0.6, 0);
+    return tiles;
   }
 
   private placePet(
@@ -2644,19 +2746,19 @@ function titleBackdrop(): CanvasTexture {
   const g = canvas.getContext('2d')!;
   const sky = g.createLinearGradient(0, 0, 0, 512);
   sky.addColorStop(0, '#8fd4ff');
-  sky.addColorStop(0.45, '#f7c8ff');
-  sky.addColorStop(1, '#ffd7a8');
+  sky.addColorStop(0.55, '#ffd0ef');
+  sky.addColorStop(1, '#ffe3bf');
   g.fillStyle = sky;
   g.fillRect(0, 0, 512, 512);
+  // Soft color only in the corners. The middle stays clear so it cannot cover the pet.
   const blobs: Array<[number, number, string, number]> = [
-    [80, 90, '#ffffff', 90],
-    [420, 70, '#ffe56b', 110],
-    [60, 400, '#ff8ec8', 120],
-    [440, 360, '#7ec8ff', 100],
-    [250, 460, '#c9b6ff', 130],
+    [40, 48, '#ffffff', 70],
+    [470, 36, '#ffe56b', 64],
+    [28, 470, '#ff8ec8', 72],
+    [488, 460, '#7ec8ff', 60],
   ];
   for (const [x, y, color, rad] of blobs) {
-    const paint = g.createRadialGradient(x, y, 8, x, y, rad);
+    const paint = g.createRadialGradient(x, y, 4, x, y, rad);
     paint.addColorStop(0, color);
     paint.addColorStop(1, 'rgba(255,255,255,0)');
     g.fillStyle = paint;
@@ -2667,6 +2769,56 @@ function titleBackdrop(): CanvasTexture {
   const tex = new CanvasTexture(canvas);
   tex.colorSpace = SRGBColorSpace;
   return tex;
+}
+
+function composeContact(
+  title: string,
+  tiles: HTMLCanvasElement[],
+  refs: Array<[number, number, number]>,
+): HTMLCanvasElement {
+  const cols = 4;
+  const rows = Math.ceil(Math.max(1, tiles.length) / cols);
+  const cellW = 220;
+  const cellH = 248;
+  const head = 52;
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * cellW;
+  canvas.height = head + rows * cellH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.fillStyle = '#f4fbff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#1c2430';
+  ctx.font = '700 28px Fredoka, sans-serif';
+  ctx.fillText(title, 18, 34);
+  tiles.forEach((tile, i) => {
+    const col = i % cols;
+    const row = (i / cols) | 0;
+    const x = col * cellW + 10;
+    const y = head + row * cellH + 8;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(x, y, 200, 232, 22);
+    ctx.fill();
+    ctx.drawImage(tile, x + 10, y + 8, 180, 180);
+    const species = SPECIES[i];
+    const name = species ? SPECIES_LABEL[species] : 'Pet';
+    ctx.fillStyle = '#1c2430';
+    ctx.font = '700 20px Fredoka, sans-serif';
+    ctx.fillText(name, x + 14, y + 206);
+    const ref = refs[i] ?? [180, 180, 180];
+    ctx.fillStyle = `rgb(${ref[0]},${ref[1]},${ref[2]})`;
+    ctx.beginPath();
+    ctx.roundRect(x + 14, y + 214, 18, 14, 4);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(28,36,48,0.25)';
+    ctx.stroke();
+    const hex = ref.map((n) => n.toString(16).padStart(2, '0')).join('');
+    ctx.fillStyle = '#4c5968';
+    ctx.font = '600 13px Fredoka, sans-serif';
+    ctx.fillText(`#${hex}`, x + 38, y + 226);
+  });
+  return canvas;
 }
 
 function growF(buf: Float32Array<ArrayBufferLike>, need: number): Float32Array<ArrayBufferLike> {

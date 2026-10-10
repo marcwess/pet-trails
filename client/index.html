@@ -15,18 +15,12 @@
       <div id="vignette"></div>
       <div id="chip" class="chip wait" title="Connecting"></div>
       <section id="title" class="home">
-        <div class="home-bg" aria-hidden="true">
-          <i class="float f1"></i>
-          <i class="float f2"></i>
-          <i class="float f3"></i>
-          <i class="float f4"></i>
-          <i class="float f5"></i>
-        </div>
         <header class="topbar">
           <div class="currency coin" id="coin-chip"><span>coins</span><b id="coin-count">0</b></div>
           <div class="currency gem"><span>gems</span><b id="gem-count">0</b></div>
         </header>
         <h1 class="logo">PET TRAILS</h1>
+        <div class="stage-slot" aria-hidden="true"></div>
         <button id="pet-tap" class="pet-tap" type="button" aria-label="Wiggle pet"></button>
         <div class="identity">
           <button id="name-btn" class="name-pill" type="button">You</button>
@@ -43,13 +37,23 @@
         <button id="play" class="play-btn" type="button" disabled>PLAY</button>
         <div class="home-actions">
           <button id="open-pets" class="action-btn" type="button">
-            <span class="glyph paw" aria-hidden="true"></span>
-            <span>Pets</span>
+            <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
+              <ellipse cx="16" cy="22" rx="7" ry="5.4" fill="#ff7aa2"></ellipse>
+              <circle cx="8.2" cy="13" r="3.1" fill="#ff7aa2"></circle>
+              <circle cx="16" cy="9.2" r="3.1" fill="#ff7aa2"></circle>
+              <circle cx="23.8" cy="13" r="3.1" fill="#ff7aa2"></circle>
+            </svg>
+            <span class="action-label">Pets</span>
             <i id="pets-badge" class="dot" hidden></i>
           </button>
           <button id="open-boxes" class="action-btn" type="button">
-            <span class="glyph gift" aria-hidden="true"></span>
-            <span>Boxes</span>
+            <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
+              <rect x="6" y="14" width="20" height="12" rx="3" fill="#ffb703"></rect>
+              <rect x="5" y="11" width="22" height="5" rx="2" fill="#ffe56a"></rect>
+              <rect x="14.2" y="11" width="3.6" height="15" fill="#fff"></rect>
+              <path d="M16 12c-2.6-5.2-7.4-3.4-5.6-.8 1.6 2.2 5.6.8 5.6.8s4-3 5.6-.8c1.8-2.6-3-4.4-5.6.8z" fill="#fff"></path>
+            </svg>
+            <span class="action-label">Boxes</span>
             <i id="box-badge" class="dot" hidden></i>
           </button>
         </div>
