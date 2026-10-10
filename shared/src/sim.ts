@@ -433,6 +433,8 @@ export class Sim {
     if (this.roundSize < 1) this.roundSize = this.roster.filter((p) => p.active).length;
     const losers: Player[] = [];
     for (const p of this.roster) if (p.active && p.alive && p.id !== winner.id) losers.push(p);
+    // Smallest land goes out first, so a time crown places the rest by land.
+    losers.sort((a, b) => a.land - b.land);
     for (const p of losers) this.kill(p, winner, 'time');
     this.land.flood(winner.id);
     winner.land = this.land.areaOf(winner.id);

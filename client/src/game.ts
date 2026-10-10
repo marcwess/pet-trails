@@ -748,6 +748,12 @@ export class Game {
     ent.trainLen = snap.tn;
     ent.trainShown = Math.min(CONFIG.maxTrainVisible, snap.tr.length, snap.tn);
     for (let i = 0; i < ent.trainShown; i++) ent.train[i] = snap.tr[i] ?? 0;
+    if (ent.sn > 0) {
+      // A respawn or a recall moves farther in one tick than any glide can. Pop to the
+      // new spot instead of sliding across the map between the two snapshots.
+      const last = (ent.sc + 7) % 8;
+      if (Math.hypot(snap.x - ent.sx[last]!, snap.y - ent.sz[last]!) > 6) ent.sn = 0;
+    }
     ent.sx[ent.sc] = snap.x;
     ent.sz[ent.sc] = snap.y;
     ent.sh[ent.sc] = snap.h;
