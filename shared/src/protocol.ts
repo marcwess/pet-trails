@@ -79,6 +79,18 @@ export type WireEvent =
       xp: number;
       time: number;
       rank: number;
+      total: number;
+    }
+  | {
+      e: 'win';
+      id: number;
+      name: string;
+      total: number;
+      pct: number;
+      kills: number;
+      coins: number;
+      xp: number;
+      time: number;
     }
   | { e: 'claim'; id: number; n: number; x: number; y: number }
   | { e: 'pickup'; id: number; kind: number; amount: number; x: number; y: number; xp: number }

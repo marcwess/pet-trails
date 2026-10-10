@@ -1,6 +1,6 @@
 import type { ActiveId, PassiveId, RarityName } from './config.js';
 
-export type DeathReason = 'trail' | 'headon' | 'enclosed';
+export type DeathReason = 'trail' | 'headon' | 'enclosed' | 'time';
 
 export class Player {
   readonly id: number;
@@ -90,5 +90,7 @@ export class Player {
     this.shieldUntil = 0;
     this.slowUntil = 0;
     this.slowMul = 1;
+    // A recycled slot must accept the new client's first input. Stale seqs drop the stick.
+    this.lastSeq = 0;
   }
 }

@@ -10,6 +10,8 @@ export interface BotView {
   players: Array<Player | null>;
   rng: () => number;
   dt: number;
+  /** 0 while the round is full, 1 when few pets remain or the clock is late. */
+  heat: number;
 }
 
 function steer(p: Player, angle: number): void {
@@ -90,6 +92,7 @@ function avoid(p: Player, view: BotView): boolean {
  */
 export function updateBot(p: Player, view: BotView): void {
   const { cfg } = view;
+  const heat = Math.max(0, Math.min(1, view.heat || 0));
   if (p.outside) p.botMoved += cfg.speed * view.dt;
 
   if (avoid(p, view)) return;
@@ -111,7 +114,7 @@ export function updateBot(p: Player, view: BotView): void {
       p.botTurns++;
       steer(p, p.heading);
       p.botMoved = 0;
-      p.botLeg = legLength(p, view);
+      p.botLeg = legLength(p, view) * (1 - heat * 0.4);
       if (p.botTurns >= 3) {
         goHome(p, view);
         return;
@@ -123,12 +126,14 @@ export function updateBot(p: Player, view: BotView): void {
 
   const thinkDue = view.tick >= p.botNextThink;
   if (thinkDue) {
-    p.botNextThink = view.tick + Math.max(1, Math.round(cfg.botThinkSec * cfg.tickHz));
-    if (view.rng() < cfg.botMistakeChance) {
+    const think = cfg.botThinkSec * (1 - heat * 0.55);
+    p.botNextThink = view.tick + Math.max(1, Math.round(think * cfg.tickHz));
+    if (view.rng() < cfg.botMistakeChance * (1 - heat * 0.85)) {
       steer(p, p.heading + (view.rng() - 0.5) * 1.4);
       return;
     }
-    const huntBias = p.botStyle === 1 ? 0.72 : 0.34;
+    const baseHunt = p.botStyle === 1 ? 0.72 : 0.34;
+    const huntBias = baseHunt + (0.94 - baseHunt) * heat;
     const committed = p.botPhase === 1 && p.botTurns < 2;
     if (view.rng() < huntBias) {
       const target = nearestTrail(p, view);
@@ -158,7 +163,7 @@ export function updateBot(p: Player, view: BotView): void {
     p.botPhase = 1;
     p.botTurns = 0;
     p.botMoved = 0;
-    p.botLeg = legLength(p, view);
+    p.botLeg = legLength(p, view) * (1 - heat * 0.4);
     const rx = p.x - cfg.gridW / 2;
     const ry = p.y - cfg.gridH / 2;
     if (rx * rx + ry * ry < 45 * 45) {

@@ -283,6 +283,11 @@ canvas {
 
 #you-kills::before { content: '⚔ '; }
 #you-train::before { content: '🐾 '; }
+#you-left {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(36, 48, 68, 0.55);
+}
 
 .steer {
   position: absolute;
@@ -355,6 +360,21 @@ canvas {
 }
 
 .kill-banner.show { animation: killpop 0.95s cubic-bezier(0.2, 1.3, 0.4, 1) forwards; }
+
+.win {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 14px 22px;
+  border-radius: 999px;
+  background: #fff;
+  color: #243044;
+  font-size: 22px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(36, 48, 68, 0.18);
+}
 
 @keyframes killpop {
   0% { opacity: 0; transform: translate(-50%, -20%) scale(0.4); }

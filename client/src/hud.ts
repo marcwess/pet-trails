@@ -20,6 +20,7 @@ const REASONS: Record<DeathReason, { title: string; icon: string }> = {
   trail: { title: 'Your trail was cut!', icon: '✂' },
   headon: { title: 'Head-on collision!', icon: '💥' },
   enclosed: { title: 'You got surrounded!', icon: '◎' },
+  time: { title: 'Time is up!', icon: '⏱' },
 };
 
 export function deathTitle(reason: string): string {
@@ -68,6 +69,9 @@ export class Hud {
   private readonly abilityBtn = must('ability') as HTMLButtonElement;
   private readonly abilityIcon = must('ability-icon');
   private readonly abilityRing = must('ability-ring') as unknown as SVGCircleElement;
+  private readonly leftEl = must('you-left');
+  private readonly winEl = must('win');
+  private readonly winText = must('win-title');
 
   constructor() {
     for (let i = 0; i < 6; i++) {
@@ -307,6 +311,19 @@ export class Hud {
     el.classList.remove('show');
     void el.offsetWidth;
     el.classList.add('show');
+  }
+
+  setLeft(n: number): void {
+    this.leftEl.textContent = `${Math.max(0, n | 0)} left`;
+  }
+
+  winBanner(text: string): void {
+    this.winText.textContent = text;
+    this.winEl.hidden = false;
+  }
+
+  hideWin(): void {
+    this.winEl.hidden = true;
   }
 
   setYou(pct: string, kills: number, train = 0): void {

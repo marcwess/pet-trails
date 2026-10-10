@@ -70,8 +70,18 @@ export class Sim {
       players: this.players,
       rng: this.rng,
       dt: this.tickDt,
+      heat: 0,
     };
   }
+
+  /** Round is closed to new players and dead pets stay dead. */
+  sealed = false;
+  /** 0 while the field is full and the clock is young. 1 when bots should press. */
+  heat = 0;
+  /** Someone has conquered the map, or the clock named a winner. */
+  over = false;
+  /** Pets who were in the round when it sealed. Placement is "4th of this". */
+  roundSize = 0;
 
   addHuman(name: string, pet: number, kit?: Kit | null, level = 1): Player | null {
     const p = this.alloc();
@@ -234,8 +244,10 @@ export class Sim {
   }
 
   maintainBots(humanCount: number): void {
+    if (this.sealed || this.over) return;
     const want = Math.max(0, Math.min(this.cfg.targetPopulation - humanCount, this.cfg.maxEntities - humanCount));
     let bots = 0;
+    // Dead bots keep their slot. A round never refills an elimination.
     for (const p of this.roster) if (p.active && p.bot) bots++;
     while (bots > want) {
       const victim = this.pickBotToRemove();
@@ -254,6 +266,8 @@ export class Sim {
     this.land.beginTick();
     if (opts && opts.humans !== undefined) this.maintainBots(opts.humans);
     this.botView.tick = this.tick;
+    this.heat = this.heatNow();
+    this.botView.heat = this.heat;
     const dt = this.tickDt;
 
     for (const p of this.roster) {
@@ -276,12 +290,72 @@ export class Sim {
     this.resolveHeadOns();
     this.collectPickups();
     this.spawnPickups();
-    this.respawnBots();
 
     for (const p of this.roster) {
       if (!p.active) continue;
       p.land = this.land.areaOf(p.id);
     }
+    this.maybeEnd();
+  }
+
+  private heatNow(): number {
+    const alive = this.living();
+    const late = this.tick >= this.cfg.roundHeatSec * this.cfg.tickHz ? 1 : 0;
+    const few = alive <= 3 ? 1 : alive <= 5 ? 0.7 : alive <= 8 ? 0.35 : 0;
+    return Math.max(late, few);
+  }
+
+  private living(): number {
+    let n = 0;
+    for (const p of this.roster) if (p.active && p.alive) n++;
+    return n;
+  }
+
+  private maybeEnd(): void {
+    if (this.over) return;
+    if (!this.sealed && this.tick >= this.cfg.roundOpenSec * this.cfg.tickHz) {
+      this.sealed = true;
+      this.roundSize = this.roster.filter((p) => p.active).length;
+    }
+    const alive = this.living();
+    if (this.sealed && alive === 1) {
+      let winner: Player | null = null;
+      for (const p of this.roster) if (p.active && p.alive) winner = p;
+      this.crown(winner);
+      return;
+    }
+    if (this.tick >= this.cfg.roundCapSec * this.cfg.tickHz) {
+      let winner: Player | null = null;
+      for (const p of this.roster) {
+        if (!p.active || !p.alive) continue;
+        if (!winner || p.land > winner.land) winner = p;
+      }
+      this.crown(winner);
+    }
+  }
+
+  /** One pet owns the blob. Everyone else is eliminated and their land is swept in. */
+  private crown(winner: Player | null): void {
+    if (this.over || !winner) return;
+    this.over = true;
+    if (this.roundSize < 1) this.roundSize = this.roster.filter((p) => p.active).length;
+    const losers: Player[] = [];
+    for (const p of this.roster) if (p.active && p.alive && p.id !== winner.id) losers.push(p);
+    for (const p of losers) this.kill(p, winner, 'time');
+    this.land.flood(winner.id);
+    winner.land = this.land.areaOf(winner.id);
+    const total = Math.max(1, this.land.mapArea);
+    this.events.push({
+      e: 'win',
+      id: winner.id,
+      name: winner.name,
+      total: Math.max(1, this.roundSize),
+      pct: (winner.land / total) * 100,
+      kills: winner.kills,
+      coins: winner.coins,
+      xp: winner.xp,
+      time: winner.aliveMs,
+    });
   }
 
   consumeEvents(): SimEvent[] {
@@ -649,6 +723,7 @@ export class Sim {
     if (!victim.alive) return;
     if (reason === 'trail' && this.tick < victim.shieldUntil) return;
     if (
+      reason !== 'time' &&
       this.tick < victim.invulnUntil &&
       (reason === 'headon' || reason === 'trail' || reason === 'enclosed')
     ) {
@@ -657,12 +732,13 @@ export class Sim {
     const total = Math.max(1, this.land.mapArea);
     const land = this.land.areaOf(victim.id);
     victim.lastPct = (land / total) * 100;
-    victim.lastRank = this.rankOf(victim.id);
+    victim.alive = false;
+    victim.outside = false;
+    const place = this.living() + 1;
+    victim.lastRank = place;
     victim.lastTime = victim.aliveMs;
     victim.deathReason = reason;
     victim.deathKiller = killer ? killer.id : 0;
-    victim.alive = false;
-    victim.outside = false;
 
     const credit = killer && killer.id !== victim.id && killer.alive;
     if (credit && killer) {
@@ -693,24 +769,14 @@ export class Sim {
       xp: victim.xp,
       time: victim.aliveMs,
       rank: victim.lastRank,
+      total: Math.max(1, this.roundSize || this.roster.filter((p) => p.active).length),
     });
-    this.land.clear(victim.id);
+    if (credit && killer) this.land.takeAll(victim.id, killer.id);
+    else this.land.clear(victim.id);
     victim.trailLen = 0;
     victim.land = 0;
-    if (victim.bot) {
-      victim.respawnTick = this.tick + Math.max(1, Math.round(this.cfg.botRespawnSec * this.cfg.tickHz));
-    }
+    if (killer) killer.land = this.land.areaOf(killer.id);
     this.dropKillCoins(victim.x, victim.y);
-  }
-
-  private rankOf(id: number): number {
-    const land = this.land.areaOf(id);
-    let better = 0;
-    for (const p of this.roster) {
-      if (!p.active || !p.alive || p.id === id) continue;
-      if (this.land.areaOf(p.id) > land) better++;
-    }
-    return better + 1;
   }
 
   private resolveHeadOns(): void {
@@ -839,16 +905,6 @@ export class Sim {
   private xpBonus(p: Player, base: number): number {
     if (base === 0 || p.passiveId !== 'scholar') return base;
     return base * (1 + effectOf(this.cfg.abilities.scholarXp, p.rarity, this.cfg, p.level));
-  }
-
-  private respawnBots(): void {
-    for (const p of this.roster) {
-      if (!p.active || !p.bot || p.alive) continue;
-      if (p.respawnTick !== 0 && this.tick >= p.respawnTick) {
-        this.spawn(p);
-        this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: true });
-      }
-    }
   }
 
   private pickBotToRemove(): Player | null {

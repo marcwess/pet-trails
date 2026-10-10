@@ -90,6 +90,7 @@ export class Input {
     let x = 0;
     let y = 0;
     let steering = false;
+    let hold = false;
     const w = this.keys.has('w') || this.keys.has('arrowup');
     const a = this.keys.has('a') || this.keys.has('arrowleft');
     const s = this.keys.has('s') || this.keys.has('arrowdown');
@@ -101,9 +102,15 @@ export class Input {
     } else if (this.active) {
       const dx = this.lastX - this.originX;
       const dy = this.lastY - this.originY;
-      if (dx * dx + dy * dy > 36) {
+      const mag = Math.hypot(dx, dy);
+      // Inside the deadzone the last heading stays put, so a finger sliding
+      // across the anchor cannot flip the pet around.
+      if (mag > 14 && !this.reverses(dx, -dy, mag)) {
         x = dx;
         y = -dy;
+        steering = true;
+      } else if (this.steering) {
+        hold = true;
         steering = true;
       }
     } else if (this.fine && this.mouseValid && !this.keysOnly) {
@@ -116,13 +123,23 @@ export class Input {
         if (dx * dx + dy * dy > 16) steering = true;
       }
     }
-    if (steering) {
+    if (steering && !hold) {
       this.desiredX = x;
       this.desiredY = y;
+    }
+    if (steering) {
       this.steering = true;
     } else if (!this.active) {
       this.steering = false;
     }
+  }
+
+  /** A short drag through the anchor must not spin the target 180 degrees. */
+  private reverses(x: number, y: number, mag: number): boolean {
+    const prev = Math.hypot(this.desiredX, this.desiredY);
+    if (prev < 0.2 || mag >= 32) return false;
+    const dot = (this.desiredX / prev) * (x / mag) + (this.desiredY / prev) * (y / mag);
+    return dot < -0.35;
   }
 
   /** Knob sits along the drag, which is the world direction (screen up = north). */
