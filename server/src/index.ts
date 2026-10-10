@@ -64,6 +64,11 @@ export function startServer(opts?: { port?: number; host?: string; tick?: boolea
       if (tick) {
         const hz = room.sim.cfg.tickHz;
         timer = setInterval(() => {
+          const now = Date.now();
+          for (let i = rooms.length - 1; i >= 0; i--) {
+            // Finished or abandoned rounds with nobody connected would otherwise tick forever.
+            if (rooms.length > 1 && rooms[i]!.idle(now)) rooms.splice(i, 1);
+          }
           for (const live of rooms) {
             try {
               live.step();

@@ -41,6 +41,16 @@ export class Room {
     this.sim.lockstep = true;
   }
 
+  /** Still in its opening seconds: a new player may join this round. */
+  isOpen(now = Date.now()): boolean {
+    return !this.sim.over && !this.sim.sealed && now - this.createdAt < this.sim.cfg.roundOpenSec * 1000;
+  }
+
+  /** No sockets and no longer joinable. The hub can stop ticking it. */
+  idle(now = Date.now()): boolean {
+    return this.conns.length === 0 && !this.isOpen(now);
+  }
+
   hasSlot(): boolean {
     return this.conns.length < this.sim.cfg.maxEntities && !this.sim.over;
   }
@@ -124,6 +134,12 @@ export class Room {
     const pet = conn.pet >= 0 && conn.pet < SPECIES.length ? conn.pet : Math.floor(Math.random() * SPECIES.length);
     conn.pet = pet;
     if (conn.id === null) {
+      // The socket was seated when the page loaded. If the player idled on Home past the
+      // opening window, this round is already sealed: start in one that is still open.
+      if (this.onRejoin && !this.isOpen()) {
+        this.onRejoin(conn);
+        return;
+      }
       const p = this.sim.addHuman(conn.name, pet, conn.kit, conn.level);
       if (!p) {
         this.send(conn, { t: 'full' });

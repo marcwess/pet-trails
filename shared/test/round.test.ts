@@ -2,6 +2,34 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Sim } from '../src/sim.ts';
 
+test('a late burst of inputs drains two per tick, and a silent client keeps gliding', () => {
+  const sim = new Sim(
+    { gridW: 80, gridH: 80, targetPopulation: 1, pickupTarget: 0, speed: 16.2, turnRate: 6.12, tickHz: 20 },
+    2,
+  );
+  const a = sim.addHuman('A', 0);
+  assert.ok(a);
+  sim.lockstep = true;
+  sim.debugPlace(a.id, 40, 40, 0);
+  for (let s = 1; s <= 5; s++) sim.setInput(a.id, 1, 0, s);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 2, 'a backlog takes a second step');
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 4);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 5, 'normal depth is one step per tick');
+  const x = a.x;
+  for (let i = 0; i < 6; i++) sim.step({ humans: 1 });
+  assert.equal(a.x, x, 'a short gap waits');
+  sim.step({ humans: 1 });
+  assert.ok(a.x > x, 'a long silence moves along the held heading');
+  assert.equal(a.lastSeq, 6, 'and spends the next seq');
+  sim.setInput(a.id, 0, 1, 6);
+  sim.setInput(a.id, 1, 0, 7);
+  sim.step({ humans: 1 });
+  assert.equal(a.lastSeq, 7, 'the stale input is dropped');
+});
+
 test('queued inputs apply one per tick in order', () => {
   const sim = new Sim(
     { gridW: 80, gridH: 80, targetPopulation: 1, pickupTarget: 0, speed: 16.2, turnRate: 6.12, tickHz: 20 },
@@ -13,11 +41,11 @@ test('queued inputs apply one per tick in order', () => {
   sim.debugPlace(a.id, 40, 40, 0);
   sim.setInput(a.id, 1, 0, 1);
   sim.setInput(a.id, 0, 1, 2);
-  sim.setInput(a.id, -1, 0, 3);
   sim.step({ humans: 1 });
   assert.equal(a.lastSeq, 1);
   assert.ok(a.x > 40.5, 'first input moves east');
   const h1 = a.heading;
+  sim.setInput(a.id, -1, 0, 3);
   sim.step({ humans: 1 });
   assert.equal(a.lastSeq, 2);
   assert.ok(a.heading > h1, 'second input starts the turn north');
@@ -162,14 +190,14 @@ test('eliminated bots stay dead and heat rises as the field thins', () => {
   assert.equal(sim.sealed, true);
   const alive = () => sim.roster.filter((p) => p.active && p.alive).length;
   assert.ok(alive() > 5);
-  assert.equal(sim.heat, 0.35);
+  assert.equal(sim.heat, 0, 'a full field farms land');
   const bots = sim.roster.filter((p) => p.bot && p.alive);
   const removed = bots.pop()!;
   sim.remove(removed.id);
   while (alive() > 3) sim.remove(bots.pop()!.id);
   sim.step({ humans: 1 });
   assert.equal(alive(), 3);
-  assert.equal(sim.heat, 1);
+  assert.equal(sim.heat, 0.6);
   assert.equal(removed.active, false);
   const ids = new Set(sim.roster.filter((p) => p.active).map((p) => p.id));
   for (let i = 0; i < 30; i++) sim.step({ humans: 1 });
@@ -197,4 +225,23 @@ test('the late clock heats bots even while the field is full', () => {
   sim.step({ humans: 1 });
   assert.equal(sim.heat, 1);
   assert.ok(sim.roster.filter((p) => p.active && p.alive).length > 8);
+});
+
+test('a bot that falls while the room is still open comes back; after the seal it stays out', () => {
+  const sim = new Sim({ targetPopulation: 6, pickupTarget: 0, roundOpenSec: 2, roundCapSec: 999, roundHeatSec: 999 }, 9);
+  const a = sim.addHuman('Ada', 0);
+  assert.ok(a);
+  a.frozen = true;
+  sim.step({ humans: 1 });
+  const kill = (p: unknown) => (sim as unknown as { kill: (v: unknown, k: null, r: string) => void }).kill(p, null, 'time');
+  const early = sim.roster.find((p) => p.bot && p.alive)!;
+  kill(early);
+  assert.equal(early.alive, false);
+  for (let i = 0; i < Math.ceil(sim.cfg.botRespawnSec * sim.cfg.tickHz) + 1; i++) sim.step({ humans: 1 });
+  assert.equal(early.alive, true, 'refilled during the opening');
+  while (!sim.sealed) sim.step({ humans: 1 });
+  const late = sim.roster.find((p) => p.bot && p.alive && p !== early)!;
+  kill(late);
+  for (let i = 0; i < 60; i++) sim.step({ humans: 1 });
+  assert.equal(late.alive, false, 'out is out once sealed');
 });

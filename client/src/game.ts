@@ -1120,8 +1120,20 @@ export class Game {
       return this.remoteClock;
     }
     const step = Math.max(0, this.frameDt) * CONFIG.tickHz;
-    if (target > this.remoteClock) this.remoteClock = Math.min(target, this.remoteClock + Math.max(step, step * 1.35));
-    else this.remoteClock = target;
+    const err = target - this.remoteClock;
+    if (Math.abs(err) > 10) {
+      // Far off (tab was hidden, room changed): jump once instead of fast-forwarding.
+      this.remoteClock = target;
+      return this.remoteClock;
+    }
+    // Slew, never jump. A late packet slows the clock a little; a burst speeds it up a
+    // little. Snapping to the target made every remote pet hop on each hiccup.
+    let rate = Math.max(0.6, Math.min(1.4, 1 + err * 0.35));
+    // Ease off as the clock nears the newest snapshot, so a long stall glides to a stop
+    // rather than running out of buffer and then leaping when data returns.
+    const lead = this.serverTick - this.remoteClock;
+    if (lead < 1) rate *= Math.max(0, lead);
+    this.remoteClock += step * rate;
     return this.remoteClock;
   }
 

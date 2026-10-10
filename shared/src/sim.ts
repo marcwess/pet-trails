@@ -26,6 +26,11 @@ const BOT_LEVELS = [1, 5, 8, 10, 12, 15, 18, 20];
  * Authoritative paper.io-style simulation. Territory is a multi-polygon per
  * owner. One instance runs on the server and the same class runs offline.
  */
+/** Queued inputs beyond normal jitter. At this depth a human takes two steps in one tick. */
+const LOCKSTEP_SLACK = 2;
+/** Ticks a human waits for its next input before the server moves it anyway. */
+const LOCKSTEP_WAIT = 6;
+
 export class Sim {
   readonly cfg: GameConfig;
   readonly seed: number;
@@ -271,12 +276,26 @@ export class Sim {
     p.inSeq.splice(insert, 0, seq);
     p.inX.splice(insert, 0, nx);
     p.inY.splice(insert, 0, ny);
+    // A client cannot grow the queue without bound.
+    if (p.inSeq.length > 64) {
+      p.inSeq.splice(0, p.inSeq.length - 64);
+      p.inX.splice(0, p.inX.length - 64);
+      p.inY.splice(0, p.inY.length - 64);
+      p.lastSeq = p.inSeq[0]! - 1;
+    }
   }
 
   /**
    * One queued input per tick, in seq order. A burst cannot collapse several turns
    * into one step, and a packet that arrives early waits so a later seq cannot skip ahead.
    */
+  /** Queued inputs that can be applied back to back, starting at the next seq. */
+  private dueInputs(p: Player): number {
+    let n = 0;
+    while (n < p.inSeq.length && p.inSeq[n] === p.lastSeq + 1 + n) n++;
+    return n;
+  }
+
   private applyDueInput(p: Player): boolean {
     if (p.inSeq.length === 0 || p.inSeq[0] !== p.lastSeq + 1) return false;
     p.lastSeq = p.inSeq.shift()!;
@@ -320,22 +339,45 @@ export class Sim {
 
     for (const p of this.roster) {
       if (!p.active || !p.alive || p.frozen) continue;
+      let steps = 1;
       if (!p.bot) {
         const consumed = this.applyDueInput(p);
-        if (this.lockstep && !consumed) continue;
+        if (this.lockstep) {
+          if (consumed) {
+            p.starved = 0;
+            // A burst that arrived late is spent over a few ticks instead of banking a
+            // permanent lag between the client's steps and the server's.
+            if (this.dueInputs(p) >= LOCKSTEP_SLACK) steps = 2;
+          } else if (++p.starved > LOCKSTEP_WAIT) {
+            // A silent client (backgrounded tab, dead radio) keeps gliding along the held
+            // heading. That step uses up the next seq, so its late input is dropped.
+            p.lastSeq++;
+            while (p.inSeq.length > 0 && p.inSeq[0]! <= p.lastSeq) {
+              p.inSeq.shift();
+              p.inX.shift();
+              p.inY.shift();
+            }
+          } else {
+            continue;
+          }
+        }
       }
       p.aliveMs += dt * 1000;
-      const x0 = p.x;
-      const y0 = p.y;
-      const mul = this.speedMul(p);
-      integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
-      if (!p.alive) continue;
-      this.followSegment(p, x0, y0, p.x, p.y);
+      for (let k = 0; k < steps && p.alive; k++) {
+        if (k > 0 && !this.applyDueInput(p)) break;
+        const x0 = p.x;
+        const y0 = p.y;
+        const mul = this.speedMul(p);
+        integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
+        if (!p.alive) break;
+        this.followSegment(p, x0, y0, p.x, p.y);
+      }
     }
 
     this.resolveHeadOns();
     this.collectPickups();
     this.spawnPickups();
+    this.refillOpening();
 
     for (const p of this.roster) {
       if (!p.active) continue;
@@ -346,8 +388,12 @@ export class Sim {
 
   private heatNow(): number {
     const alive = this.living();
-    const late = this.tick >= this.cfg.roundHeatSec * this.cfg.tickHz ? 1 : 0;
-    const few = alive <= 3 ? 1 : alive <= 5 ? 0.7 : alive <= 8 ? 0.35 : 0;
+    // The clock ramps from a third of the heat point up to full heat there, so a quiet
+    // round tightens gradually instead of flipping at one instant.
+    const sec = this.tick / this.cfg.tickHz;
+    const from = this.cfg.roundHeatSec / 3;
+    const late = Math.max(0, Math.min(1, (sec - from) / Math.max(1e-3, this.cfg.roundHeatSec - from)));
+    const few = alive <= 2 ? 1 : alive <= 3 ? 0.6 : alive <= 5 ? 0.25 : 0;
     return Math.max(late, few);
   }
 
@@ -822,7 +868,23 @@ export class Sim {
     victim.trailLen = 0;
     victim.land = 0;
     if (killer) killer.land = this.land.areaOf(killer.id);
+    // While the room is still open a fallen bot comes back, so a player who joins
+    // a few seconds in still finds a full field. Once sealed, out is out.
+    if (victim.bot && !this.sealed && !this.over) {
+      victim.respawnTick = this.tick + Math.max(1, Math.round(this.cfg.botRespawnSec * this.cfg.tickHz));
+    }
     this.dropKillCoins(victim.x, victim.y);
+  }
+
+  private refillOpening(): void {
+    if (this.sealed || this.over) return;
+    for (const p of this.roster) {
+      if (!p.active || !p.bot || p.alive) continue;
+      if (p.respawnTick !== 0 && this.tick >= p.respawnTick) {
+        this.spawn(p);
+        this.events.push({ e: 'spawn', id: p.id, name: p.name, pet: p.pet, bot: true });
+      }
+    }
   }
 
   private resolveHeadOns(): void {

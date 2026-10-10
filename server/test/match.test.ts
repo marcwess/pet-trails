@@ -99,3 +99,33 @@ test('play again after a defeat joins a new room and does not respawn in the old
     await srv.close();
   }
 });
+
+test('play after idling on Home past the opening window starts in a fresh room', async () => {
+  const srv = await startServer({ port: 0, tick: false, seed: 5 });
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${srv.port}`);
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => resolve());
+      ws.on('error', reject);
+    });
+    ws.send(JSON.stringify({ t: 'hello', name: 'Cal', pet: 2 }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(srv.rooms.length, 1);
+    (srv.room as { createdAt: number }).createdAt = Date.now() - 30_000;
+    const welcomed = new Promise<void>((resolve) => {
+      ws.on('message', (data, isBinary) => {
+        if (!isBinary && data.toString().includes('"welcome"')) resolve();
+      });
+    });
+    ws.send(JSON.stringify({ t: 'play' }));
+    await welcomed;
+    assert.equal(srv.rooms.length, 2);
+    assert.equal(srv.room.sim.roster.some((p) => p.active && p.name === 'Cal'), false);
+    assert.ok(srv.rooms[1]!.sim.roster.some((p) => p.active && p.name === 'Cal'));
+    assert.equal(srv.room.idle(), true, 'the abandoned room can be dropped');
+    assert.equal(srv.rooms[1]!.idle(), false);
+    ws.close();
+  } finally {
+    await srv.close();
+  }
+});

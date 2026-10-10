@@ -20,6 +20,8 @@ export class Player {
   inSeq: number[] = [];
   inX: number[] = [];
   inY: number[] = [];
+  /** Lockstep ticks in a row with no input to apply. */
+  starved = 0;
   land = 0;
   kills = 0;
   coins = 0;
@@ -99,5 +101,6 @@ export class Player {
     this.inSeq.length = 0;
     this.inX.length = 0;
     this.inY.length = 0;
+    this.starved = 0;
   }
 }

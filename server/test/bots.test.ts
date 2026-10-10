@@ -12,8 +12,9 @@ test('server with bots survives 60 simulated seconds and produces kills and clai
       srv.room.step();
       for (const p of srv.room.sim.roster) {
         if (!p.active) continue;
-        if (!p.alive) dead.add(p.id);
-        else assert.equal(dead.has(p.id), false, `pet ${p.id} respawned`);
+        // Bots refill during the opening seconds. After the seal, out is out.
+        if (!p.alive && srv.room.sim.sealed) dead.add(p.id);
+        else if (p.alive) assert.equal(dead.has(p.id), false, `pet ${p.id} respawned after the seal`);
       }
     }
     const { kills, claims, deaths, claimedCells } = srv.room.sim.stats;
