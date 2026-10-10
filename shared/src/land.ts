@@ -978,6 +978,11 @@ export class LandBook {
   private readonly multi: MultiPolygon[];
   private readonly dirty = new Set<number>();
   private added: MultiPolygon = [];
+  private addedBox: { minX: number; minY: number; maxX: number; maxY: number } | null = null;
+  private readonly bminX: Float64Array;
+  private readonly bminY: Float64Array;
+  private readonly bmaxX: Float64Array;
+  private readonly bmaxY: Float64Array;
   private pending: MultiPolygon | null = null;
   private pendingId = 0;
   readonly mapRing: Ring;
@@ -994,6 +999,14 @@ export class LandBook {
     this.area = new Float64Array(maxId + 1);
     this.cx = new Float64Array(maxId + 1);
     this.cy = new Float64Array(maxId + 1);
+    this.bminX = new Float64Array(maxId + 1);
+    this.bminY = new Float64Array(maxId + 1);
+    this.bmaxX = new Float64Array(maxId + 1);
+    this.bmaxY = new Float64Array(maxId + 1);
+    this.bminX.fill(Infinity);
+    this.bminY.fill(Infinity);
+    this.bmaxX.fill(-Infinity);
+    this.bmaxY.fill(-Infinity);
     this.multi = [];
     for (let i = 0; i <= maxId; i++) this.multi.push([]);
     this.mapRing = mapRing && mapRing.length >= 4 ? mapRing : rectPoly(0, 0, mapW, mapH)[0]!;
@@ -1039,19 +1052,24 @@ export class LandBook {
   contains(id: number, x: number, y: number): boolean {
     const mp = this.multi[id];
     if (!mp || mp.length === 0) return false;
+    if (x < this.bminX[id]! || x > this.bmaxX[id]! || y < this.bminY[id]! || y > this.bmaxY[id]!) return false;
     return multiContains(mp, x, y);
   }
 
   /** Topmost owner, or 0. Overlaps should already have been subtracted. */
   ownerAt(x: number, y: number): number {
     for (let id = 1; id <= this.maxId; id++) {
-      if (this.multi[id]!.length > 0 && multiContains(this.multi[id]!, x, y)) return id;
+      if (this.multi[id]!.length === 0) continue;
+      if (x < this.bminX[id]! || x > this.bmaxX[id]! || y < this.bminY[id]! || y > this.bmaxY[id]!) continue;
+      if (multiContains(this.multi[id]!, x, y)) return id;
     }
     return 0;
   }
 
   pointInAdded(x: number, y: number): boolean {
-    return this.added.length > 0 && multiContains(this.added, x, y);
+    const box = this.addedBox;
+    if (!box || x < box.minX || x > box.maxX || y < box.minY || y > box.maxY) return false;
+    return multiContains(this.added, x, y);
   }
 
   /**
@@ -1095,6 +1113,16 @@ export class LandBook {
     this.unionPolygon(id, rectPoly(x, y, w, h));
   }
 
+  /**
+   * Store a polygon that is already inside the blob and does not overlap other land.
+   * Spawn disks use this so seating a room does not clip eleven circles against the map.
+   */
+  placeInside(id: number, poly: Polygon): void {
+    if (id < 1 || id > this.maxId || poly.length === 0 || poly[0]!.length < 4) return;
+    this.multi[id] = [[orient(poly[0]!, true)]];
+    this.recompute(id);
+  }
+
   /** Union one polygon (a circle, a fillet, a debug shape) into this owner's land. */
   unionPolygon(id: number, poly: Polygon): void {
     if (id < 1 || id > this.maxId || poly.length === 0 || poly[0]!.length < 4) return;
@@ -1111,6 +1139,7 @@ export class LandBook {
    */
   prepareClaim(id: number, xs: ArrayLike<number>, ys: ArrayLike<number>, n: number): boolean {
     this.added = [];
+    this.addedBox = null;
     this.pending = null;
     this.pendingId = 0;
     const loop = this.buildLoop(id, xs, ys, n);
@@ -1122,6 +1151,7 @@ export class LandBook {
     this.pending = loop;
     this.pendingId = id;
     this.added = added;
+    this.addedBox = boundsOf(added);
     return true;
   }
 
@@ -1157,6 +1187,7 @@ export class LandBook {
       if (id === ignore) continue;
       const mp = this.multi[id]!;
       if (mp.length === 0) continue;
+      if (this.bmaxX[id]! < x || this.bminX[id]! > x1 || this.bmaxY[id]! < y || this.bminY[id]! > y1) continue;
       if (multiHitsRect(mp, x, y, x1, y1)) return true;
     }
     return false;
@@ -1275,6 +1306,18 @@ export class LandBook {
     const c = centroidOf(mp);
     this.cx[id] = c?.x ?? 0;
     this.cy[id] = c?.y ?? 0;
+    const b = boundsOf(mp);
+    if (!b) {
+      this.bminX[id] = Infinity;
+      this.bminY[id] = Infinity;
+      this.bmaxX[id] = -Infinity;
+      this.bmaxY[id] = -Infinity;
+    } else {
+      this.bminX[id] = b.minX;
+      this.bminY[id] = b.minY;
+      this.bmaxX[id] = b.maxX;
+      this.bmaxY[id] = b.maxY;
+    }
     this.dirty.add(id);
   }
 

@@ -291,6 +291,19 @@ export const ABILITY_LABEL: Record<ActiveId | PassiveId, string> = {
   headstart: 'Head Start',
 };
 
+export const ABILITY_BLURB: Record<ActiveId | PassiveId, string> = {
+  dash: 'A short burst of speed',
+  shield: 'Your trail cannot be cut',
+  paint: 'Claim a circle of land',
+  frost: 'Slow every nearby rival',
+  recall: 'Warp home and drop your trail',
+  swift: 'Move a little faster',
+  magnet: 'Pick up coins from farther away',
+  lucky: 'More coins and a luckier loot roll',
+  scholar: 'Earn more XP from the run',
+  headstart: 'Spawn with a bigger patch of land',
+};
+
 export const ABILITY_ICON: Record<ActiveId | PassiveId, string> = {
   dash: '⚡',
   shield: '🛡️',

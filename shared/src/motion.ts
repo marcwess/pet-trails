@@ -8,6 +8,8 @@ export interface Body {
   heading: number;
   desiredX: number;
   desiredY: number;
+  /** Smoothed turn rate (rad/s). Eased so a reverse is a curve, not a snap. */
+  turnVel?: number;
 }
 
 /** Shortest signed angle from `from` to `to`, in radians. */
@@ -38,11 +40,20 @@ export function integrateBody(
 ): void {
   if (body.desiredX !== 0 || body.desiredY !== 0) {
     const target = Math.atan2(body.desiredY, body.desiredX);
-    const max = cfg.turnRate * dt;
     const d = angleDelta(body.heading, target);
-    if (d > max) body.heading += max;
-    else if (d < -max) body.heading -= max;
-    else body.heading = target;
+    const max = cfg.turnRate;
+    const want = Math.abs(d) < 1e-5 ? 0 : d > 0 ? max : -max;
+    // Reach full turn rate in about a tenth of a second, independent of tick length.
+    const blend = 1 - Math.exp(-16 * dt);
+    let omega = (body.turnVel ?? 0) + (want - (body.turnVel ?? 0)) * blend;
+    let step = omega * dt;
+    if ((d > 0 && step >= d) || (d < 0 && step <= d) || Math.abs(d) < 1e-5) {
+      body.heading = target;
+      omega = 0;
+    } else {
+      body.heading += step;
+    }
+    body.turnVel = omega;
   }
 
   const x0 = body.x;

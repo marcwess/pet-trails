@@ -6,49 +6,78 @@
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#7d8b9c" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#8fd4ff" />
     <title>Pet Trails</title>
   </head>
   <body>
     <div id="ui">
       <div id="vignette"></div>
       <div id="chip" class="chip wait" title="Connecting"></div>
-      <section id="title" class="title-screen">
-        <h1 class="logo">PET<br />TRAILS</h1>
-        <div class="title-gap"></div>
-        <div class="title-panel">
-          <label class="name-field">
-            <span>Name</span>
-            <input id="name" maxlength="16" value="You" autocomplete="nickname" enterkeyhint="done" />
-          </label>
-          <button id="play" class="btn" type="button" disabled>PLAY</button>
-          <div class="soon-row">
-            <button id="open-pets" class="btn secondary" type="button">Pets</button>
-            <button id="open-boxes" class="btn secondary" type="button">Boxes</button>
-          </div>
-          <p id="petline" class="petline">Loading pets…</p>
-            <div id="petcard" class="petcard">
-            <p id="petcard-reward" class="petcard-reward" hidden></p>
-            <div id="petcard-name">Your pet</div>
-            <div id="petcard-boost">Abilities +0%</div>
+      <section id="title" class="home">
+        <header class="topbar">
+          <button id="name-btn" class="name-pill" type="button">You</button>
+          <div class="currency coin" id="coin-chip"><span>coins</span><b id="coin-count">0</b></div>
+        </header>
+        <h1 class="logo">PET TRAILS</h1>
+        <div class="stage-slot" aria-hidden="true"></div>
+        <button id="pet-tap" class="pet-tap" type="button" aria-label="Wiggle pet"></button>
+        <div class="nameplate">
+          <div id="petcard-name" class="species-name">Your pet</div>
+          <div class="meta-row">
+            <span id="rarity-pill" class="rarity-pill">Common</span>
+            <span id="level-ring" class="level-ring" aria-label="Level">1</span>
             <div class="bar"><i id="petcard-fill"></i></div>
-            <div id="petcard-unlocks" class="chips"></div>
           </div>
         </div>
+        <p id="petcard-reward" class="reward-toast" hidden></p>
+        <button id="play" class="play-btn" type="button" disabled>PLAY</button>
+        <div class="home-actions">
+          <button id="open-pets" class="action-btn pets" type="button">
+            <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
+              <ellipse cx="16" cy="22" rx="7" ry="5.4" fill="#fff"></ellipse>
+              <circle cx="8.2" cy="13" r="3.1" fill="#fff"></circle>
+              <circle cx="16" cy="9.2" r="3.1" fill="#fff"></circle>
+              <circle cx="23.8" cy="13" r="3.1" fill="#fff"></circle>
+            </svg>
+            <span class="action-label">Pets</span>
+            <i id="pets-badge" class="dot" hidden></i>
+          </button>
+          <button id="open-boxes" class="action-btn boxes" type="button">
+            <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
+              <rect x="6" y="14" width="20" height="12" rx="3" fill="#fff"></rect>
+              <rect x="5" y="11" width="22" height="5" rx="2" fill="#fff6c8"></rect>
+              <rect x="14.2" y="11" width="3.6" height="15" fill="#ffd23f"></rect>
+              <path d="M16 12c-2.6-5.2-7.4-3.4-5.6-.8 1.6 2.2 5.6.8 5.6.8s4-3 5.6-.8c1.8-2.6-3-4.4-5.6.8z" fill="#ffd23f"></path>
+            </svg>
+            <span class="action-label">Boxes</span>
+            <i id="box-badge" class="dot" hidden></i>
+          </button>
+        </div>
+        <p id="petline" class="petline">Loading pets…</p>
+        <form id="name-pop" class="name-pop" hidden>
+          <input id="name" maxlength="16" value="You" autocomplete="off" enterkeyhint="done" aria-label="Name" />
+        </form>
       </section>
       <div id="hud" hidden>
         <div id="lb" class="lb"></div>
+        <div id="you-left" class="left-pill">10 left</div>
         <div id="you" class="you">
           <div id="you-pct">0.0%</div>
           <div id="you-meta">
             <span id="you-kills">0</span>
             <span id="you-train">0</span>
-            <span id="you-left">10 left</span>
           </div>
         </div>
-        <div id="steer" class="steer">Drag up to go up</div>
+        <div id="steer" class="steer hide">
+          <svg class="steer-hand" viewBox="0 0 48 48" aria-hidden="true">
+            <path fill="currentColor" d="M22 4c-1.8 0-3.2 1.4-3.2 3.2v12.4c-1.3-.9-3-1.1-4.5-.2-2 1.1-2.7 3.6-1.6 5.6l6.4 10.6C21.2 39.6 24.6 42 28.4 42H35c3.9 0 7-3.1 7-7V22.2c0-1.8-1.4-3.2-3.2-3.2-.5 0-1 .1-1.4.3v-3.1c0-1.8-1.4-3.2-3.2-3.2s-3.2 1.4-3.2 3.2v2.6c-.4-.2-.9-.3-1.4-.3-1.8 0-3.2 1.4-3.2 3.2V7.2C26.4 5.4 25 4 23.2 4H22z"/>
+          </svg>
+          <span>Drag anywhere to move</span>
+        </div>
         <button id="ability" class="ability" type="button" aria-label="Ability">
           <svg class="cd" viewBox="0 0 100 100" aria-hidden="true">
+            <circle class="cd-track" cx="50" cy="50" r="44"></circle>
             <circle id="ability-ring" cx="50" cy="50" r="44"></circle>
           </svg>
           <span id="ability-icon">⚡</span>
@@ -68,16 +97,18 @@
         <p id="death-kicker" class="eyebrow">Run over</p>
         <h2 id="death-title">Your trail was cut!</h2>
         <ul id="death-stats" class="stats"></ul>
-        <button id="again" class="btn" type="button">PLAY AGAIN</button>
+        <button id="again" class="play-btn" type="button">PLAY AGAIN</button>
       </section>
       <div id="toasts"></div>
       <div id="popups"></div>
       <div id="labels"></div>
+      <div id="debug" hidden></div>
       <div id="perf" hidden></div>
       <section id="pets" class="meta" hidden>
         <div class="meta-bar">
-          <button id="pets-back" class="btn secondary slim" type="button">Back</button>
+          <button id="pets-back" class="back" type="button">Back</button>
           <h2>Pets</h2>
+          <p id="pet-count" class="pet-count">Collected 0/24</p>
         </div>
         <div id="pet-grid" class="pet-grid"></div>
         <div id="pet-detail" class="pet-detail" hidden>
@@ -87,14 +118,13 @@
       </section>
       <section id="boxes" class="meta" hidden>
         <div class="meta-bar">
-          <button id="boxes-back" class="btn secondary slim" type="button">Back</button>
+          <button id="boxes-back" class="back" type="button">Back</button>
           <h2>Boxes</h2>
         </div>
         <div class="box-panel">
           <p id="box-coins" class="box-coins">0 coins</p>
-          <p class="box-copy">A mystery box rolls a pet, a rarity, and a fresh kit.</p>
-          <button id="box-buy" class="btn" type="button">Buy</button>
-          <button id="box-open" class="btn secondary" type="button">Open</button>
+          <p class="box-copy">One tap buys a box and opens it. A roll is a pet, a rarity, and a fresh kit.</p>
+          <button id="box-go" class="play-btn" type="button">Open</button>
         </div>
       </section>
       <div id="reveal" class="reveal" hidden>

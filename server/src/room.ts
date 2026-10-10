@@ -207,7 +207,7 @@ export class Room {
       conn.id = p.id;
       // First look at the room. Send every current polygon, not a cell snapshot.
       this.sendWelcome(conn);
-      this.sendDelta(conn, this.sim.consumeEvents(), this.sim.land.encodeAll());
+      this.sendDelta(conn, this.sim.consumeEvents(), this.sim.land.encodeAll(), this.snapshotEnts(), this.encodePickups());
       return;
     }
     const existing = this.sim.players[conn.id];
@@ -230,25 +230,27 @@ export class Room {
   private broadcast(): void {
     const events = this.sim.consumeEvents() as WireEvent[];
     const lands = this.sim.landPatch();
+    const ents = this.snapshotEnts();
+    const pickups = this.encodePickups();
     for (const conn of this.conns) {
       if (conn.id === null || conn.ws.readyState !== conn.ws.OPEN) continue;
-      this.sendDelta(conn, events, lands);
+      this.sendDelta(conn, events, lands, ents, pickups);
     }
   }
 
-  private sendDelta(conn: Conn, events: WireEvent[], lands: number[]): void {
-    const id = conn.id;
-    if (id === null) return;
-    const self = this.sim.players[id];
-    if (!self) return;
+  /** One entity list per tick. Every socket in the room sees the same pets. */
+  private snapshotEnts(): EntSnap[] {
     const ents: EntSnap[] = [];
+    const tick = this.sim.tick;
+    const hz = this.sim.cfg.tickHz;
+    const trainCap = this.sim.cfg.maxTrainVisible;
     for (const p of this.sim.roster) {
       if (!p.active) continue;
       let f = 0;
       if (p.alive) f |= FLAG_ALIVE;
       if (p.bot) f |= FLAG_BOT;
       if (p.outside) f |= FLAG_OUTSIDE;
-      const visible = Math.min(this.sim.cfg.maxTrainVisible, p.trainLen);
+      const visible = Math.min(trainCap, p.trainLen);
       const tr: number[] = [];
       for (let i = 0; i < visible; i++) tr.push(p.train[i]!);
       ents.push({
@@ -265,14 +267,19 @@ export class Room {
         tn: p.trainLen,
         tr,
         ry: Math.max(0, RARITY_ORDER.indexOf(p.rarity)),
-        cd: Math.max(0, (p.cdUntil - this.sim.tick) / this.sim.cfg.tickHz),
-        st:
-          (this.sim.tick < p.dashUntil ? 1 : 0) |
-          (this.sim.tick < p.shieldUntil ? 2 : 0) |
-          (this.sim.tick < p.slowUntil ? 4 : 0),
+        cd: Math.max(0, (p.cdUntil - tick) / hz),
+        st: (tick < p.dashUntil ? 1 : 0) | (tick < p.shieldUntil ? 2 : 0) | (tick < p.slowUntil ? 4 : 0),
         lv: p.level,
       });
     }
+    return ents;
+  }
+
+  private sendDelta(conn: Conn, events: WireEvent[], lands: number[], ents: EntSnap[], pickups: number[]): void {
+    const id = conn.id;
+    if (id === null) return;
+    const self = this.sim.players[id];
+    if (!self) return;
     const delta: DeltaMsg = {
       t: 'delta',
       tick: this.sim.tick,
@@ -282,7 +289,7 @@ export class Room {
       events,
     };
     if (lands.length > 0) delta.lands = lands;
-    delta.pickups = this.encodePickups();
+    delta.pickups = pickups;
     this.send(conn, delta);
   }
 

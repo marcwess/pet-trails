@@ -23,7 +23,24 @@ export class NetClient {
   onMode: ((mode: NetMode) => void) | null = null;
   onFull: (() => void) | null = null;
 
-  constructor(private readonly url: string) {}
+  /** One-way delay from `?lag=`, so a local server can feel like a phone RTT. */
+  private readonly lag: number;
+  /** Recent packets, only when `?debug=1`. */
+  readonly trace: string[] = [];
+  private readonly tracing: boolean;
+
+  constructor(private readonly url: string) {
+    const raw = typeof location === 'undefined' ? '' : new URLSearchParams(location.search).get('lag') ?? '';
+    const n = Number(raw);
+    this.lag = Number.isFinite(n) && n > 0 ? Math.min(400, n) : 0;
+    this.tracing = typeof location !== 'undefined' && new URLSearchParams(location.search).get('debug') === '1';
+  }
+
+  private note(line: string): void {
+    if (!this.tracing) return;
+    this.trace.push(line);
+    if (this.trace.length > 40) this.trace.shift();
+  }
 
   start(): void {
     if (this.mode !== 'connecting') return;
@@ -81,7 +98,10 @@ export class NetClient {
       if (this.ws === ws) this.ws = null;
       if (this.mode === 'online') this.setMode('offline');
     };
-    ws.onmessage = (ev) => this.onMessage(ev.data);
+    ws.onmessage = (ev) => {
+      if (this.lag > 0) window.setTimeout(() => this.onMessage(ev.data), this.lag);
+      else this.onMessage(ev.data);
+    };
   }
 
   whenSettled(): Promise<NetMode> {
@@ -90,7 +110,12 @@ export class NetClient {
   }
 
   send(msg: object): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    if ((msg as { t?: string }).t !== 'ping') this.note('> ' + JSON.stringify(msg).slice(0, 96));
+    const deliver = () => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    };
+    if (this.lag > 0) window.setTimeout(deliver, this.lag);
+    else deliver();
   }
 
   private setMode(mode: NetMode): void {
@@ -118,11 +143,17 @@ export class NetClient {
     }
     if (!msg || typeof msg !== 'object') return;
     const t = (msg as { t?: string }).t;
-    if (t === 'welcome') this.onWelcome?.(msg as WelcomeMsg);
-    else if (t === 'delta') this.onDelta?.(msg as DeltaMsg);
-    else if (t === 'pong') {
+    if (t === 'welcome') {
+      const w = msg as WelcomeMsg;
+      this.note(`< welcome id=${w.id}`);
+      this.onWelcome?.(w);
+    } else if (t === 'delta') {
+      const d = msg as DeltaMsg;
+      this.note(`< delta ack=${d.ack} you=${d.you?.join(',')}`);
+      this.onDelta?.(d);
+    } else if (t === 'pong') {
       const n = (msg as { n?: number }).n;
       if (typeof n === 'number') this.ping = performance.now() - n;
-    }     else if (t === 'full') this.onFull?.();
+    } else if (t === 'full') this.onFull?.();
   }
 }

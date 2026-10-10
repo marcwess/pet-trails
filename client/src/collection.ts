@@ -1,4 +1,5 @@
 import {
+  ABILITY_BLURB,
   ABILITY_ICON,
   ABILITY_LABEL,
   CONFIG,
@@ -8,16 +9,21 @@ import {
   buyBox,
   equippedPet,
   kitOf,
+  levelPower,
   openBox,
+  unlockNames,
   type PetInstance,
   type Profile,
 } from '@pet-trails/shared';
 import { mulberry32, randomSeed } from '@pet-trails/shared';
+import { sfx } from './sfx.js';
 
 export interface CollectionHost {
   save(): void;
-  preview(species: number | null): void;
+  preview(species: number | null, level?: number): void;
   line(): void;
+  portrait(species: number): string;
+  silhouette?(species: number): string;
 }
 
 /** Pets and Boxes screens. The profile stays in localStorage. */
@@ -32,12 +38,7 @@ export class Collection {
     must('open-boxes').addEventListener('click', () => this.showBoxes());
     must('pets-back').addEventListener('click', () => this.close());
     must('boxes-back').addEventListener('click', () => this.close());
-    must('box-buy').addEventListener('click', () => {
-      if (!buyBox(this.profile)) return;
-      this.host.save();
-      this.paintBoxes();
-    });
-    must('box-open').addEventListener('click', () => this.open());
+    must('box-go').addEventListener('click', () => this.buyAndOpen());
     must('reveal').addEventListener('click', () => {
       if (must('reveal').dataset.phase === 'reveal') this.finishReveal();
     });
@@ -84,22 +85,55 @@ export class Collection {
   private paintGrid(): void {
     const grid = must('pet-grid');
     grid.replaceChildren();
-    const equipped = equippedPet(this.profile).instanceId;
+    const equipped = equippedPet(this.profile);
+    const owned = new Map<number, PetInstance>();
     for (const pet of this.profile.pets) {
-      const card = document.createElement('button');
-      card.type = 'button';
-      card.className = 'pcard' + (pet.rarity === 'legendary' ? ' legendary' : '') + (pet.instanceId === equipped ? ' on' : '');
-      card.style.borderColor = RARITY_COLOR[pet.rarity];
-      const species = SPECIES[pet.species] ?? 'cat';
-      const active = pet.actives[pet.equippedActive];
-      const passive = pet.passives[pet.equippedPassive];
-      card.innerHTML =
+      const prev = owned.get(pet.species);
+      if (!prev || pet.instanceId === equipped.instanceId || (prev.instanceId !== equipped.instanceId && pet.level > prev.level)) {
+        owned.set(pet.species, pet);
+      }
+    }
+    must('pet-count').textContent = `Collected ${owned.size}/${SPECIES.length}`;
+    // Owned pets first (the equipped one leads), locked silhouettes after.
+    const order = SPECIES.map((_, i) => i).sort((a, b) => {
+      const pa = owned.get(a);
+      const pb = owned.get(b);
+      const ra = pa ? (pa.instanceId === equipped.instanceId ? 0 : 1) : 2;
+      const rb = pb ? (pb.instanceId === equipped.instanceId ? 0 : 1) : 2;
+      return ra - rb || a - b;
+    });
+    for (const speciesId of order) {
+      const pet = owned.get(speciesId);
+      const species = SPECIES[speciesId] ?? 'cat';
+      const portrait = this.host.portrait(speciesId);
+      if (pet) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'pcard' + (pet.rarity === 'legendary' ? ' legendary' : '') + (pet.instanceId === equipped.instanceId ? ' on' : '');
+        card.style.borderColor = RARITY_COLOR[pet.rarity];
+        card.classList.add(`rarity-${pet.rarity}`);
+        card.innerHTML =
+          `<span class="portrait-wrap">` +
+          (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
+          `<span class="lv-badge">${pet.level}</span>` +
+          `</span>` +
+          `<b>${SPECIES_LABEL[species]}</b>` +
+          `<span class="rare-name">${label(pet.rarity)}</span>`;
+        card.addEventListener('click', () => this.showDetail(pet));
+        grid.appendChild(card);
+        continue;
+      }
+      const shade = this.host.silhouette?.(speciesId) ?? '';
+      const locked = document.createElement('div');
+      locked.className = 'pcard locked';
+      locked.innerHTML =
+        `<span class="portrait-wrap">` +
+        (shade ? `<img class="portrait" alt="" src="${shade}" />` : `<i class="portrait"></i>`) +
+        `<span class="lock-mark">?</span>` +
+        `</span>` +
         `<b>${SPECIES_LABEL[species]}</b>` +
-        `<span class="rare-name">${label(pet.rarity)}</span>` +
-        `<span class="lv">Lv ${pet.level}</span>` +
-        `<span class="kit">${ABILITY_ICON[active]} ${ABILITY_LABEL[active]} · ${ABILITY_ICON[passive]} ${ABILITY_LABEL[passive]}</span>`;
-      card.addEventListener('click', () => this.showDetail(pet));
-      grid.appendChild(card);
+        `<span class="find">Find in Mystery Boxes</span>`;
+      grid.appendChild(locked);
     }
   }
 
@@ -107,7 +141,7 @@ export class Collection {
     must('pet-grid').hidden = true;
     must('pet-detail').hidden = false;
     must('pets').classList.add('detailing');
-    this.host.preview(pet.species);
+    this.host.preview(pet.species, pet.level);
     const sheet = must('pet-sheet');
     const species = SPECIES[pet.species] ?? 'cat';
     sheet.replaceChildren();
@@ -117,7 +151,15 @@ export class Collection {
     rare.className = 'rare-name';
     rare.textContent = `${label(pet.rarity)} · Lv ${pet.level}`;
     rare.style.color = RARITY_COLOR[pet.rarity];
-    sheet.append(title, rare, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
+    const boost = document.createElement('p');
+    boost.className = 'boost';
+    const pct = Math.round((levelPower(pet.level) - 1) * 100);
+    boost.textContent = pct > 0 ? `Abilities +${pct}%` : 'Abilities +0%';
+    const next = document.createElement('p');
+    next.className = 'next-line';
+    const names = unlockNames(pet.level);
+    next.textContent = names.length > 0 ? names.join(' · ') : 'Next: Sparkle at 3';
+    sheet.append(title, rare, boost, next, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
     const equip = document.createElement('button');
     equip.type = 'button';
     equip.className = 'btn';
@@ -138,7 +180,13 @@ export class Collection {
     ids.forEach((id, index) => {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = `${ABILITY_ICON[id]} ${ABILITY_LABEL[id]}`;
+      const name = document.createElement('span');
+      name.className = 'kit-name';
+      name.textContent = `${ABILITY_ICON[id]} ${ABILITY_LABEL[id]}`;
+      const what = document.createElement('small');
+      what.className = 'kit-what';
+      what.textContent = ABILITY_BLURB[id];
+      btn.append(name, what);
       const on = kind === 'active' ? pet.equippedActive === index : pet.equippedPassive === index;
       if (on) btn.classList.add('on');
       btn.addEventListener('click', () => {
@@ -154,19 +202,28 @@ export class Collection {
 
   private paintBoxes(): void {
     must('box-coins').textContent = `${Math.floor(this.profile.coins)} coins`;
-    const buy = must('box-buy') as HTMLButtonElement;
-    const open = must('box-open') as HTMLButtonElement;
-    buy.textContent = `Buy · ${CONFIG.boxPrice}`;
-    buy.disabled = this.profile.coins < CONFIG.boxPrice;
+    const go = must('box-go') as HTMLButtonElement;
     const n = this.profile.freeBoxes;
-    open.textContent = n > 0 ? `Open · ${n}` : 'Open';
-    open.disabled = n <= 0;
+    if (n > 0) {
+      go.textContent = n > 1 ? `Open · ${n}` : 'Open';
+      go.disabled = false;
+    } else {
+      go.textContent = `Open · ${CONFIG.boxPrice}`;
+      go.disabled = this.profile.coins < CONFIG.boxPrice;
+    }
+  }
+
+  private buyAndOpen(): void {
+    if (this.profile.freeBoxes <= 0 && !buyBox(this.profile)) return;
+    this.host.save();
+    this.open();
   }
 
   private open(): void {
     if (this.profile.freeBoxes <= 0) return;
     const pet = openBox(this.profile, mulberry32(randomSeed()));
     if (!pet) return;
+    sfx.open();
     this.host.save();
     this.paintBoxes();
     this.playReveal(pet);

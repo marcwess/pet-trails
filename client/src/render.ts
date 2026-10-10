@@ -1,4 +1,4 @@
-import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, angleDelta, mapBlob, type MultiPolygon } from '@pet-trails/shared';
+import { CONFIG, PALETTE, RARITY_ORDER, RARITY_RGB, SPECIES, SPECIES_LABEL, angleDelta, mapBlob, type MultiPolygon } from '@pet-trails/shared';
 import {
   BufferAttribute,
   BufferGeometry as BufGeo,
@@ -28,11 +28,14 @@ import {
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
+  Shape,
+  ShapeGeometry,
   SphereGeometry,
   TorusGeometry,
   Vector2,
   Vector3,
   WebGLRenderer,
+  WebGLRenderTarget,
   type BufferGeometry,
   type Texture,
 } from 'three';
@@ -42,6 +45,16 @@ import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
 const WORLD = CONFIG.worldScale;
+/**
+ * Kenney cube pets face +Z. On the tiger, lion, pig, and cat the front
+ * legs and the painted face sit on +Z and the tail sits on −Z.
+ * placePet yaws by π/2 − heading, then the scene mirror flips X.
+ * 2π/3 aims that +Z face at the home camera, 30° off axis, so the
+ * eyes read in a 3/4 view on Home, portraits, detail, and the reveal.
+ */
+const HOME_FACE = Math.PI / 2 + Math.PI / 6;
+/** Top of the home pedestal. placePet adds 0.24, so feet use this minus 0.24. */
+const PODIUM_TOP = 0.23;
 /** Pale playable ground. Inside the blob this is the clear color, so it costs no fragments. */
 const FLOOR_COLOR = 0xe7edf3;
 /** Dark surround. Drawn only as the ring outside the blob. */
@@ -80,15 +93,24 @@ vec3 petRgb(vec3 hsl) {
   float p = 2.0 * l - q;
   return vec3(petHue(p, q, h + 1.0 / 3.0), petHue(p, q, h), petHue(p, q, h - 1.0 / 3.0));
 }
-vec3 petRecolor(vec3 rgb, float id) {
+vec3 petToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(0.454545)); }
+vec3 petToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+// Hue moves the short way round the wheel, so pink goes to gold through orange, not green.
+float petHueTo(float h, float t, float k) { float d = fract(t - h + 0.5) - 0.5; return fract(h + d * k); }
+vec3 petRecolor(vec3 linear, float id) {
   int v = int(id + 0.5);
-  if (v == 0) return rgb;
+  // Only the four milestone swaps. Anything else, including a missing
+  // attribute, stays the Kenney colormap.
+  if (v < 1 || v > 4) return linear;
+  vec3 rgb = petToSrgb(linear);
   vec3 hsl = petHsl(rgb);
-  if (v == 1) { hsl.x = 0.75; hsl.y *= 0.28; hsl.z *= 0.42; }
-  else if (v == 2) { hsl.x = mix(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.82, hsl.z * 1.05); }
-  else if (v == 3) { hsl.x = mix(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
-  else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.2, 0.38, 0.75); }
-  return petRgb(hsl);
+  // Shadow used to force hue 0.75 and crush saturation in linear space,
+  // which turned a pink pig into a flat gray. Keep the animal's hue.
+  if (v == 1) { hsl.y = min(1.0, hsl.y * 0.9); hsl.z = clamp(hsl.z * 0.62, 0.16, 0.58); }
+  else if (v == 2) { hsl.x = petHueTo(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.78, hsl.z * 1.08); }
+  else if (v == 3) { hsl.x = petHueTo(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
+  else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.15, 0.42, 0.72); }
+  return petToLinear(petRgb(hsl));
 }
 `;
 
@@ -100,7 +122,10 @@ function enableRecolor(mat: MeshBasicMaterial | MeshLambertMaterial): void {
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRecolor = recolor;');
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>\nvarying float vRecolor;\n${RECOLOR_GLSL}`)
-      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);');
+      .replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);',
+      );
   };
 }
 
@@ -600,6 +625,10 @@ export class Renderer {
   private readonly shadows: InstancedMesh;
   private readonly bases: InstancedMesh;
   private readonly ring: Mesh;
+  private readonly pulse: Mesh;
+  private readonly nudge: Mesh;
+  /** Pulsing ring and arrow while the pet is parked at spawn. */
+  parkHint = false;
   private readonly platform: Mesh;
   private readonly stage: Group;
   private readonly podium: Mesh;
@@ -627,6 +656,32 @@ export class Renderer {
   private readonly rainbows: InstancedMesh;
   private readonly paws: InstancedMesh;
   heroRecolor = 0;
+  /** Home, pet detail, or the box reveal. Each frames the pet differently. */
+  stageKind: 'home' | 'detail' | 'reveal' = 'home';
+  /** Pet detail: the free band above the sheet, as viewport fractions (center y, height). */
+  detailBox: { cy: number; h: number } | null = null;
+  /** Home: the stage slot between the logo and the nameplate, as viewport fractions. */
+  homeBox: { top: number; bottom: number } | null = null;
+  private readonly probe = new Vector3();
+  /** 1 right after a tap on the podium pet, then it decays. */
+  wiggle = 0;
+  portraitURLs: string[] = [];
+  /** Same framing as the portraits, as a flat dark shape on transparency (locked cards). */
+  silhouetteURLs: string[] = [];
+  /** In-game lighting, one labeled cell per species. */
+  sheet: HTMLCanvasElement | null = null;
+  /** Unlit menu portraits, one labeled cell per species. */
+  sheetMenu: HTMLCanvasElement | null = null;
+  /** Dominant Kenney colormap swatch per species, sampled from the atlas. */
+  referenceRGB: Array<[number, number, number]> = [];
+  private hemi!: HemisphereLight;
+  private keyLight!: DirectionalLight;
+  private petMaterial!: MeshLambertMaterial | MeshBasicMaterial;
+  private menuMaterial!: MeshBasicMaterial;
+  private winLife = 0;
+  private readonly winDisc: Mesh;
+  private readonly decor: Group;
+  private readonly visH = new Float32Array(80);
 
   /** Camera sample for movement metrics. Scene-space, the same clock as the frame. */
   frameCam(): { x: number; y: number; z: number; lookX: number; lookZ: number } {
@@ -733,11 +788,12 @@ export class Renderer {
 
     this.camera = new PerspectiveCamera(40, 1, 0.1, 500);
     // Pets stay Lambert. Land is unlit vertex color, so it does not need a fill light.
-    this.scene.add(new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.05));
-    const key = new DirectionalLight(0xfffaf4, 0.72);
-    key.position.set(26, 42, 18);
-    key.castShadow = gfx.shadow;
-    this.scene.add(key);
+    this.hemi = new HemisphereLight(0xfff8f2, 0xd5e0ec, 1.15);
+    this.scene.add(this.hemi);
+    this.keyLight = new DirectionalLight(0xfffaf4, 0.85);
+    this.keyLight.position.set(26, 42, 18);
+    this.keyLight.castShadow = gfx.shadow;
+    this.scene.add(this.keyLight);
 
     const gw = territory.gridW * WORLD;
     const gh = territory.gridH * WORLD;
@@ -766,31 +822,79 @@ export class Renderer {
     for (let id = 0; id <= 16; id++) this.landParts.push(null);
     this.setBoundary(mapBlob(1, territory.gridW, territory.gridH));
 
-    const hero = PALETTE[0]!;
-    const heroHex = (hero[0] << 16) | (hero[1] << 8) | hero[2];
-    const platformGeo = new CylinderGeometry(1.7, 1.95, 0.42, 36);
-    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: heroHex }));
-    this.platform.position.y = 0.21;
+    const foot = new Mesh(new CylinderGeometry(0.62, 0.7, 0.07, 40), new MeshLambertMaterial({ color: 0xffe4c4 }));
+    foot.position.y = 0.035;
+    const platformGeo = new CylinderGeometry(0.56, 0.66, 0.16, 40);
+    this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: 0xfff6e4 }));
+    this.platform.position.y = 0.15;
     const podiumRing = new Mesh(
-      new TorusGeometry(1.85, 0.07, 8, 40),
-      new MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
+      new TorusGeometry(0.58, 0.032, 10, 48),
+      new MeshBasicMaterial({ color: 0xffd23f, toneMapped: false }),
     );
     podiumRing.rotation.x = Math.PI / 2;
-    podiumRing.position.y = 0.44;
+    podiumRing.position.y = PODIUM_TOP + 0.01;
     this.podium = podiumRing;
-    const backdrop = new Mesh(
-      new CircleGeometry(16, 48),
-      new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false }),
+    const podiumShadow = new Mesh(
+      new CircleGeometry(0.58, 32),
+      new MeshBasicMaterial({ color: 0x6e88aa, transparent: true, opacity: 0.22, depthWrite: false, toneMapped: false }),
     );
-    backdrop.rotation.x = -Math.PI / 2;
-    backdrop.position.y = -0.35;
+    podiumShadow.rotation.x = -Math.PI / 2;
+    podiumShadow.position.y = 0.012;
+    const stageFloor = new Mesh(
+      new CircleGeometry(7.2, 48),
+      new MeshBasicMaterial({ color: 0xc5ebff, toneMapped: false }),
+    );
+    stageFloor.rotation.x = -Math.PI / 2;
+    stageFloor.position.set(0, -0.04, 0.8);
+    // A tall sky so the clear color never shows as a stray band under the pet.
+    const backdrop = new Mesh(
+      new PlaneGeometry(16, 20),
+      new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false, depthWrite: false }),
+    );
+    backdrop.position.set(0, 1.5, -5.1);
     this.stage = new Group();
-    this.stage.add(backdrop, this.platform, this.podium);
+    this.stage.add(backdrop, stageFloor, podiumShadow, foot, this.platform, this.podium);
     this.scene.add(this.stage);
+    this.decor = new Group();
+    const decorMat = [0xff8ec8, 0xffd23f, 0x7ec8ff, 0xc9b6ff, 0xffb703, 0x3dde7a, 0xfff1c9];
+    // Stay inside the portrait frustum. |x| past ~1.3 is clipped at this depth.
+    const spots: Array<[number, number, number, number]> = [
+      [-1.02, 2.55, -3.7, 0.26],
+      [1.02, 2.25, -3.55, 0.22],
+      [-0.72, 3.35, -4.15, 0.2],
+      [0.82, 3.45, -4.2, 0.18],
+      [0.05, 3.85, -4.35, 0.16],
+      [-0.35, 1.7, -3.35, 0.14],
+    ];
+    for (let i = 0; i < spots.length; i++) {
+      const [x, y, z, rad] = spots[i]!;
+      const blob = new Mesh(
+        new SphereGeometry(rad, 16, 12),
+        new MeshBasicMaterial({ color: decorMat[i % decorMat.length]!, toneMapped: false }),
+      );
+      blob.position.set(x, y, z);
+      blob.userData.spin = 0.35 + (i % 4) * 0.12;
+      blob.userData.base = y;
+      blob.userData.ox = x;
+      blob.userData.amp = 0.12 + (i % 3) * 0.04;
+      this.decor.add(blob);
+    }
+    this.scene.add(this.decor);
+    this.winDisc = new Mesh(
+      new CircleGeometry(1, 48),
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.92, toneMapped: false, depthWrite: false }),
+    );
+    this.winDisc.rotation.x = -Math.PI / 2;
+    this.winDisc.visible = false;
+    this.winDisc.renderOrder = 3;
+    this.winDisc.frustumCulled = false;
+    this.scene.add(this.winDisc);
 
     const petMat = gfx.basic
       ? new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false })
       : material;
+    this.petMaterial = petMat;
+    this.menuMaterial = new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false });
     enableRecolor(petMat);
     for (let i = 0; i < geos.length; i++) {
       const rec = new InstancedBufferAttribute(new Float32Array(PET_CAP), 1);
@@ -864,7 +968,32 @@ export class Renderer {
       new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false }),
     );
     this.ring.visible = false;
+    this.ring.renderOrder = 4;
     this.scene.add(this.ring);
+    const pulseGeo = new RingGeometry(0.9, 1.28, 40);
+    pulseGeo.rotateX(-Math.PI / 2);
+    this.pulse = new Mesh(
+      pulseGeo,
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false }),
+    );
+    this.pulse.visible = false;
+    this.pulse.renderOrder = 4;
+    this.scene.add(this.pulse);
+    const arrow = new Shape();
+    arrow.moveTo(0.48, 0);
+    arrow.lineTo(-0.22, 0.2);
+    arrow.lineTo(-0.06, 0);
+    arrow.lineTo(-0.22, -0.2);
+    arrow.closePath();
+    const nudgeGeo = new ShapeGeometry(arrow);
+    nudgeGeo.rotateX(-Math.PI / 2);
+    this.nudge = new Mesh(
+      nudgeGeo,
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false, side: DoubleSide }),
+    );
+    this.nudge.visible = false;
+    this.nudge.renderOrder = 5;
+    this.scene.add(this.nudge);
 
     const flashGeo = new RingGeometry(0.7, 0.95, 36);
     flashGeo.rotateX(-Math.PI / 2);
@@ -1435,7 +1564,7 @@ export class Renderer {
     snapCam: boolean,
   ): void {
     this.time += dt;
-    this.renderer.setClearColor(phase === 'title' ? OUTSIDE_COLOR : FLOOR_COLOR, 1);
+    this.renderer.setClearColor(phase === 'title' ? 0x9ed8ff : FLOOR_COLOR, 1);
     this.territory.update(dt);
     this.syncLand();
     this.riseSlabs();
@@ -1445,7 +1574,8 @@ export class Renderer {
     if (phase === 'dead') {
       // The out beat holds the camera, but the land wipe keeps playing, so the
       // eliminated player watches their color drain into the victor's.
-      this.stepSweeps(dt);
+      this.stepWin(dt);
+    this.stepSweeps(dt);
       this.stepParticles(dt);
       this.stepCoins(dt);
       this.stepPops(dt);
@@ -1468,12 +1598,17 @@ export class Renderer {
       this.claimRing.visible = false;
       this.flashRing.visible = false;
       this.stage.visible = true;
+      this.decor.visible = true;
+      this.stepDecor(dt);
+      if (this.winLife > 0) this.winDisc.visible = false;
       this.bases.count = 0;
       this.fxCoins.count = 0;
       for (let i = 0; i < this.fxLife.length; i++) this.fxLife[i] = 0;
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbonBatch.ribbons) ribbon.clear();
       this.ring.visible = false;
+      this.pulse.visible = false;
+      this.nudge.visible = false;
       this.frames.count = 0;
       this.glows.count = 0;
       this.shields.count = 0;
@@ -1484,28 +1619,95 @@ export class Renderer {
       this.hearts.count = 0;
       this.rainbows.count = 0;
       this.paws.count = 0;
-      const spin = this.time * 0.7;
-      this.podium.rotation.z = spin;
+      this.podium.rotation.z = this.time * 0.35;
       const mesh = this.pets[hero];
+      const wig = this.wiggle;
+      this.wiggle = Math.max(0, this.wiggle - dt * 1.6);
+      const hop = wig > 0 ? Math.sin(Math.min(1, wig) * Math.PI) * 0.42 : 0;
+      const bounce = Math.abs(Math.sin(this.time * 3.2));
+      const squash = 1 + (1 - bounce) * 0.06 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
+      // Feet rest on the pedestal. The bounce is a small hop, not a hover.
+      const portrait = this.camera.aspect < 0.95;
+      let lookX = portrait ? 0 : 1.15;
+      let lookY = portrait ? 0.48 : 0.62;
+      let camY = portrait ? 1.28 : 1.15;
+      let camZ = portrait ? 6.55 : 6.7;
+      let body = portrait ? 1.05 : 0.72;
+      let shiftY = 0;
+      if (this.stageKind === 'detail') {
+        lookX = 0;
+        lookY = 0.62;
+        camY = 1.22;
+        camZ = 4.35;
+        body = 0.78;
+        const box = this.detailBox;
+        if (box && box.h > 0.05) {
+          // Fit the pet (about 1.3 units with ears and podium) into the band above the
+          // sheet, then slide the projection so it is centered there instead of behind it.
+          const fit = 1.3 / Math.min(0.95, box.h * 0.85);
+          camZ = Math.min(10, Math.max(3.2, fit / (2 * Math.tan((20 * Math.PI) / 180))));
+          camY = 0.9;
+          lookY = 0.55;
+          shiftY = 0.5 - box.cy;
+        }
+      } else if (this.stageKind === 'reveal') {
+        lookX = 0;
+        lookY = 0.7;
+        camY = 1.28;
+        camZ = 5.1;
+        body = 0.72;
+        const box = this.detailBox;
+        if (box && box.h > 0.05) {
+          const fit = 1.3 / Math.min(0.95, box.h * 0.85);
+          camZ = Math.min(10, Math.max(3.6, fit / (2 * Math.tan((20 * Math.PI) / 180))));
+          camY = 0.9;
+          lookY = 0.55;
+          shiftY = 0.5 - box.cy;
+        }
+      }
+      const yaw = HOME_FACE + Math.sin(this.time * 0.7) * 0.08;
+      const feetY = PODIUM_TOP - 0.24 - 0.02 + bounce * bounce * 0.03 + hop;
       if (mesh) {
-        const wave = Math.sin(this.time * 3);
-        this.placePet(mesh, 0, 0, 0.22 + wave * 0.05, 0, spin, 0, 1.38, 1 + wave * 0.05, this.heroRecolor);
+        this.placePet(mesh, 0, 0, feetY, -0.05, yaw + wig * 0.5, wig * 0.28, body, squash, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      const ang = this.time * 0.18;
-      this.camera.position.set(Math.sin(ang) * 6.4, 3.5, Math.cos(ang) * 6.4);
-      this.camera.lookAt(0, 0.85, 0);
+      this.place(this.shadows, 0, 0, PODIUM_TOP + 0.012, 0, 0, 0, 0.34);
+      this.shadows.count = 1;
+      this.shadows.instanceMatrix.needsUpdate = true;
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(lookX, camY, camZ);
+      this.camera.lookAt(lookX, lookY, 0);
+      const slot = this.homeBox;
+      if (this.stageKind === 'home' && portrait && slot && slot.bottom - slot.top > 0.1) {
+        // Stand the podium on the nameplate whatever the slot height (short Safari
+        // viewport, reward line shown), and back off if the pet would not fit.
+        this.setShift(0);
+        this.camera.updateMatrixWorld();
+        const avail = (slot.bottom - slot.top) * 0.94;
+        let feet = (1 - this.probe.set(0, 0, 0).project(this.camera).y) / 2;
+        const head = (1 - this.probe.set(0, 1.6, 0).project(this.camera).y) / 2;
+        if (feet - head > avail) {
+          const k = (feet - head) / avail;
+          this.camera.position.set(lookX, lookY + (camY - lookY) * k, camZ * k);
+          this.camera.lookAt(lookX, lookY, 0);
+          this.camera.updateMatrixWorld();
+          feet = (1 - this.probe.set(0, 0, 0).project(this.camera).y) / 2;
+        }
+        shiftY = feet - (slot.bottom - 0.012);
+      }
+      this.setShift(shiftY);
       this.coins.count = 0;
       this.orbs.count = 0;
       this.loot.count = 0;
-      this.shadows.count = 0;
       this.selfScreen = false;
     } else {
+      this.setShift(0);
       this.ground.visible = true;
       this.land.visible = true;
       this.gridLines.visible = false;
       this.stage.visible = false;
+      this.decor.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;
       let selfZ = this.holdZ;
@@ -1541,8 +1743,10 @@ export class Renderer {
         const feet = gfx.cpu ? this.surfaceAt(pet.id, pet.x, pet.z) : 0;
         const turn = angleDelta(this.prevHead[pet.id] ?? pet.h, pet.h);
         this.prevHead[pet.id] = pet.h;
-        const bankTarget = Math.max(-0.2, Math.min(0.2, -turn * 2.4));
-        this.bank[pet.id] = (this.bank[pet.id] ?? 0) + (bankTarget - (this.bank[pet.id] ?? 0)) * 0.35;
+        const omega = dt > 1e-4 ? turn / dt : 0;
+        const bankTarget = Math.max(-0.2, Math.min(0.2, -omega * 0.045));
+        const bankBlend = 1 - Math.exp(-10 * dt);
+        this.bank[pet.id] = (this.bank[pet.id] ?? 0) + (bankTarget - (this.bank[pet.id] ?? 0)) * bankBlend;
         const bob = 0;
         const squash = 1;
         const roll = this.bank[pet.id] ?? 0;
@@ -1550,7 +1754,7 @@ export class Renderer {
         const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
         const body = (pet.self ? 1.08 : 1) * shimmer;
         if (mesh && mesh.count < PET_CAP) {
-          this.placePet(mesh, mesh.count, wx, feet + bob, wz, pet.h, roll, body, squash, pet.recolor);
+          this.placePet(mesh, mesh.count, wx, feet + bob, wz, this.smoothHead(pet.id, pet.h, dt), roll, body, squash, pet.recolor);
           mesh.count++;
         }
         if (shadowN < SHADOW_CAP) {
@@ -1635,11 +1839,41 @@ export class Renderer {
           this.holdX = pet.x;
           this.holdZ = pet.z;
           this.ring.visible = true;
-          this.ring.position.set(wx, 0.04, wz);
-          const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
-          this.ring.scale.set(ringScale, 1, ringScale);
+          const floorY = SLAB_H + 0.08;
+          this.ring.position.set(wx, floorY, wz);
           const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
-          (this.ring.material as MeshBasicMaterial).color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
+          const ringMat = this.ring.material as MeshBasicMaterial;
+          ringMat.color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
+          if (this.parkHint) {
+            const beat = 0.5 + 0.5 * Math.sin(this.time * 5.4);
+            const ringScale = 2.15 + beat * 0.45;
+            this.ring.scale.set(ringScale, 1, ringScale);
+            ringMat.color.set(0xffffff);
+            ringMat.opacity = 0.95;
+            this.pulse.visible = true;
+            const wave = (this.time * 0.85) % 1;
+            const ps = 1.7 + wave * 2.1;
+            this.pulse.position.set(wx, floorY + 0.02, wz);
+            this.pulse.scale.set(ps, 1, ps);
+            const pulseMat = this.pulse.material as MeshBasicMaterial;
+            pulseMat.color.set(0xffe14a);
+            pulseMat.opacity = 0.35 + (1 - wave) * 0.6;
+            this.nudge.visible = true;
+            const h = pet.h;
+            const dist = 2.15 + beat * 0.28;
+            this.nudge.position.set(wx + Math.cos(h) * dist, floorY + 0.04, wz + Math.sin(h) * dist);
+            this.nudge.rotation.y = -h;
+            this.nudge.scale.setScalar(2.6 + beat * 0.45);
+            const nudgeMat = this.nudge.material as MeshBasicMaterial;
+            nudgeMat.color.set(0xffffff);
+            nudgeMat.opacity = 1;
+          } else {
+            const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
+            this.ring.scale.set(ringScale, 1, ringScale);
+            ringMat.opacity = 0.9;
+            this.pulse.visible = false;
+            this.nudge.visible = false;
+          }
           const screen = this.project(pet.x, 0.7, pet.z);
           this.selfScreen = screen.ok;
           this.selfSX = screen.x;
@@ -1659,6 +1893,8 @@ export class Renderer {
       }
       if (!selfAlive) {
         this.ring.visible = false;
+        this.pulse.visible = false;
+        this.nudge.visible = false;
         this.selfScreen = false;
       }
 
@@ -1711,6 +1947,7 @@ export class Renderer {
       this.layCosmetics(pets, petCount);
     }
 
+    this.stepWin(dt);
     this.stepSweeps(dt);
     this.stepParticles(dt);
     this.stepCoins(dt);
@@ -2166,6 +2403,228 @@ export class Renderer {
     }
   }
 
+  poke(): void {
+    this.wiggle = 1;
+  }
+
+  /** Spreading disc of the victor's color. The real flood lands when it finishes. */
+  winWave(x: number, z: number, r: number, g: number, b: number): void {
+    this.winLife = 1.35;
+    this.winDisc.visible = true;
+    this.winDisc.position.set(x * WORLD, 0.12, z * WORLD);
+    const mat = this.winDisc.material as MeshBasicMaterial;
+    mat.color.setRGB(r / 255, g / 255, b / 255);
+    mat.opacity = 0.94;
+    this.winDisc.scale.set(0.3, 0.3, 1);
+  }
+
+  private stepWin(dt: number): void {
+    if (this.winLife <= 0) return;
+    this.winLife = Math.max(0, this.winLife - dt);
+    const u = 1 - this.winLife / 1.35;
+    const e = u * u * (3 - 2 * u);
+    const s = 0.35 + e * 72;
+    this.winDisc.scale.set(s, s, 1);
+    const mat = this.winDisc.material as MeshBasicMaterial;
+    mat.opacity = this.winLife < 0.25 ? Math.max(0, this.winLife / 0.25) * 0.94 : 0.94;
+    this.winDisc.visible = this.winLife > 0;
+  }
+
+  private stepDecor(dt: number): void {
+    const kids = this.decor.children;
+    for (let i = 0; i < kids.length; i++) {
+      const blob = kids[i]!;
+      const spin = typeof blob.userData.spin === 'number' ? blob.userData.spin : 0.4;
+      const base = typeof blob.userData.base === 'number' ? blob.userData.base : 0.4;
+      const amp = typeof blob.userData.amp === 'number' ? blob.userData.amp : 0.12;
+      const origin = typeof blob.userData.ox === 'number' ? blob.userData.ox : blob.position.x;
+      blob.position.x = origin + Math.sin(this.time * spin * 0.45 + i) * amp;
+      blob.position.y = base + Math.sin(this.time * spin + i) * 0.16;
+      blob.rotation.y += dt * spin;
+    }
+  }
+
+  /** Vertical projection shift as a fraction of the viewport (positive moves the scene up). */
+  private shiftNow = 0;
+  private setShift(f: number): void {
+    if (Math.abs(f - this.shiftNow) < 1e-4) return;
+    this.shiftNow = f;
+    if (Math.abs(f) < 1e-4) this.camera.clearViewOffset();
+    else {
+      const h = 1000;
+      const w = Math.round(1000 * this.camera.aspect);
+      this.camera.setViewOffset(w, h, 0, f * h, w, h);
+    }
+    this.camera.updateProjectionMatrix();
+  }
+
+  private smoothHead(id: number, target: number, dt: number): number {
+    const prev = this.visH[id] ?? target;
+    const d = angleDelta(prev, target);
+    if (Math.abs(d) > 1.5) {
+      this.visH[id] = target;
+      return target;
+    }
+    const next = prev + d * (1 - Math.exp(-18 * dt));
+    this.visH[id] = next;
+    return next;
+  }
+
+  /**
+   * One close, labeled still per species. Menus use the unlit colormap.
+   * In-game uses the same Lambert pets the match draws, with no recolor.
+   */
+  buildSheet(): void {
+    const refs = this.kenneySwatches();
+    this.referenceRGB = refs;
+    const menu = this.captureSpecies(true);
+    const game = this.captureSpecies(false);
+    this.sheetMenu = composeContact('Menus', menu, refs);
+    this.sheet = composeContact('In game', game, refs);
+    this.portraitURLs = menu.map((tile) => tile.toDataURL('image/png'));
+    this.silhouetteURLs = menu.map((tile) => silhouetteOf(tile));
+  }
+
+  private kenneySwatches(): Array<[number, number, number]> {
+    const map = this.petMaterial.map;
+    const image = map?.image as CanvasImageSource | undefined;
+    const blank: Array<[number, number, number]> = SPECIES.map(() => [180, 180, 180]);
+    if (!image) return blank;
+    const src = document.createElement('canvas');
+    const iw = (image as HTMLImageElement).width || (image as ImageBitmap).width || 512;
+    const ih = (image as HTMLImageElement).height || (image as ImageBitmap).height || 512;
+    src.width = iw;
+    src.height = ih;
+    const sctx = src.getContext('2d', { willReadFrequently: true });
+    if (!sctx) return blank;
+    sctx.drawImage(image, 0, 0, iw, ih);
+    const pixels = sctx.getImageData(0, 0, iw, ih).data;
+    return this.pets.map((mesh) => {
+      const uv = mesh.geometry.getAttribute('uv');
+      if (!uv || uv.count === 0) return [180, 180, 180] as [number, number, number];
+      const bins = new Map<number, number>();
+      const cols = 16;
+      for (let i = 0; i < uv.count; i++) {
+        const u = uv.getX(i);
+        const v = uv.getY(i);
+        const cx = Math.min(cols - 1, Math.max(0, Math.floor(u * cols)));
+        const cy = Math.min(cols - 1, Math.max(0, Math.floor((1 - v) * cols)));
+        const key = cy * cols + cx;
+        bins.set(key, (bins.get(key) ?? 0) + 1);
+      }
+      let best = 0;
+      let bestN = -1;
+      let fallback = 0;
+      let fallbackN = -1;
+      for (const [key, n] of bins) {
+        const cx = key % cols;
+        const cy = (key / cols) | 0;
+        const px = Math.min(iw - 1, Math.floor(((cx + 0.5) / cols) * iw));
+        const py = Math.min(ih - 1, Math.floor(((cy + 0.5) / cols) * ih));
+        const i = (py * iw + px) * 4;
+        const r = pixels[i] ?? 0;
+        const g = pixels[i + 1] ?? 0;
+        const b = pixels[i + 2] ?? 0;
+        // Outline cells are near-black. The reference color is the body swatch.
+        const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (luma > 36 && n > bestN) {
+          best = key;
+          bestN = n;
+        }
+        if (n > fallbackN) {
+          fallback = key;
+          fallbackN = n;
+        }
+      }
+      const chosen = bestN >= 0 ? best : fallback;
+      const cx = chosen % cols;
+      const cy = (chosen / cols) | 0;
+      const px = Math.min(iw - 1, Math.floor(((cx + 0.5) / cols) * iw));
+      const py = Math.min(ih - 1, Math.floor(((cy + 0.5) / cols) * ih));
+      const i = (py * iw + px) * 4;
+      return [pixels[i] ?? 180, pixels[i + 1] ?? 180, pixels[i + 2] ?? 180];
+    });
+  }
+
+  /** Close-up of every species. `menu` draws the raw atlas; otherwise Lambert, recolor 0. */
+  private captureSpecies(menu: boolean): HTMLCanvasElement[] {
+    const prevX = this.camera.position.x;
+    const prevY = this.camera.position.y;
+    const prevZ = this.camera.position.z;
+    const prevAspect = this.camera.aspect;
+    const hemiI = this.hemi.intensity;
+    const keyI = this.keyLight.intensity;
+    const keyX = this.keyLight.position.x;
+    const keyY = this.keyLight.position.y;
+    const keyZ = this.keyLight.position.z;
+    this.ground.visible = false;
+    this.land.visible = false;
+    this.stage.visible = false;
+    this.decor.visible = false;
+    this.winDisc.visible = false;
+    this.gridLines.visible = false;
+    for (const wall of this.fenceMeshes) wall.visible = false;
+    this.shadows.count = 0;
+    this.coins.count = 0;
+    this.orbs.count = 0;
+    this.loot.count = 0;
+    const mat = menu ? this.menuMaterial : this.petMaterial;
+    if (!menu) {
+      this.hemi.intensity = 1.55;
+      this.keyLight.intensity = 1.35;
+      this.keyLight.position.set(2.5, 5.5, 7);
+    }
+    for (const mesh of this.pets) mesh.material = mat;
+    const size = 180;
+    const rt = new WebGLRenderTarget(size, size);
+    // On the +Z axis, same 30° the home camera sees. High enough that ears stay in frame.
+    this.camera.position.set(0, 1.02, 2.85);
+    this.camera.up.set(0, 1, 0);
+    this.camera.lookAt(0, 0.92, 0);
+    this.camera.aspect = 1;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setClearColor(0xf4fbff, 1);
+    const tiles: HTMLCanvasElement[] = [];
+    for (let i = 0; i < this.pets.length; i++) {
+      for (const mesh of this.pets) mesh.count = 0;
+      const mesh = this.pets[i]!;
+      this.placePet(mesh, 0, 0, 0, 0, HOME_FACE, 0, 1.08, 1, 0);
+      mesh.count = 1;
+      mesh.instanceMatrix.needsUpdate = true;
+      this.renderer.setRenderTarget(rt);
+      this.renderer.clear();
+      this.renderer.render(this.scene, this.camera);
+      const buf = new Uint8Array(size * size * 4);
+      this.renderer.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+      const tile = document.createElement('canvas');
+      tile.width = size;
+      tile.height = size;
+      const tctx = tile.getContext('2d');
+      if (!tctx) continue;
+      const img = tctx.createImageData(size, size);
+      for (let y = 0; y < size; y++) {
+        const src = (size - 1 - y) * size * 4;
+        img.data.set(buf.subarray(src, src + size * 4), y * size * 4);
+      }
+      tctx.putImageData(img, 0, 0);
+      tiles.push(tile);
+    }
+    this.renderer.setRenderTarget(null);
+    rt.dispose();
+    for (const mesh of this.pets) {
+      mesh.material = this.petMaterial;
+      mesh.count = 0;
+    }
+    this.hemi.intensity = hemiI;
+    this.keyLight.intensity = keyI;
+    this.keyLight.position.set(keyX, keyY, keyZ);
+    this.camera.position.set(prevX, prevY, prevZ);
+    this.camera.aspect = prevAspect;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(0, 0.6, 0);
+    return tiles;
+  }
+
   private placePet(
     mesh: InstancedMesh,
     index: number,
@@ -2223,6 +2682,8 @@ export class Renderer {
       this.shadows.visible = false;
       this.bases.visible = false;
       this.ring.visible = false;
+      this.pulse.visible = false;
+      this.nudge.visible = false;
       this.flashRing.visible = false;
       this.claimRing.visible = false;
       this.paintRing.visible = false;
@@ -2443,30 +2904,89 @@ function titleBackdrop(): CanvasTexture {
   canvas.width = 512;
   canvas.height = 512;
   const g = canvas.getContext('2d')!;
-  g.fillStyle = '#e4ebf2';
+  const sky = g.createLinearGradient(0, 0, 0, 512);
+  sky.addColorStop(0, '#8fd4ff');
+  sky.addColorStop(0.55, '#ffd0ef');
+  sky.addColorStop(1, '#ffe3bf');
+  g.fillStyle = sky;
   g.fillRect(0, 0, 512, 512);
-  const blobs: Array<[number, number, string]> = [
-    [110, 130, '#ff2d7d'],
-    [390, 90, '#ff7a00'],
-    [70, 390, '#ffd600'],
-    [430, 370, '#1ec83e'],
-    [250, 240, '#00bcff'],
-    [300, 430, '#8e34ff'],
-    [180, 50, '#ff2460'],
-    [50, 210, '#ff705c'],
+  g.fillStyle = 'rgba(255,255,255,0.45)';
+  for (let y = 24; y < 512; y += 28) {
+    for (let x = (y / 28) % 2 === 0 ? 12 : 26; x < 512; x += 28) {
+      g.beginPath();
+      g.arc(x, y, 1.6, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  // Soft color only in the corners. The middle stays clear so it cannot cover the pet.
+  const blobs: Array<[number, number, string, number]> = [
+    [70, 80, '#ffffff', 56],
+    [450, 70, '#ffe56b', 48],
+    [48, 450, '#ff8ec8', 52],
+    [470, 440, '#7ec8ff', 46],
   ];
-  for (const [x, y, color] of blobs) {
-    const rad = g.createRadialGradient(x, y, 8, x, y, 150);
-    rad.addColorStop(0, color);
-    rad.addColorStop(1, 'rgba(228,235,242,0)');
-    g.fillStyle = rad;
+  for (const [x, y, color, rad] of blobs) {
+    const paint = g.createRadialGradient(x, y, 4, x, y, rad);
+    paint.addColorStop(0, color);
+    paint.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = paint;
     g.beginPath();
-    g.arc(x, y, 150, 0, Math.PI * 2);
+    g.arc(x, y, rad, 0, Math.PI * 2);
     g.fill();
   }
   const tex = new CanvasTexture(canvas);
   tex.colorSpace = SRGBColorSpace;
   return tex;
+}
+
+function composeContact(
+  title: string,
+  tiles: HTMLCanvasElement[],
+  refs: Array<[number, number, number]>,
+): HTMLCanvasElement {
+  const cols = 4;
+  const rows = Math.ceil(Math.max(1, tiles.length) / cols);
+  const cellW = 220;
+  const cellH = 248;
+  const head = 52;
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * cellW;
+  canvas.height = head + rows * cellH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.fillStyle = '#f4fbff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#1c2430';
+  ctx.font = '700 28px Fredoka, sans-serif';
+  ctx.fillText(title, 18, 34);
+  tiles.forEach((tile, i) => {
+    const col = i % cols;
+    const row = (i / cols) | 0;
+    const x = col * cellW + 10;
+    const y = head + row * cellH + 8;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(x, y, 200, 232, 22);
+    ctx.fill();
+    ctx.drawImage(tile, x + 10, y + 8, 180, 180);
+    const species = SPECIES[i];
+    const name = species ? SPECIES_LABEL[species] : 'Pet';
+    ctx.fillStyle = '#1c2430';
+    ctx.font = '700 20px Fredoka, sans-serif';
+    ctx.fillText(name, x + 14, y + 206);
+    const ref = refs[i] ?? [180, 180, 180];
+    ctx.fillStyle = `rgb(${ref[0]},${ref[1]},${ref[2]})`;
+    ctx.beginPath();
+    ctx.roundRect(x + 14, y + 214, 18, 14, 4);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(28,36,48,0.25)';
+    ctx.stroke();
+    const hex = ref.map((n) => n.toString(16).padStart(2, '0')).join('');
+    ctx.fillStyle = '#4c5968';
+    ctx.font = '600 13px Fredoka, sans-serif';
+    ctx.fillText(`#${hex}`, x + 38, y + 226);
+  });
+  return canvas;
 }
 
 function growF(buf: Float32Array<ArrayBufferLike>, need: number): Float32Array<ArrayBufferLike> {
@@ -2509,4 +3029,41 @@ function makeInstances(geo: BufferGeometry, colorOrMat: number | MeshBasicMateri
   mesh.instanceMatrix.setUsage(DynamicDrawUsage);
   mesh.count = 0;
   return mesh;
+}
+
+/** Cut the pale portrait background away (flood from the edges) and flatten the pet to one dark tone. */
+function silhouetteOf(tile: HTMLCanvasElement): string {
+  const out = document.createElement('canvas');
+  const w = tile.width;
+  const h = tile.height;
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  if (!ctx) return '';
+  ctx.drawImage(tile, 0, 0);
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const bg = new Uint8Array(w * h);
+  const near = (k: number) => Math.abs(d[k * 4]! - 0xf4) + Math.abs(d[k * 4 + 1]! - 0xfb) + Math.abs(d[k * 4 + 2]! - 0xff) < 30;
+  const stack: number[] = [];
+  for (let x = 0; x < w; x++) stack.push(x, (h - 1) * w + x);
+  for (let y = 0; y < h; y++) stack.push(y * w, y * w + w - 1);
+  while (stack.length > 0) {
+    const k = stack.pop()!;
+    if (bg[k] || !near(k)) continue;
+    bg[k] = 1;
+    const x = k % w;
+    if (x > 0) stack.push(k - 1);
+    if (x < w - 1) stack.push(k + 1);
+    if (k >= w) stack.push(k - w);
+    if (k < w * (h - 1)) stack.push(k + w);
+  }
+  for (let k = 0; k < w * h; k++) {
+    d[k * 4] = 10;
+    d[k * 4 + 1] = 15;
+    d[k * 4 + 2] = 24;
+    d[k * 4 + 3] = bg[k] ? 0 : 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out.toDataURL('image/png');
 }
