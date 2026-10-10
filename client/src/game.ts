@@ -15,7 +15,6 @@ import {
   cooldownOf,
   equippedPet,
   kitOf,
-  gainedUnlocks,
   levelPower,
   recolorId,
   trailId,
@@ -39,7 +38,7 @@ import {
   type WireEvent,
 } from '@pet-trails/shared';
 import { Collection } from './collection.js';
-import { Hud, cssColor, deathIcon, deathTitle, type BoardRow, type DeathView } from './hud.js';
+import { Hud, cssColor, type BoardRow } from './hud.js';
 import { Input } from './input.js';
 import { NetClient } from './net.js';
 import { saveProfile } from './profileStore.js';
@@ -120,6 +119,9 @@ export class Game {
   private remoteInit = false;
   private frameDt = 0;
   private winTimer = 0;
+  /** Elimination beat before the title screen. The camera stays where the pet fell. */
+  private homeTimer = 0;
+  private homeReward: { coins: number; xp: number; levelUp: boolean } | null = null;
   private seq = 1;
   private alpha = 1;
   private snapCam = false;
@@ -279,9 +281,12 @@ export class Game {
     this.shownPct = 0;
     this.peakPct = 0;
     this.winTimer = 0;
+    this.homeTimer = 0;
+    this.homeReward = null;
     this.pendingWin = null;
     this.fixCount = 0;
     this.hud.hideWin();
+    this.hud.hideOut();
     this.hud.showDeath(null);
     this.hud.setYou('0.0%', 0, 0);
     this.displayName = readName();
@@ -374,6 +379,10 @@ export class Game {
     if (this.winTimer > 0) {
       this.winTimer -= dt;
       if (this.winTimer <= 0) this.finishWin();
+    }
+    if (this.homeTimer > 0) {
+      this.homeTimer -= dt;
+      if (this.homeTimer <= 0) this.returnHome();
     }
     this.hud.showAbility(this.phase === 'playing');
     if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
@@ -836,26 +845,13 @@ export class Game {
     if (pctNum > this.peakPct) this.peakPct = pctNum;
     if (me) me.alive = false;
     this.updateBoard();
-    const before = this.equipped().level;
-    const levels = applyXp(this.equipped(), Math.round(ev.xp), CONFIG.levelCap);
-    this.profile.coins += ev.coins;
-    saveProfile(this.profile);
+    this.grantRun(ev.coins, ev.xp);
     this.hud.setYou(`${pctNum.toFixed(1)}%`, ev.kills, ev.train);
-    const need = xpForLevel(this.equipped().level);
-    const rows: DeathView['rows'] = [
-      { k: 'Territory', v: `${pctNum.toFixed(1)}%`, icon: '▣' },
-      { k: 'Place', v: placeLabel(ev.rank, ev.total), icon: '#' },
-      { k: 'Kills', v: String(ev.kills), icon: '⚔' },
-      { k: 'Train', v: String(ev.train), icon: '🐾' },
-      { k: 'Coins', v: `+${ev.coins}`, icon: '🪙' },
-      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.equipped().xp / need : 1 },
-      { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
-    ];
-    if (levels > 0) rows.push({ k: levels > 1 ? `Level up! ×${levels}` : 'Level up!', v: `Lv ${this.equipped().level}`, icon: '▲', up: true });
-    const unlocked = levels > 0 ? gainedUnlocks(before, this.equipped().level) : [];
-    const celebrate = levels > 0 ? `Level ${this.equipped().level}${unlocked.length ? ' · ' + unlocked.join(' · ') : ''}` : '';
     this.hud.hideSteer();
-    this.hud.showDeath({ title: deathTitle(ev.reason), icon: deathIcon(ev.reason), rows, celebrate });
+    this.hud.showHud(false);
+    this.hud.showDeath(null);
+    this.hud.showOut(`Out - ${placeLabel(ev.rank, ev.total)}`);
+    this.homeTimer = 1.3;
     buzz(20);
   }
 
@@ -1090,6 +1086,7 @@ export class Game {
       xp: pet.level >= CONFIG.levelCap ? 1 : need > 0 ? pet.xp / need : 0,
       boost,
       unlocks: unlockNames(pet.level),
+      reward: this.homeReward,
     };
   }
 
@@ -1149,24 +1146,35 @@ export class Game {
     this.hud.hideWin();
     if (!ev || this.died) return;
     this.died = true;
-    this.phase = 'dead';
-    const before = this.equipped().level;
-    const levels = applyXp(this.equipped(), Math.round(ev.xp), CONFIG.levelCap);
-    this.profile.coins += ev.coins;
+    this.grantRun(ev.coins, ev.xp);
+    this.returnHome();
+  }
+
+  /** Bank a run's coins and XP, and remember the line the home card will count up. */
+  private grantRun(coins: number, xp: number): void {
+    const levels = applyXp(this.equipped(), Math.round(xp), CONFIG.levelCap);
+    this.profile.coins += Math.round(coins);
     saveProfile(this.profile);
-    const need = xpForLevel(this.equipped().level);
-    const rows: DeathView['rows'] = [
-      { k: 'Place', v: placeLabel(1, ev.total), icon: '#' },
-      { k: 'Territory', v: `${ev.pct.toFixed(1)}%`, icon: '▣' },
-      { k: 'Kills', v: String(ev.kills), icon: '⚔' },
-      { k: 'Coins', v: `+${ev.coins}`, icon: '🪙' },
-      { k: 'XP', v: `+${Math.round(ev.xp)}`, icon: '✦', bar: need > 0 ? this.equipped().xp / need : 1 },
-      { k: 'Time', v: formatTime(ev.time), icon: '⏱' },
-    ];
-    if (levels > 0) rows.push({ k: 'Level up!', v: `Lv ${this.equipped().level}`, icon: '▲', up: true });
-    const unlocked = levels > 0 ? gainedUnlocks(before, this.equipped().level) : [];
-    const celebrate = levels > 0 ? `Level ${this.equipped().level}${unlocked.length ? ' · ' + unlocked.join(' · ') : ''}` : '';
-    this.hud.showDeath({ title: 'You conquered the map!', icon: '👑', rows, celebrate });
+    this.homeReward = {
+      coins: Math.max(0, Math.round(coins)),
+      xp: Math.max(0, Math.round(xp)),
+      levelUp: levels > 0,
+    };
+  }
+
+  /** Leave the held camera and sit on the title menu. Play starts a fresh round. */
+  private returnHome(): void {
+    this.homeTimer = 0;
+    this.winTimer = 0;
+    this.pendingWin = null;
+    this.phase = 'title';
+    this.api.phase = 'title';
+    this.hud.hideWin();
+    this.hud.hideOut();
+    this.hud.showDeath(null);
+    this.hud.showHud(false);
+    this.hud.showTitle(true);
+    this.hud.setPetCard(this.cardView());
   }
 
   private equipped(): PetInstance {
@@ -1320,11 +1328,6 @@ function placeLabel(rank: number, total: number): string {
   const suf = mod >= 11 && mod <= 13 ? 'th' : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th';
   const of = Math.max(n, total | 0);
   return `${n}${suf} of ${of}`;
-}
-
-function formatTime(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function buzz(ms: number): void {

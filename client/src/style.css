@@ -191,6 +191,39 @@ canvas {
   text-align: left;
 }
 #petcard-name { font-weight: 700; font-size: 15px; }
+.petcard-reward {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: #fff3c4;
+  color: #3a2800;
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.3;
+}
+.petcard-reward b,
+.petcard-reward span { display: block; }
+.petcard-reward span { color: #8a5a00; }
+.petcard-reward.pop { animation: reward-in 0.45s ease; }
+@keyframes reward-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.out {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translateX(-50%);
+  z-index: 6;
+  background: #1c2430;
+  color: #fff;
+  font-weight: 800;
+  font-size: 18px;
+  border-radius: 999px;
+  padding: 10px 16px;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(20, 24, 32, 0.28);
+}
 #petcard-boost { font-size: 12px; font-weight: 700; color: #8a5a00; margin: 2px 0 6px; }
 .petcard .bar { height: 8px; border-radius: 99px; background: #e6ebf1; overflow: hidden; }
 #petcard-fill { display: block; height: 100%; width: 0; background: #ffd23f; border-radius: 99px; }
