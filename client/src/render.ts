@@ -33,6 +33,7 @@ import {
   Vector2,
   Vector3,
   WebGLRenderer,
+  WebGLRenderTarget,
   type BufferGeometry,
   type Texture,
 } from 'three';
@@ -80,15 +81,22 @@ vec3 petRgb(vec3 hsl) {
   float p = 2.0 * l - q;
   return vec3(petHue(p, q, h + 1.0 / 3.0), petHue(p, q, h), petHue(p, q, h - 1.0 / 3.0));
 }
-vec3 petRecolor(vec3 rgb, float id) {
+vec3 petToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(0.454545)); }
+vec3 petToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 petRecolor(vec3 linear, float id) {
   int v = int(id + 0.5);
-  if (v == 0) return rgb;
+  // Only the four milestone swaps. Anything else, including a missing
+  // attribute, stays the Kenney colormap.
+  if (v < 1 || v > 4) return linear;
+  vec3 rgb = petToSrgb(linear);
   vec3 hsl = petHsl(rgb);
-  if (v == 1) { hsl.x = 0.75; hsl.y *= 0.28; hsl.z *= 0.42; }
-  else if (v == 2) { hsl.x = mix(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.82, hsl.z * 1.05); }
+  // Shadow used to force hue 0.75 and crush saturation in linear space,
+  // which turned a pink pig into a flat gray. Keep the animal's hue.
+  if (v == 1) { hsl.y = min(1.0, hsl.y * 0.9); hsl.z = clamp(hsl.z * 0.62, 0.16, 0.58); }
+  else if (v == 2) { hsl.x = mix(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.78, hsl.z * 1.08); }
   else if (v == 3) { hsl.x = mix(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
-  else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.2, 0.38, 0.75); }
-  return petRgb(hsl);
+  else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.15, 0.42, 0.72); }
+  return petToLinear(petRgb(hsl));
 }
 `;
 
@@ -100,7 +108,10 @@ function enableRecolor(mat: MeshBasicMaterial | MeshLambertMaterial): void {
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRecolor = recolor;');
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>\nvarying float vRecolor;\n${RECOLOR_GLSL}`)
-      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);');
+      .replace(
+        '#include <color_fragment>',
+        '#include <color_fragment>\ndiffuseColor.rgb = petRecolor(diffuseColor.rgb, vRecolor);',
+      );
   };
 }
 
@@ -627,6 +638,16 @@ export class Renderer {
   private readonly rainbows: InstancedMesh;
   private readonly paws: InstancedMesh;
   heroRecolor = 0;
+  /** Home, pet detail, or the box reveal. Each frames the pet differently. */
+  stageKind: 'home' | 'detail' | 'reveal' = 'home';
+  /** 1 right after a tap on the podium pet, then it decays. */
+  wiggle = 0;
+  portraitURLs: string[] = [];
+  sheet: HTMLCanvasElement | null = null;
+  private winLife = 0;
+  private readonly winDisc: Mesh;
+  private readonly decor: Group;
+  private readonly visH = new Float32Array(80);
 
   /** Camera sample for movement metrics. Scene-space, the same clock as the frame. */
   frameCam(): { x: number; y: number; z: number; lookX: number; lookZ: number } {
@@ -779,7 +800,7 @@ export class Renderer {
     podiumRing.position.y = 0.44;
     this.podium = podiumRing;
     const backdrop = new Mesh(
-      new CircleGeometry(16, 48),
+      new CircleGeometry(42, 48),
       new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false }),
     );
     backdrop.rotation.x = -Math.PI / 2;
@@ -787,6 +808,31 @@ export class Renderer {
     this.stage = new Group();
     this.stage.add(backdrop, this.platform, this.podium);
     this.scene.add(this.stage);
+    this.decor = new Group();
+    const decorMat = [
+      0xff8ec8, 0xffd23f, 0x7ec8ff, 0xc9b6ff, 0xffb703, 0x3dde7a,
+    ];
+    for (let i = 0; i < 8; i++) {
+      const blob = new Mesh(
+        new SphereGeometry(0.35 + (i % 3) * 0.18, 16, 12),
+        new MeshBasicMaterial({ color: decorMat[i % decorMat.length]!, toneMapped: false }),
+      );
+      const ang = (i / 8) * Math.PI * 2;
+      blob.position.set(Math.cos(ang) * (4.2 + (i % 3)), 0.4 + (i % 4) * 0.35, Math.sin(ang) * 3.4);
+      blob.userData.spin = 0.3 + (i % 5) * 0.12;
+      blob.userData.base = blob.position.y;
+      this.decor.add(blob);
+    }
+    this.scene.add(this.decor);
+    this.winDisc = new Mesh(
+      new CircleGeometry(1, 48),
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.92, toneMapped: false, depthWrite: false }),
+    );
+    this.winDisc.rotation.x = -Math.PI / 2;
+    this.winDisc.visible = false;
+    this.winDisc.renderOrder = 3;
+    this.winDisc.frustumCulled = false;
+    this.scene.add(this.winDisc);
 
     const petMat = gfx.basic
       ? new MeshBasicMaterial({ map: material.map, side: FrontSide, toneMapped: false })
@@ -1435,7 +1481,7 @@ export class Renderer {
     snapCam: boolean,
   ): void {
     this.time += dt;
-    this.renderer.setClearColor(phase === 'title' ? OUTSIDE_COLOR : FLOOR_COLOR, 1);
+    this.renderer.setClearColor(phase === 'title' ? 0xffc8ea : FLOOR_COLOR, 1);
     this.territory.update(dt);
     this.syncLand();
     this.riseSlabs();
@@ -1445,7 +1491,8 @@ export class Renderer {
     if (phase === 'dead') {
       // The out beat holds the camera, but the land wipe keeps playing, so the
       // eliminated player watches their color drain into the victor's.
-      this.stepSweeps(dt);
+      this.stepWin(dt);
+    this.stepSweeps(dt);
       this.stepParticles(dt);
       this.stepCoins(dt);
       this.stepPops(dt);
@@ -1468,6 +1515,9 @@ export class Renderer {
       this.claimRing.visible = false;
       this.flashRing.visible = false;
       this.stage.visible = true;
+      this.decor.visible = true;
+      this.stepDecor(dt);
+      if (this.winLife > 0) this.winDisc.visible = false;
       this.bases.count = 0;
       this.fxCoins.count = 0;
       for (let i = 0; i < this.fxLife.length; i++) this.fxLife[i] = 0;
@@ -1484,28 +1534,50 @@ export class Renderer {
       this.hearts.count = 0;
       this.rainbows.count = 0;
       this.paws.count = 0;
-      const spin = this.time * 0.7;
+      const spin = this.time * 0.45;
       this.podium.rotation.z = spin;
       const mesh = this.pets[hero];
+      const wave = Math.sin(this.time * 2.4);
+      const wig = this.wiggle;
+      this.wiggle = Math.max(0, this.wiggle - dt * 1.6);
+      const hop = wig > 0 ? Math.sin(Math.min(1, wig) * Math.PI) * 0.42 : 0;
+      const squash = 1 + wave * 0.035 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
+      let camDist = 6.5;
+      let camH = 2.15;
+      let lookY = -0.15;
+      let body = 0.96;
+      if (this.stageKind === 'detail') {
+        camDist = 4.6;
+        camH = 1.55;
+        lookY = -0.55;
+        body = 1.02;
+      } else if (this.stageKind === 'reveal') {
+        camDist = 5.0;
+        camH = 1.85;
+        lookY = -0.35;
+        body = 1.08;
+      }
       if (mesh) {
-        const wave = Math.sin(this.time * 3);
-        this.placePet(mesh, 0, 0, 0.22 + wave * 0.05, 0, spin, 0, 1.38, 1 + wave * 0.05, this.heroRecolor);
+        this.placePet(mesh, 0, 0, 0.22 + wave * 0.04 + hop, 0, spin + wig * 0.8, wig * 0.4, body, squash, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      const ang = this.time * 0.18;
-      this.camera.position.set(Math.sin(ang) * 6.4, 3.5, Math.cos(ang) * 6.4);
-      this.camera.lookAt(0, 0.85, 0);
+      this.place(this.shadows, 0, 0, 0.03, 0, 0, 0, 1.2);
+      this.shadows.count = 1;
+      this.shadows.instanceMatrix.needsUpdate = true;
+      const ang = this.time * 0.28;
+      this.camera.position.set(Math.sin(ang) * camDist, camH, Math.cos(ang) * camDist);
+      this.camera.lookAt(0, lookY, 0);
       this.coins.count = 0;
       this.orbs.count = 0;
       this.loot.count = 0;
-      this.shadows.count = 0;
       this.selfScreen = false;
     } else {
       this.ground.visible = true;
       this.land.visible = true;
       this.gridLines.visible = false;
       this.stage.visible = false;
+      this.decor.visible = false;
       for (const wall of this.fenceMeshes) wall.visible = true;
       let selfX = this.holdX;
       let selfZ = this.holdZ;
@@ -1541,8 +1613,10 @@ export class Renderer {
         const feet = gfx.cpu ? this.surfaceAt(pet.id, pet.x, pet.z) : 0;
         const turn = angleDelta(this.prevHead[pet.id] ?? pet.h, pet.h);
         this.prevHead[pet.id] = pet.h;
-        const bankTarget = Math.max(-0.2, Math.min(0.2, -turn * 2.4));
-        this.bank[pet.id] = (this.bank[pet.id] ?? 0) + (bankTarget - (this.bank[pet.id] ?? 0)) * 0.35;
+        const omega = dt > 1e-4 ? turn / dt : 0;
+        const bankTarget = Math.max(-0.2, Math.min(0.2, -omega * 0.045));
+        const bankBlend = 1 - Math.exp(-10 * dt);
+        this.bank[pet.id] = (this.bank[pet.id] ?? 0) + (bankTarget - (this.bank[pet.id] ?? 0)) * bankBlend;
         const bob = 0;
         const squash = 1;
         const roll = this.bank[pet.id] ?? 0;
@@ -1550,7 +1624,7 @@ export class Renderer {
         const shimmer = pet.blink ? 0.84 + 0.16 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
         const body = (pet.self ? 1.08 : 1) * shimmer;
         if (mesh && mesh.count < PET_CAP) {
-          this.placePet(mesh, mesh.count, wx, feet + bob, wz, pet.h, roll, body, squash, pet.recolor);
+          this.placePet(mesh, mesh.count, wx, feet + bob, wz, this.smoothHead(pet.id, pet.h, dt), roll, body, squash, pet.recolor);
           mesh.count++;
         }
         if (shadowN < SHADOW_CAP) {
@@ -1711,6 +1785,7 @@ export class Renderer {
       this.layCosmetics(pets, petCount);
     }
 
+    this.stepWin(dt);
     this.stepSweeps(dt);
     this.stepParticles(dt);
     this.stepCoins(dt);
@@ -2166,6 +2241,130 @@ export class Renderer {
     }
   }
 
+  poke(): void {
+    this.wiggle = 1;
+  }
+
+  /** Spreading disc of the victor's color. The real flood lands when it finishes. */
+  winWave(x: number, z: number, r: number, g: number, b: number): void {
+    this.winLife = 1.35;
+    this.winDisc.visible = true;
+    this.winDisc.position.set(x * WORLD, 0.12, z * WORLD);
+    const mat = this.winDisc.material as MeshBasicMaterial;
+    mat.color.setRGB(r / 255, g / 255, b / 255);
+    mat.opacity = 0.94;
+    this.winDisc.scale.set(0.3, 1, 0.3);
+  }
+
+  private stepWin(dt: number): void {
+    if (this.winLife <= 0) return;
+    this.winLife = Math.max(0, this.winLife - dt);
+    const u = 1 - this.winLife / 1.35;
+    const e = u * u * (3 - 2 * u);
+    const s = 0.35 + e * 72;
+    this.winDisc.scale.set(s, 1, s);
+    const mat = this.winDisc.material as MeshBasicMaterial;
+    mat.opacity = this.winLife < 0.25 ? Math.max(0, this.winLife / 0.25) * 0.94 : 0.94;
+    this.winDisc.visible = this.winLife > 0;
+  }
+
+  private stepDecor(dt: number): void {
+    const kids = this.decor.children;
+    for (let i = 0; i < kids.length; i++) {
+      const blob = kids[i]!;
+      const spin = typeof blob.userData.spin === 'number' ? blob.userData.spin : 0.4;
+      const base = typeof blob.userData.base === 'number' ? blob.userData.base : 0.4;
+      blob.position.y = base + Math.sin(this.time * spin + i) * 0.2;
+      blob.rotation.y += dt * spin;
+    }
+  }
+
+  private smoothHead(id: number, target: number, dt: number): number {
+    const prev = this.visH[id] ?? target;
+    const d = angleDelta(prev, target);
+    if (Math.abs(d) > 1.5) {
+      this.visH[id] = target;
+      return target;
+    }
+    const next = prev + d * (1 - Math.exp(-18 * dt));
+    this.visH[id] = next;
+    return next;
+  }
+
+  /** One still of every species, plus a portrait URL per roster slot. */
+  buildSheet(): void {
+    const cols = 6;
+    const rows = 4;
+    const cell = 180;
+    const w = cols * cell;
+    const h = rows * cell;
+    const rt = new WebGLRenderTarget(w, h);
+    const prevX = this.camera.position.x;
+    const prevY = this.camera.position.y;
+    const prevZ = this.camera.position.z;
+    const prevAspect = this.camera.aspect;
+    this.ground.visible = false;
+    this.land.visible = false;
+    this.stage.visible = false;
+    this.decor.visible = false;
+    this.winDisc.visible = false;
+    for (const wall of this.fenceMeshes) wall.visible = false;
+    for (const mesh of this.pets) mesh.count = 0;
+    const gap = 2.2;
+    for (let i = 0; i < this.pets.length && i < cols * rows; i++) {
+      const col = i % cols;
+      const row = (i / cols) | 0;
+      const mesh = this.pets[i]!;
+      const x = (col - (cols - 1) / 2) * gap;
+      const z = ((rows - 1) / 2 - row) * gap;
+      this.placePet(mesh, 0, x, 0, z, 0.6, 0, 0.95, 1, 0);
+      mesh.count = 1;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.camera.position.set(0, 2.35, 8.2);
+    this.camera.lookAt(0, 0.45, 0);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setClearColor(0xf4f8ff, 1);
+    this.renderer.setRenderTarget(rt);
+    this.renderer.clear();
+    this.renderer.render(this.scene, this.camera);
+    const buf = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    this.renderer.setRenderTarget(null);
+    rt.dispose();
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w * 4;
+      img.data.set(buf.subarray(src, src + w * 4), y * w * 4);
+    }
+    ctx.putImageData(img, 0, 0);
+    this.sheet = canvas;
+    const urls: string[] = [];
+    for (let i = 0; i < SPECIES.length; i++) {
+      const col = i % cols;
+      const row = (i / cols) | 0;
+      const tile = document.createElement('canvas');
+      tile.width = cell;
+      tile.height = cell;
+      const tctx = tile.getContext('2d');
+      if (!tctx) continue;
+      tctx.drawImage(canvas, col * cell, row * cell, cell, cell, 0, 0, cell, cell);
+      urls.push(tile.toDataURL('image/png'));
+    }
+    this.portraitURLs = urls;
+    for (const mesh of this.pets) mesh.count = 0;
+    this.camera.position.set(prevX, prevY, prevZ);
+    this.camera.aspect = prevAspect;
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(0, 0.6, 0);
+  }
+
   private placePet(
     mesh: InstancedMesh,
     index: number,
@@ -2443,25 +2642,26 @@ function titleBackdrop(): CanvasTexture {
   canvas.width = 512;
   canvas.height = 512;
   const g = canvas.getContext('2d')!;
-  g.fillStyle = '#e4ebf2';
+  const sky = g.createLinearGradient(0, 0, 0, 512);
+  sky.addColorStop(0, '#8fd4ff');
+  sky.addColorStop(0.45, '#f7c8ff');
+  sky.addColorStop(1, '#ffd7a8');
+  g.fillStyle = sky;
   g.fillRect(0, 0, 512, 512);
-  const blobs: Array<[number, number, string]> = [
-    [110, 130, '#ff2d7d'],
-    [390, 90, '#ff7a00'],
-    [70, 390, '#ffd600'],
-    [430, 370, '#1ec83e'],
-    [250, 240, '#00bcff'],
-    [300, 430, '#8e34ff'],
-    [180, 50, '#ff2460'],
-    [50, 210, '#ff705c'],
+  const blobs: Array<[number, number, string, number]> = [
+    [80, 90, '#ffffff', 90],
+    [420, 70, '#ffe56b', 110],
+    [60, 400, '#ff8ec8', 120],
+    [440, 360, '#7ec8ff', 100],
+    [250, 460, '#c9b6ff', 130],
   ];
-  for (const [x, y, color] of blobs) {
-    const rad = g.createRadialGradient(x, y, 8, x, y, 150);
-    rad.addColorStop(0, color);
-    rad.addColorStop(1, 'rgba(228,235,242,0)');
-    g.fillStyle = rad;
+  for (const [x, y, color, rad] of blobs) {
+    const paint = g.createRadialGradient(x, y, 8, x, y, rad);
+    paint.addColorStop(0, color);
+    paint.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = paint;
     g.beginPath();
-    g.arc(x, y, 150, 0, Math.PI * 2);
+    g.arc(x, y, rad, 0, Math.PI * 2);
     g.fill();
   }
   const tex = new CanvasTexture(canvas);

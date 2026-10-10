@@ -37,9 +37,11 @@ import {
   type WelcomeMsg,
   type WireEvent,
 } from '@pet-trails/shared';
+import { consumeSteps } from './clock.js';
 import { Collection } from './collection.js';
 import { Hud, cssColor, type BoardRow } from './hud.js';
 import { Input } from './input.js';
+import { sfx } from './sfx.js';
 import { NetClient } from './net.js';
 import { saveProfile } from './profileStore.js';
 import { Renderer, type DrawPet, type DrawPickup } from './render.js';
@@ -91,6 +93,7 @@ interface Body {
   heading: number;
   desiredX: number;
   desiredY: number;
+  turnVel: number;
 }
 
 export class Game {
@@ -107,7 +110,7 @@ export class Game {
   private predPrevY = 0;
   private predPrevH = 0;
   private predAcc = 0;
-  private readonly predHist: Array<{ seq: number; x: number; y: number; h: number; dx: number; dy: number; mul: number }> = [];
+  private readonly predHist: Array<{ seq: number; x: number; y: number; h: number; dx: number; dy: number; mul: number; tv: number }> = [];
   private offX = 0;
   private offY = 0;
   private offH = 0;
@@ -143,16 +146,32 @@ export class Game {
   private readonly seen = new Uint8Array(CONFIG.maxEntities + 1);
   private seenStamp = 1;
   private readonly api: NonNullable<Window['__game']>;
-  private readonly body: Body = { x: 0, y: 0, heading: 0, desiredX: 0, desiredY: 0 };
+  private readonly body: Body = { x: 0, y: 0, heading: 0, desiredX: 0, desiredY: 0, turnVel: 0 };
+  private predTurn = 0;
+  private lastSendAt = 0;
+  private heldLands: number[] | null = null;
+  private heldUntil = 0;
+  private deferAdopt = false;
+  private jerkMax = 0;
+  private longFrames = 0;
+  private metricFrames = 0;
+  private dtMax = 0;
+  private readonly jerkRing = new Float32Array(240);
+  private jerkWrite = 0;
+  private prevSx = 0;
+  private prevSy = 0;
+  private prevVx = 0;
+  private prevVy = 0;
+  private metricInit = false;
   private predX = 0;
   private predY = 0;
   private predH = 0;
   private predDX = 0;
   private predDY = 0;
   private predPrimed = false;
-  /** Welcome for this Play has arrived. Deltas from the previous room are ignored. */
+  /** False until the welcome for the round we just joined. Deltas before that belong to the previous room. */
   private joined = false;
-  /** A real stick direction has been sent. Spawn heading is not a steer. */
+  /** True once the player has aimed. Until then we do not transmit the spawn heading. */
   private sentSteer = false;
   /** Last rendered own-pet position, in cells. Metrics and the trail both use this. */
   private shownX = 0;
@@ -218,12 +237,14 @@ export class Game {
     };
     this.hud.onPlay(() => void this.play());
     this.hud.onAbility(() => this.cast());
+    this.hud.onPet(() => this.renderer.poke());
     this.collection = new Collection(profile, {
       save: () => saveProfile(this.profile),
       preview: (species) => {
         this.previewSpecies = species;
       },
       line: () => this.hud.setPetLine(this.petLabel()),
+      portrait: (species) => this.renderer.portraitURLs[species] ?? '',
     });
     this.hud.setChip(this.net.mode);
     this.api = {
@@ -244,6 +265,9 @@ export class Game {
         this.input.desiredY = y;
       },
       project: (x: number, y: number) => this.renderer.project(x, 0, y),
+      smooth: () => this.smoothView(),
+      inputDebug: () => ({ ...this.input.debug(), seq: this.seq, ack: this.serverAck }),
+      trace: () => this.net.trace.slice(),
       feel: () => {
         const cam = this.renderer.frameCam();
         const screen = this.renderer.project(this.shownX, 0, this.shownY);
@@ -280,8 +304,22 @@ export class Game {
   }
 
   private async play(): Promise<void> {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement) focused.blur();
+    this.joined = false;
+    this.sentSteer = false;
+    this.predPrimed = false;
+    this.selfId = 0;
+    this.seq = 0;
+    this.serverAck = 0;
+    this.predDX = 0;
+    this.predDY = 0;
+    this.predTurn = 0;
+    this.predHist.length = 0;
+    for (const ent of this.ents) ent.used = false;
     this.died = false;
     this.shownKills = 0;
+    sfx.play();
     this.shownPct = 0;
     this.peakPct = 0;
     this.winTimer = 0;
@@ -310,7 +348,6 @@ export class Game {
     this.hud.showHud(true);
     this.steerUntil = performance.now() + 4500;
     this.snapCam = true;
-    this.predPrimed = false;
     if (mode === 'online') {
       this.offline = null;
       const pet = this.equipped();
@@ -348,6 +385,9 @@ export class Game {
     sim.lockstep = true;
     const player = sim.addHuman(this.displayName, this.equipped().species, kitOf(this.equipped()), this.equipped().level);
     if (!player) return;
+    this.joined = true;
+    this.sentSteer = false;
+    this.seq = 0;
     this.offline = sim;
     this.selfId = player.id;
     this.applyArena(sim.seed);
@@ -403,7 +443,26 @@ export class Game {
     this.hud.showAbility(this.phase === 'playing');
     if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
     this.renderer.heroRecolor = this.previewSpecies === null ? recolorId(this.equipped().level) : 0;
-    if (this.phase === 'title') this.hud.setPetCard(this.cardView());
+    const screen = this.collection.phase();
+    this.renderer.stageKind =
+      screen === 'detail' ? 'detail' : screen === 'reveal' || screen === 'burst' || screen === 'shake' ? 'reveal' : 'home';
+    if (this.heldLands && performance.now() >= this.heldUntil) {
+      this.territory.applyEncoded(this.heldLands);
+      this.heldLands = null;
+    }
+    if (this.deferAdopt && this.offline && performance.now() >= this.heldUntil) {
+      const sim = this.offline;
+      const ids: number[] = [];
+      for (let id = 1; id <= sim.cfg.maxEntities; id++) if (sim.land.get(id).length > 0) ids.push(id);
+      this.territory.adopt(sim.land, ids);
+      this.deferAdopt = false;
+    }
+    if (this.phase === 'title') {
+      this.hud.setPetCard(this.cardView());
+      this.hud.setEconomy(this.profile.coins, this.profile.freeBoxes, CONFIG.boxPrice, this.profile.pets.length);
+    }
+    if (this.phase === 'playing') this.noteMotion(dt);
+    this.hud.setDebug(this.debugLine());
     const petCount = this.fillDraw();
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
     const hero = this.previewSpecies ?? this.equipped().species;
@@ -425,14 +484,16 @@ export class Game {
     const sim = this.offline;
     if (!sim) return;
     const tickDt = sim.tickDt;
-    this.acc += dt;
-    if (this.acc > tickDt * 2) this.acc = tickDt * 2;
-    if (this.acc >= tickDt) {
-      this.acc -= tickDt;
+    const stepped = consumeSteps(this.acc, dt, tickDt, 5);
+    this.acc = stepped.acc;
+    for (let i = 0; i < stepped.steps; i++) {
       const mag = Math.hypot(this.input.desiredX, this.input.desiredY);
-      if (mag > 0.15) {
-        this.sentSteer = true;
-        sim.setInput(this.selfId, this.input.desiredX / mag, this.input.desiredY / mag, ++this.seq);
+      if (mag > 0.15) this.sentSteer = true;
+      if (this.sentSteer) {
+        const ix = mag > 0.15 ? this.input.desiredX / mag : 0;
+        const iy = mag > 0.15 ? this.input.desiredY / mag : 0;
+        this.seq++;
+        sim.setInput(this.selfId, ix, iy, this.seq);
       }
       sim.step({ humans: 1 });
       this.consume(sim.consumeEvents());
@@ -440,7 +501,7 @@ export class Game {
       this.pickupCount = 0;
       sim.forEachActivePickup(this.readPickup);
     }
-    this.alpha = tickDt > 0 ? this.acc / tickDt : 1;
+    this.alpha = stepped.alpha;
   }
 
   private stepOnline(dt: number): void {
@@ -452,21 +513,32 @@ export class Game {
       this.sentSteer = true;
     }
     const tickDt = 1 / CONFIG.tickHz;
-    this.predAcc += dt;
-    // One local step per server step. A short lead covers the round trip; past that we wait
-    // instead of sprinting ahead and rubber-banding back. Time spent waiting must not bank
-    // up, or the next step appears all at once.
-    const lead = 8;
-    // Stay parked until the player actually steers. Sending the spawn heading
-    // made the pet walk itself the moment the first snapshot arrived.
-    const canStep = this.sentSteer && this.predPrimed && this.seq - this.serverAck < lead;
-    if (!canStep) {
-      if (this.predAcc > tickDt) this.predAcc = tickDt;
-    } else if (this.predAcc > tickDt * 2) {
-      this.predAcc = tickDt * 2;
+    if (!this.predPrimed || !this.sentSteer) {
+      this.predAcc = Math.min(tickDt, this.predAcc + Math.max(0, dt));
+      const first = this.sentSteer && this.seq === 0;
+      if (this.sentSteer && (first || this.predAcc >= tickDt) && this.seq - this.serverAck < 8) {
+        if (!first) this.predAcc -= tickDt;
+        this.seq++;
+        this.net.send({ t: 'input', seq: this.seq, x: this.predDX, y: this.predDY });
+        this.lastSendAt = performance.now();
+      }
+      this.resendStuck();
+      this.decayOffset(dt);
+      return;
     }
-    if (canStep && this.predAcc >= tickDt) {
-      this.predAcc -= tickDt;
+    if (this.serverAck > this.seq) this.seq = this.serverAck;
+    const lead = 8;
+    const stepped = consumeSteps(this.predAcc, dt, tickDt, 5);
+    let steps = stepped.steps;
+    const room = lead - (this.seq - this.serverAck);
+    if (steps > room) {
+      const extra = steps - Math.max(0, room);
+      steps = Math.max(0, room);
+      this.predAcc = Math.min(tickDt, stepped.acc + extra * tickDt);
+    } else {
+      this.predAcc = stepped.acc;
+    }
+    for (let i = 0; i < steps; i++) {
       this.predPrevX = this.predX;
       this.predPrevY = this.predY;
       this.predPrevH = this.predH;
@@ -474,15 +546,18 @@ export class Game {
       this.body.x = this.predX;
       this.body.y = this.predY;
       this.body.heading = this.predH;
+      this.body.turnVel = this.predTurn;
       this.body.desiredX = this.predDX;
       this.body.desiredY = this.predDY;
-      const cfg = mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul };
+      const cfg = this.predCfg(mul);
       integrateBody(this.body, tickDt, cfg, undefined, this.boundary ?? undefined);
       this.predX = this.body.x;
       this.predY = this.body.y;
       this.predH = this.body.heading;
+      this.predTurn = this.body.turnVel ?? 0;
       this.seq++;
       this.net.send({ t: 'input', seq: this.seq, x: this.predDX, y: this.predDY });
+      this.lastSendAt = performance.now();
       this.predHist.push({
         seq: this.seq,
         x: this.predX,
@@ -491,10 +566,41 @@ export class Game {
         dx: this.predDX,
         dy: this.predDY,
         mul,
+        tv: this.predTurn,
       });
       if (this.predHist.length > 48) this.predHist.shift();
     }
+    this.resendStuck();
     this.decayOffset(dt);
+  }
+
+  /** Reused so a dash tick does not allocate a config object. */
+  private readonly speedCfg = { ...CONFIG };
+
+  private predCfg(mul: number): typeof CONFIG {
+    if (mul === 1) return CONFIG;
+    this.speedCfg.speed = CONFIG.speed * mul;
+    this.speedCfg.turnRate = CONFIG.turnRate * mul;
+    return this.speedCfg;
+  }
+
+  /** If the next seq never got through, send it again instead of waiting out the skip. */
+  private resendStuck(): void {
+    const next = this.serverAck + 1;
+    if (this.seq < next) return;
+    let sample: (typeof this.predHist)[number] | null = null;
+    for (let i = 0; i < this.predHist.length; i++) {
+      if (this.predHist[i]!.seq === next) sample = this.predHist[i]!;
+    }
+    if (performance.now() - this.lastSendAt < 120) return;
+    if (sample) {
+      this.net.send({ t: 'input', seq: sample.seq, x: sample.dx, y: sample.dy });
+    } else if (this.sentSteer && next === this.seq) {
+      this.net.send({ t: 'input', seq: next, x: this.predDX, y: this.predDY });
+    } else {
+      return;
+    }
+    this.lastSendAt = performance.now();
   }
 
   private decayOffset(dt: number): void {
@@ -594,6 +700,7 @@ export class Game {
     this.serverAck = 0;
     this.predDX = 0;
     this.predDY = 0;
+    this.predTurn = 0;
     this.predPrimed = false;
     this.predHist.length = 0;
     for (const ent of this.ents) ent.used = false;
@@ -602,6 +709,7 @@ export class Game {
     this.fixCount = 0;
     this.remoteInit = false;
     this.territory.clearAll();
+    for (const ent of this.ents) ent.used = false;
     if (Number.isFinite(msg.seed)) this.applyArena(msg.seed);
     for (const n of msg.names) {
       const ent = this.ents[n.i];
@@ -628,7 +736,14 @@ export class Game {
         this.renderer.sweepLand(stolen, rgb[0], rgb[1], rgb[2], ev.x, ev.y);
       }
     }
-    if (msg.lands && msg.lands.length > 0) this.territory.applyEncoded(msg.lands);
+    const winEv = msg.events?.find((ev) => ev.e === 'win');
+    if (winEv && winEv.e === 'win' && msg.lands && msg.lands.length > 0) {
+      this.heldLands = msg.lands;
+      const ent = this.ents[winEv.id];
+      this.armWin(ent?.x ?? 0, ent?.z ?? 0, winEv.id);
+    } else if (msg.lands && msg.lands.length > 0) {
+      this.territory.applyEncoded(msg.lands);
+    }
     if (msg.events) this.applyEvents(msg.events);
     for (const snap of msg.ents) this.applySnap(snap);
     if (msg.pickups) {
@@ -648,12 +763,13 @@ export class Game {
         this.predY = this.predPrevY = msg.you[1];
         this.predH = this.predPrevH = msg.you[2];
         this.predAcc = 0;
-        if (this.seq < msg.ack) this.seq = msg.ack;
         this.serverAck = msg.ack;
+        if (this.seq < msg.ack) this.seq = msg.ack;
         if (!this.sentSteer) {
           this.predDX = 0;
           this.predDY = 0;
         }
+        this.predTurn = 0;
         this.offX = this.offY = this.offH = 0;
         this.predPrimed = true;
         this.snapCam = true;
@@ -685,23 +801,33 @@ export class Game {
     let x = sx;
     let y = sy;
     let h = sh;
-    const future = this.predHist.filter((s) => s.seq > sample.seq);
+    let tv = sample.tv;
     const tickDt = 1 / CONFIG.tickHz;
-    for (const s of future) {
-      const body = { x, y, heading: h, desiredX: s.dx, desiredY: s.dy };
-      const mul = s.mul;
-      const cfg = mul === 1 ? CONFIG : { ...CONFIG, speed: CONFIG.speed * mul, turnRate: CONFIG.turnRate * mul };
+    for (let i = 0; i < this.predHist.length; i++) {
+      const s = this.predHist[i]!;
+      if (s.seq <= sample.seq) continue;
+      const body = { x, y, heading: h, desiredX: s.dx, desiredY: s.dy, turnVel: tv };
+      const cfg = this.predCfg(s.mul);
       integrateBody(body, tickDt, cfg, undefined, this.boundary ?? undefined);
       x = body.x;
       y = body.y;
       h = body.heading;
+      tv = body.turnVel ?? 0;
       s.x = x;
       s.y = y;
       s.h = h;
+      s.tv = tv;
     }
-    if (future.length > 0) {
-      const last = future[future.length - 1]!;
-      const prev = future.length > 1 ? future[future.length - 2]! : { x: sx, y: sy, h: sh };
+    this.predTurn = tv;
+    let last: (typeof this.predHist)[number] | null = null;
+    let prev: { x: number; y: number; h: number } | null = null;
+    for (let i = 0; i < this.predHist.length; i++) {
+      const s = this.predHist[i]!;
+      if (s.seq <= sample.seq) continue;
+      prev = last ? { x: last.x, y: last.y, h: last.h } : { x: sx, y: sy, h: sh };
+      last = s;
+    }
+    if (last && prev) {
       this.predPrevX = prev.x;
       this.predPrevY = prev.y;
       this.predPrevH = prev.h;
@@ -738,6 +864,7 @@ export class Game {
     this.predPrevH = this.predH = h;
     this.offX = this.offY = this.offH = 0;
     this.offVx = this.offVy = this.offVh = 0;
+    this.predTurn = 0;
     this.predHist.length = 0;
   }
 
@@ -808,7 +935,14 @@ export class Game {
         const rgb = PALETTE[(Math.max(1, ev.victim) - 1) % PALETTE.length]!;
         this.renderer.sweepLand(stolen, rgb[0], rgb[1], rgb[2], ev.x, ev.y);
       }
-      this.territory.adopt(this.offline.land, this.offline.land.changedIds());
+      const win = events.find((ev) => ev.e === 'win');
+      if (win && win.e === 'win') {
+        this.deferAdopt = true;
+        const ent = this.ents[win.id];
+        this.armWin(ent?.x ?? 0, ent?.z ?? 0, win.id);
+      } else {
+        this.territory.adopt(this.offline.land, this.offline.land.changedIds());
+      }
     }
     this.applyEvents(events);
   }
@@ -844,6 +978,7 @@ export class Game {
             this.noteLand(me.land, me.kills, me.trainLen);
           }
           this.hud.killBanner(victim?.name || 'a pet');
+          sfx.tap();
           buzz(14);
         }
       } else if (ev.e === 'claim') {
@@ -890,6 +1025,7 @@ export class Game {
     this.hud.showDeath(null);
     this.hud.showOut(`Out - ${placeLabel(ev.rank, ev.total)}`);
     this.homeTimer = 1.3;
+    sfx.out();
     buzz(20);
   }
 
@@ -1050,6 +1186,7 @@ export class Game {
         kills: p?.kills ?? 0,
         train: p?.trainLen ?? 0,
         outside: p?.outside ?? false,
+        bot: false,
         xp: p?.xp ?? 0,
         level: p?.level ?? 1,
       };
@@ -1064,6 +1201,7 @@ export class Game {
       kills: self?.kills ?? 0,
       train: self?.trainLen ?? 0,
       outside: self?.outside ?? false,
+      bot: self?.bot ?? false,
       xp: self?.xp ?? 0,
       level: self?.level ?? 1,
     };
@@ -1119,13 +1257,85 @@ export class Game {
     const need = xpForLevel(pet.level);
     const boost = Math.round((levelPower(pet.level) - 1) * 100);
     return {
-      name: this.petLabel(),
+      name: SPECIES_LABEL[SPECIES[pet.species] ?? 'cat'] ?? 'Pet',
       level: pet.level,
+      rarity: pet.rarity,
       xp: pet.level >= CONFIG.levelCap ? 1 : need > 0 ? pet.xp / need : 0,
       boost,
       unlocks: unlockNames(pet.level),
       reward: this.homeReward,
     };
+  }
+
+  private armWin(x: number, z: number, id: number): void {
+    const rgb = PALETTE[(Math.max(1, id) - 1) % PALETTE.length]!;
+    this.renderer.winWave(x, z, rgb[0], rgb[1], rgb[2]);
+    this.heldUntil = performance.now() + 1200;
+  }
+
+  private noteMotion(dt: number): void {
+    const screen = this.renderer.project(this.shownX, 0, this.shownY);
+    if (!screen.ok) return;
+    if (!this.metricInit) {
+      this.prevSx = screen.x;
+      this.prevSy = screen.y;
+      this.metricInit = true;
+      return;
+    }
+    const vx = screen.x - this.prevSx;
+    const vy = screen.y - this.prevSy;
+    const jerk = Math.hypot(vx - this.prevVx, vy - this.prevVy);
+    this.jerkRing[this.jerkWrite % this.jerkRing.length] = jerk;
+    this.jerkWrite++;
+    if (jerk > this.jerkMax) this.jerkMax = jerk;
+    if (dt > 0.024) this.longFrames++;
+    if (dt > this.dtMax) this.dtMax = dt;
+    this.metricFrames++;
+    this.prevSx = screen.x;
+    this.prevSy = screen.y;
+    this.prevVx = vx;
+    this.prevVy = vy;
+  }
+
+  private smoothView(): {
+    jerkMax: number;
+    jerkP95: number;
+    longFrames: number;
+    frames: number;
+    dtMax: number;
+    fps: number;
+  } {
+    const n = Math.min(this.jerkWrite, this.jerkRing.length);
+    let p95 = 0;
+    if (n > 0) {
+      const copy = new Float32Array(n);
+      if (this.jerkWrite <= this.jerkRing.length) copy.set(this.jerkRing.subarray(0, n));
+      else {
+        const start = this.jerkWrite % this.jerkRing.length;
+        copy.set(this.jerkRing.subarray(start));
+        copy.set(this.jerkRing.subarray(0, start), this.jerkRing.length - start);
+      }
+      const sorted = Array.from(copy).sort((a, b) => a - b);
+      p95 = sorted[Math.min(n - 1, Math.floor(n * 0.95))] ?? 0;
+    }
+    return {
+      jerkMax: this.jerkMax,
+      jerkP95: p95,
+      longFrames: this.longFrames,
+      frames: this.metricFrames,
+      dtMax: this.dtMax,
+      fps: this.perf.stats.fps,
+    };
+  }
+
+  private debugLine(): string {
+    if (!this.hud.debugOn) return '';
+    const d = this.input.debug();
+    return (
+      `touches ${d.touches} id ${d.pointerId}\n` +
+      `stick ${d.active ? 'down' : 'up'} ${d.dirX.toFixed(2)},${d.dirY.toFixed(2)}\n` +
+      `seq ${this.seq} ack ${this.serverAck}`
+    );
   }
 
   petLabel(): string {
@@ -1187,6 +1397,7 @@ export class Game {
     this.pendingWin = ev;
     this.winTimer = 1.7;
     this.hud.winBanner('You conquered the map!');
+    sfx.win();
     this.renderer.confetti(ev.id === this.selfId ? this.shownX : 0, ev.id === this.selfId ? this.shownY : 0);
   }
 
@@ -1406,6 +1617,7 @@ declare global {
         kills: number;
         train: number;
         outside: boolean;
+        bot: boolean;
       };
       sampleTrails: (limit?: number) => Array<{ x: number; y: number; owner: number }>;
       sampleOwnTrail: (limit?: number) => Array<{ x: number; y: number; owner: number }>;
@@ -1428,6 +1640,23 @@ declare global {
       landPoly: (id?: number) => Array<Array<Array<[number, number]>>>;
       steer: (x: number, y: number) => void;
       project: (x: number, y: number) => { x: number; y: number; ok: boolean };
+      smooth: () => {
+        jerkMax: number;
+        jerkP95: number;
+        longFrames: number;
+        frames: number;
+        dtMax: number;
+        fps: number;
+      };
+      inputDebug: () => {
+        active: boolean;
+        steering: boolean;
+        pointerId: number;
+        touches: number;
+        seq: number;
+        ack: number;
+      };
+      trace: () => string[];
       feel: () => {
         x: number;
         y: number;

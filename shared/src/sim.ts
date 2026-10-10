@@ -370,7 +370,7 @@ export class Sim {
           if (!p.steered) continue;
         }
       }
-      p.aliveMs += dt * 1000;
+            p.aliveMs += dt * 1000;
       for (let k = 0; k < steps && p.alive; k++) {
         if (k > 0 && !this.applyDueInput(p)) break;
         const x0 = p.x;
@@ -518,6 +518,7 @@ export class Sim {
     p.x = x;
     p.y = y;
     p.heading = heading;
+    p.turnVel = 0;
     p.desiredX = Math.cos(heading);
     p.desiredY = Math.sin(heading);
     p.invulnUntil = 0;

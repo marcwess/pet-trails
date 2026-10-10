@@ -1,7 +1,9 @@
 import { SPECIES } from '@pet-trails/shared';
 import {
+  BoxGeometry,
   FrontSide,
   MeshLambertMaterial,
+  NearestFilter,
   SRGBColorSpace,
   type BufferGeometry,
   type Mesh,
@@ -21,32 +23,43 @@ export async function loadPetGeometries(
   let material: MeshLambertMaterial | null = null;
   const total = SPECIES.length;
   for (let i = 0; i < total; i++) {
-    const gltf = await loader.loadAsync(`${base}assets/pets/animal-${SPECIES[i]}.glb`);
-    gltf.scene.updateWorldMatrix(true, true);
-    const parts: BufferGeometry[] = [];
-    gltf.scene.traverse((obj) => {
-      const mesh = obj as Mesh;
-      if (!mesh.isMesh) return;
-      const srcMat = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as MeshStandardMaterial;
-      if (!material && srcMat.map) {
-        srcMat.map.colorSpace = SRGBColorSpace;
-        srcMat.map.anisotropy = 1;
-        srcMat.map.needsUpdate = true;
-        material = new MeshLambertMaterial({ map: srcMat.map, side: FrontSide });
-      } else if (srcMat.map && material?.map && srcMat.map !== material.map) {
-        srcMat.map.dispose();
-      }
-      srcMat.dispose();
-      const g = mesh.geometry.clone();
-      g.applyMatrix4(mesh.matrixWorld);
-      g.deleteAttribute('tangent');
-      g.deleteAttribute('color');
-      parts.push(g);
-      mesh.geometry.dispose();
-    });
-    const merged = mergeGeometries(parts, false);
-    for (const part of parts) part.dispose();
-    if (!merged) throw new Error(`Could not merge ${SPECIES[i]}`);
+    const species = SPECIES[i]!;
+    let merged: BufferGeometry | null = null;
+    try {
+      const gltf = await loader.loadAsync(`${base}assets/pets/animal-${species}.glb`);
+      gltf.scene.updateWorldMatrix(true, true);
+      const parts: BufferGeometry[] = [];
+      gltf.scene.traverse((obj) => {
+        const mesh = obj as Mesh;
+        if (!mesh.isMesh) return;
+        const srcMat = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as MeshStandardMaterial;
+        if (!material && srcMat.map) {
+          // The atlas is a grid of flat swatches. Linear filtering and mipmaps
+          // blend a pink pig into the gray neighbors, so the whole body reads gray.
+          srcMat.map.colorSpace = SRGBColorSpace;
+          srcMat.map.magFilter = NearestFilter;
+          srcMat.map.minFilter = NearestFilter;
+          srcMat.map.generateMipmaps = false;
+          srcMat.map.anisotropy = 1;
+          srcMat.map.needsUpdate = true;
+          material = new MeshLambertMaterial({ map: srcMat.map, side: FrontSide });
+        } else if (srcMat.map && material?.map && srcMat.map !== material.map) {
+          srcMat.map.dispose();
+        }
+        srcMat.dispose();
+        const g = mesh.geometry.clone();
+        g.applyMatrix4(mesh.matrixWorld);
+        g.deleteAttribute('tangent');
+        g.deleteAttribute('color');
+        parts.push(g);
+        mesh.geometry.dispose();
+      });
+      merged = mergeGeometries(parts, false);
+      for (const part of parts) part.dispose();
+    } catch (err) {
+      console.error(`Pet model failed: ${species}`, err);
+    }
+    if (!merged) merged = fallbackPet();
     merged.computeBoundingBox();
     const bb = merged.boundingBox!;
     const height = Math.max(0.001, bb.max.y - bb.min.y);
@@ -60,6 +73,13 @@ export async function loadPetGeometries(
   }
   if (!material) throw new Error('Pet colormap missing');
   return { geos, material };
+}
+
+/** A visible stand-in so one broken GLB cannot leave a species invisible. */
+function fallbackPet(): BufferGeometry {
+  const geo = new BoxGeometry(0.7, 0.9, 0.7);
+  geo.translate(0, 0.45, 0);
+  return geo;
 }
 
 /** Kenney Platformer Kit coin (CC0). Null if the file is missing. */

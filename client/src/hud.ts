@@ -1,4 +1,4 @@
-import { PALETTE } from '@pet-trails/shared';
+import { PALETTE, RARITY_COLOR } from '@pet-trails/shared';
 import type { DeathReason } from '@pet-trails/shared';
 
 export interface BoardRow {
@@ -74,8 +74,20 @@ export class Hud {
   private readonly winText = must('win-title');
   private readonly outEl = must('out');
   private readonly rewardEl = must('petcard-reward');
+  private readonly coinCount = must('coin-count');
+  private readonly nameBtn = must('name-btn');
+  private readonly namePop = must('name-pop') as HTMLFormElement;
+  private readonly nameInput = must('name') as HTMLInputElement;
+  private readonly rarityPill = must('rarity-pill');
+  private readonly levelRing = must('level-ring');
+  private readonly debugEl = must('debug');
+  private readonly boxBadge = must('box-badge');
+  private readonly petsBadge = must('pets-badge');
+  readonly debugOn: boolean;
+  private petFn: (() => void) | null = null;
   private rewardKey = '';
   private rewardFrame = 0;
+  private shownCoins = -1;
 
   constructor() {
     for (let i = 0; i < 6; i++) {
@@ -120,6 +132,22 @@ export class Hud {
       this.deathVals.push(v);
       this.deathBars.push(bar);
     }
+    this.debugOn = new URLSearchParams(location.search).get('debug') === '1';
+    this.debugEl.hidden = !this.debugOn;
+    this.nameBtn.textContent = this.nameInput.value.trim() || 'You';
+    this.nameBtn.addEventListener('click', () => {
+      this.namePop.hidden = false;
+      this.nameInput.focus();
+      this.nameInput.select();
+    });
+    this.namePop.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const name = this.nameInput.value.trim().slice(0, 16) || 'You';
+      this.nameInput.value = name;
+      this.nameBtn.textContent = name;
+      this.namePop.hidden = true;
+    });
+    must('pet-tap').addEventListener('click', () => this.petFn?.());
     const labels = must('labels');
     for (let i = 0; i < 40; i++) {
       const el = document.createElement('div');
@@ -134,10 +162,16 @@ export class Hud {
     this.againBtn.addEventListener('click', fn);
   }
 
+  onPet(fn: () => void): void {
+    this.petFn = fn;
+  }
+
   onAbility(fn: () => void): void {
-    // Fire on pointerdown: iOS WebKit drops the synthetic click while another
-    // finger is still steering, which is exactly when the button gets pressed.
+    // touchstart must not preventDefault. iOS cancels the steer finger when
+    // the ability button swallows the touch.
+    this.abilityBtn.addEventListener('touchstart', () => fn(), { passive: true });
     this.abilityBtn.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch') return;
       ev.preventDefault();
       fn();
     });
@@ -180,9 +214,24 @@ export class Hud {
     this.petline.textContent = text;
   }
 
+  setEconomy(coins: number, freeBoxes: number, boxPrice: number, pets: number): void {
+    const next = Math.max(0, Math.floor(coins));
+    this.coinCount.textContent = String(next);
+    this.coinCount.parentElement?.classList.toggle('bump', this.shownCoins >= 0 && next > this.shownCoins);
+    this.shownCoins = next;
+    this.boxBadge.hidden = !(freeBoxes > 0 || next >= boxPrice);
+    this.petsBadge.hidden = pets <= 1;
+  }
+
+  setDebug(text: string): void {
+    if (!this.debugOn) return;
+    if (this.debugEl.textContent !== text) this.debugEl.textContent = text;
+  }
+
   setPetCard(card: {
     name: string;
     level: number;
+    rarity: string;
     xp: number;
     boost: number;
     unlocks: string[];
@@ -191,6 +240,10 @@ export class Hud {
     // The card already names the pet and level, so the loading line steps aside.
     this.petline.hidden = true;
     this.petCardName.textContent = `${card.name}`;
+    this.levelRing.textContent = String(card.level);
+    const rarity = (card.rarity in RARITY_COLOR ? card.rarity : 'common') as keyof typeof RARITY_COLOR;
+    this.rarityPill.textContent = rarity.charAt(0).toUpperCase() + rarity.slice(1);
+    this.rarityPill.style.background = RARITY_COLOR[rarity];
     this.petCardFill.style.width = `${Math.round(Math.max(0, Math.min(1, card.xp)) * 100)}%`;
     this.petCardBoost.textContent = card.boost > 0 ? `Abilities +${card.boost}%` : 'Abilities +0%';
     this.showReward(card.reward);

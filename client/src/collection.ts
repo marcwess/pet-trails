@@ -1,4 +1,5 @@
 import {
+  ABILITY_BLURB,
   ABILITY_ICON,
   ABILITY_LABEL,
   CONFIG,
@@ -13,11 +14,13 @@ import {
   type Profile,
 } from '@pet-trails/shared';
 import { mulberry32, randomSeed } from '@pet-trails/shared';
+import { sfx } from './sfx.js';
 
 export interface CollectionHost {
   save(): void;
   preview(species: number | null): void;
   line(): void;
+  portrait(species: number): string;
 }
 
 /** Pets and Boxes screens. The profile stays in localStorage. */
@@ -32,12 +35,7 @@ export class Collection {
     must('open-boxes').addEventListener('click', () => this.showBoxes());
     must('pets-back').addEventListener('click', () => this.close());
     must('boxes-back').addEventListener('click', () => this.close());
-    must('box-buy').addEventListener('click', () => {
-      if (!buyBox(this.profile)) return;
-      this.host.save();
-      this.paintBoxes();
-    });
-    must('box-open').addEventListener('click', () => this.open());
+    must('box-go').addEventListener('click', () => this.buyAndOpen());
     must('reveal').addEventListener('click', () => {
       if (must('reveal').dataset.phase === 'reveal') this.finishReveal();
     });
@@ -93,11 +91,15 @@ export class Collection {
       const species = SPECIES[pet.species] ?? 'cat';
       const active = pet.actives[pet.equippedActive];
       const passive = pet.passives[pet.equippedPassive];
+      const portrait = this.host.portrait(pet.species);
+      card.classList.add(`rarity-${pet.rarity}`);
       card.innerHTML =
+        (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
         `<b>${SPECIES_LABEL[species]}</b>` +
         `<span class="rare-name">${label(pet.rarity)}</span>` +
         `<span class="lv">Lv ${pet.level}</span>` +
-        `<span class="kit">${ABILITY_ICON[active]} ${ABILITY_LABEL[active]} · ${ABILITY_ICON[passive]} ${ABILITY_LABEL[passive]}</span>`;
+        `<span class="kit">${ABILITY_ICON[active]} ${ABILITY_LABEL[active]} · ${ABILITY_ICON[passive]} ${ABILITY_LABEL[passive]}</span>` +
+        `<span class="blurb">${ABILITY_BLURB[active]}</span>`;
       card.addEventListener('click', () => this.showDetail(pet));
       grid.appendChild(card);
     }
@@ -117,7 +119,12 @@ export class Collection {
     rare.className = 'rare-name';
     rare.textContent = `${label(pet.rarity)} · Lv ${pet.level}`;
     rare.style.color = RARITY_COLOR[pet.rarity];
-    sheet.append(title, rare, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
+    const blurb = document.createElement('p');
+    blurb.className = 'blurb';
+    const active = pet.actives[pet.equippedActive];
+    const passive = pet.passives[pet.equippedPassive];
+    blurb.textContent = `${ABILITY_BLURB[active]} ${ABILITY_BLURB[passive]}`;
+    sheet.append(title, rare, blurb, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
     const equip = document.createElement('button');
     equip.type = 'button';
     equip.className = 'btn';
@@ -154,19 +161,28 @@ export class Collection {
 
   private paintBoxes(): void {
     must('box-coins').textContent = `${Math.floor(this.profile.coins)} coins`;
-    const buy = must('box-buy') as HTMLButtonElement;
-    const open = must('box-open') as HTMLButtonElement;
-    buy.textContent = `Buy · ${CONFIG.boxPrice}`;
-    buy.disabled = this.profile.coins < CONFIG.boxPrice;
+    const go = must('box-go') as HTMLButtonElement;
     const n = this.profile.freeBoxes;
-    open.textContent = n > 0 ? `Open · ${n}` : 'Open';
-    open.disabled = n <= 0;
+    if (n > 0) {
+      go.textContent = n > 1 ? `Open · ${n}` : 'Open';
+      go.disabled = false;
+    } else {
+      go.textContent = `Open · ${CONFIG.boxPrice}`;
+      go.disabled = this.profile.coins < CONFIG.boxPrice;
+    }
+  }
+
+  private buyAndOpen(): void {
+    if (this.profile.freeBoxes <= 0 && !buyBox(this.profile)) return;
+    this.host.save();
+    this.open();
   }
 
   private open(): void {
     if (this.profile.freeBoxes <= 0) return;
     const pet = openBox(this.profile, mulberry32(randomSeed()));
     if (!pet) return;
+    sfx.open();
     this.host.save();
     this.paintBoxes();
     this.playReveal(pet);

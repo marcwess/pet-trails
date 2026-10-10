@@ -6,49 +6,72 @@
       name="viewport"
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#7d8b9c" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#8fd4ff" />
     <title>Pet Trails</title>
   </head>
   <body>
     <div id="ui">
       <div id="vignette"></div>
       <div id="chip" class="chip wait" title="Connecting"></div>
-      <section id="title" class="title-screen">
-        <h1 class="logo">PET<br />TRAILS</h1>
-        <div class="title-gap"></div>
-        <div class="title-panel">
-          <label class="name-field">
-            <span>Name</span>
-            <input id="name" maxlength="16" value="You" autocomplete="nickname" enterkeyhint="done" />
-          </label>
-          <button id="play" class="btn" type="button" disabled>PLAY</button>
-          <div class="soon-row">
-            <button id="open-pets" class="btn secondary" type="button">Pets</button>
-            <button id="open-boxes" class="btn secondary" type="button">Boxes</button>
-          </div>
-          <p id="petline" class="petline">Loading pets…</p>
-            <div id="petcard" class="petcard">
-            <p id="petcard-reward" class="petcard-reward" hidden></p>
-            <div id="petcard-name">Your pet</div>
-            <div id="petcard-boost">Abilities +0%</div>
-            <div class="bar"><i id="petcard-fill"></i></div>
-            <div id="petcard-unlocks" class="chips"></div>
-          </div>
+      <section id="title" class="home">
+        <div class="home-bg" aria-hidden="true">
+          <i class="float f1"></i>
+          <i class="float f2"></i>
+          <i class="float f3"></i>
+          <i class="float f4"></i>
+          <i class="float f5"></i>
         </div>
+        <header class="topbar">
+          <div class="currency coin" id="coin-chip"><span>coins</span><b id="coin-count">0</b></div>
+          <div class="currency gem"><span>gems</span><b id="gem-count">0</b></div>
+        </header>
+        <h1 class="logo">PET TRAILS</h1>
+        <button id="pet-tap" class="pet-tap" type="button" aria-label="Wiggle pet"></button>
+        <div class="identity">
+          <button id="name-btn" class="name-pill" type="button">You</button>
+          <div class="meta-row">
+            <span id="rarity-pill" class="rarity-pill">Common</span>
+            <span id="level-ring" class="level-ring" aria-label="Level">1</span>
+            <div class="bar"><i id="petcard-fill"></i></div>
+          </div>
+          <div id="petcard-name" class="species-name">Your pet</div>
+          <div id="petcard-boost">Abilities +0%</div>
+          <div id="petcard-unlocks" class="chips"></div>
+        </div>
+        <p id="petcard-reward" class="reward-toast" hidden></p>
+        <button id="play" class="play-btn" type="button" disabled>PLAY</button>
+        <div class="home-actions">
+          <button id="open-pets" class="action-btn" type="button">
+            <span class="glyph paw" aria-hidden="true"></span>
+            <span>Pets</span>
+            <i id="pets-badge" class="dot" hidden></i>
+          </button>
+          <button id="open-boxes" class="action-btn" type="button">
+            <span class="glyph gift" aria-hidden="true"></span>
+            <span>Boxes</span>
+            <i id="box-badge" class="dot" hidden></i>
+          </button>
+        </div>
+        <p id="petline" class="petline">Loading pets…</p>
+        <form id="name-pop" class="name-pop" hidden>
+          <input id="name" maxlength="16" value="You" autocomplete="off" enterkeyhint="done" aria-label="Name" />
+        </form>
       </section>
       <div id="hud" hidden>
         <div id="lb" class="lb"></div>
+        <div id="you-left" class="left-pill">10 left</div>
         <div id="you" class="you">
           <div id="you-pct">0.0%</div>
           <div id="you-meta">
             <span id="you-kills">0</span>
             <span id="you-train">0</span>
-            <span id="you-left">10 left</span>
           </div>
         </div>
-        <div id="steer" class="steer">Drag up to go up</div>
+        <div id="steer" class="steer">Drag anywhere to steer</div>
         <button id="ability" class="ability" type="button" aria-label="Ability">
           <svg class="cd" viewBox="0 0 100 100" aria-hidden="true">
+            <circle class="cd-track" cx="50" cy="50" r="44"></circle>
             <circle id="ability-ring" cx="50" cy="50" r="44"></circle>
           </svg>
           <span id="ability-icon">⚡</span>
@@ -68,15 +91,16 @@
         <p id="death-kicker" class="eyebrow">Run over</p>
         <h2 id="death-title">Your trail was cut!</h2>
         <ul id="death-stats" class="stats"></ul>
-        <button id="again" class="btn" type="button">PLAY AGAIN</button>
+        <button id="again" class="play-btn" type="button">PLAY AGAIN</button>
       </section>
       <div id="toasts"></div>
       <div id="popups"></div>
       <div id="labels"></div>
+      <div id="debug" hidden></div>
       <div id="perf" hidden></div>
       <section id="pets" class="meta" hidden>
         <div class="meta-bar">
-          <button id="pets-back" class="btn secondary slim" type="button">Back</button>
+          <button id="pets-back" class="back" type="button">Back</button>
           <h2>Pets</h2>
         </div>
         <div id="pet-grid" class="pet-grid"></div>
@@ -87,14 +111,13 @@
       </section>
       <section id="boxes" class="meta" hidden>
         <div class="meta-bar">
-          <button id="boxes-back" class="btn secondary slim" type="button">Back</button>
+          <button id="boxes-back" class="back" type="button">Back</button>
           <h2>Boxes</h2>
         </div>
         <div class="box-panel">
           <p id="box-coins" class="box-coins">0 coins</p>
-          <p class="box-copy">A mystery box rolls a pet, a rarity, and a fresh kit.</p>
-          <button id="box-buy" class="btn" type="button">Buy</button>
-          <button id="box-open" class="btn secondary" type="button">Open</button>
+          <p class="box-copy">One tap buys a box and opens it. A roll is a pet, a rarity, and a fresh kit.</p>
+          <button id="box-go" class="play-btn" type="button">Open</button>
         </div>
       </section>
       <div id="reveal" class="reveal" hidden>

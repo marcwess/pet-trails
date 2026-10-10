@@ -15,6 +15,7 @@ export class Player {
   heading = 0;
   desiredX = 1;
   desiredY = 0;
+  turnVel = 0;
   lastSeq = 0;
   /** Inputs waiting for the tick they were sent for. A future seq must not skip ahead. */
   inSeq: number[] = [];
@@ -108,5 +109,6 @@ export class Player {
     this.inReal.length = 0;
     this.starved = 0;
     this.steered = false;
+    this.turnVel = 0;
   }
 }

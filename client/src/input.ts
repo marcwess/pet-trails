@@ -1,66 +1,124 @@
+import { Steer, type SteerSample } from './steer.js';
+
+const CONTROL = 'button, a, input, textarea, select, label';
+
+/**
+ * Window-level steering. Touch fingers go through TouchEvents so a second
+ * finger (the ability button) cannot replace the stick's identifier.
+ * Pointer events cover the mouse. Listeners are non-passive so preventDefault
+ * can stop double-tap zoom and the iOS back-swipe.
+ */
 export class Input {
   desiredX = 0;
   desiredY = 0;
   steering = false;
-  private active = false;
-  private pointerId = -1;
-  private originX = 0;
-  private originY = 0;
-  private lastX = 0;
-  private lastY = 0;
+  readonly steer = new Steer();
   private readonly keys = new Set<string>();
   private mouseX = 0;
   private mouseY = 0;
   private mouseValid = false;
+  private mouseDown = false;
   private readonly fine = window.matchMedia('(pointer: fine)').matches;
   private readonly keysOnly = new URLSearchParams(location.search).has('keys');
-  private readonly stickEl = document.getElementById('stick');
-  private readonly knobEl = document.getElementById('stick-knob');
+  private sawTouch = false;
 
   constructor(private readonly playerScreen: () => { x: number; y: number } | null) {
-    window.addEventListener('pointerdown', this.onDown, { passive: false });
-    window.addEventListener('pointermove', this.onMove, { passive: false });
-    window.addEventListener('pointerup', this.onUp);
-    window.addEventListener('pointercancel', this.onUp);
+    const opts: AddEventListenerOptions = { passive: false, capture: true };
+    window.addEventListener('touchstart', this.onTouchStart, opts);
+    window.addEventListener('touchmove', this.onTouchMove, opts);
+    window.addEventListener('touchend', this.onTouchEnd, opts);
+    window.addEventListener('touchcancel', this.onTouchCancel, opts);
+    window.addEventListener('pointerdown', this.onPointerDown, opts);
+    window.addEventListener('pointermove', this.onPointerMove, opts);
+    window.addEventListener('pointerup', this.onPointerUp, opts);
+    window.addEventListener('pointercancel', this.onPointerCancel, opts);
     window.addEventListener('keydown', this.onKey);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', () => {
-      this.active = false;
+      this.steer.cancelAll();
+      this.mouseDown = false;
       this.keys.clear();
     });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', () => this.steer.noteViewport());
+    window.addEventListener('resize', () => this.steer.noteViewport());
   }
 
-  private onDown = (ev: PointerEvent) => {
-    if (ev.target instanceof Element && ev.target.closest('button, a, input')) return;
-    this.active = true;
-    this.pointerId = ev.pointerId;
-    this.originX = ev.clientX;
-    this.originY = ev.clientY;
-    this.lastX = ev.clientX;
-    this.lastY = ev.clientY;
-    this.placeStick();
+  /** Anchor and drag, for the on-screen ring. */
+  stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
+    const s = this.steer.sample();
+    return { x: s.originX, y: s.originY, dx: s.x - s.originX, dy: s.y - s.originY, on: s.active };
+  }
+
+  debug(): SteerSample & { mouse: boolean; keys: number } {
+    const s = this.steer.sample();
+    return { ...s, mouse: this.mouseDown, keys: this.keys.size };
+  }
+
+  private onTouchStart = (ev: TouchEvent) => {
+    this.sawTouch = true;
+    if (!isControl(ev.target)) ev.preventDefault();
+    for (const t of Array.from(ev.changedTouches)) {
+      this.steer.down(t.identifier, t.clientX, t.clientY, isControl(t.target));
+    }
   };
 
-  private onMove = (ev: PointerEvent) => {
+  private onTouchMove = (ev: TouchEvent) => {
+    if (!isControl(ev.target)) ev.preventDefault();
+    for (const t of Array.from(ev.changedTouches)) this.steer.move(t.identifier, t.clientX, t.clientY);
+  };
+
+  private onTouchEnd = (ev: TouchEvent) => {
+    if (!isControl(ev.target)) ev.preventDefault();
+    for (const t of Array.from(ev.changedTouches)) this.steer.up(t.identifier);
+    if (ev.touches.length === 0 && !this.steer.sample().active) this.steer.cancelAll();
+  };
+
+  private onTouchCancel = (ev: TouchEvent) => {
+    ev.preventDefault();
+    if (ev.touches.length === 0) {
+      this.steer.cancelAll();
+      return;
+    }
+    for (const t of Array.from(ev.changedTouches)) this.steer.cancel(t.identifier);
+  };
+
+  private onPointerDown = (ev: PointerEvent) => {
+    if (ev.pointerType === 'touch' || this.sawTouch) return;
+    if (isControl(ev.target)) return;
+    ev.preventDefault();
+    this.mouseDown = true;
     this.mouseX = ev.clientX;
     this.mouseY = ev.clientY;
     this.mouseValid = true;
-    if (!this.active || ev.pointerId !== this.pointerId) return;
-    this.lastX = ev.clientX;
-    this.lastY = ev.clientY;
-    this.placeStick();
-    ev.preventDefault();
+    this.steer.down(ev.pointerId, ev.clientX, ev.clientY, false);
   };
 
-  private onUp = (ev: PointerEvent) => {
-    if (ev.pointerId !== this.pointerId) return;
-    this.active = false;
-    this.pointerId = -1;
-    this.placeStick();
+  private onPointerMove = (ev: PointerEvent) => {
+    this.mouseX = ev.clientX;
+    this.mouseY = ev.clientY;
+    this.mouseValid = true;
+    if (ev.pointerType === 'touch' || this.sawTouch) return;
+    if (!this.mouseDown) return;
+    ev.preventDefault();
+    this.steer.move(ev.pointerId, ev.clientX, ev.clientY);
+  };
+
+  private onPointerUp = (ev: PointerEvent) => {
+    if (ev.pointerType === 'touch' || this.sawTouch) return;
+    this.mouseDown = false;
+    this.steer.up(ev.pointerId);
+  };
+
+  private onPointerCancel = (ev: PointerEvent) => {
+    if (ev.pointerType === 'touch' || this.sawTouch) return;
+    this.mouseDown = false;
+    this.steer.cancel(ev.pointerId);
   };
 
   private onKey = (ev: KeyboardEvent) => {
+    if (isControl(ev.target)) return;
     this.keys.add(ev.key.toLowerCase());
   };
 
@@ -68,29 +126,15 @@ export class Input {
     this.keys.delete(ev.key.toLowerCase());
   };
 
-  private readonly stickOut = { x: 0, y: 0, dx: 0, dy: 0, on: false };
-
-  /** Where the finger is, for the on-screen ring. Steering math is unchanged. */
-  stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
-    const out = this.stickOut;
-    out.x = this.originX;
-    out.y = this.originY;
-    out.dx = this.lastX - this.originX;
-    out.dy = this.lastY - this.originY;
-    out.on = this.active;
-    return out;
-  }
-
   /**
    * Absolute stick. Screen up is world +Y and screen right is world +X.
-   * Drag is measured from the touch-down point, keys are those axes, and the
-   * mouse is measured from the pet's screen position.
+   * Keys use those axes. A fine pointer with no finger aims from the pet.
    */
   sample(): void {
+    const stick = this.steer.sample();
     let x = 0;
     let y = 0;
     let steering = false;
-    let hold = false;
     const w = this.keys.has('w') || this.keys.has('arrowup');
     const a = this.keys.has('a') || this.keys.has('arrowleft');
     const s = this.keys.has('s') || this.keys.has('arrowdown');
@@ -99,21 +143,11 @@ export class Input {
       x = (d ? 1 : 0) - (a ? 1 : 0);
       y = (w ? 1 : 0) - (s ? 1 : 0);
       steering = true;
-    } else if (this.active) {
-      const dx = this.lastX - this.originX;
-      const dy = this.lastY - this.originY;
-      const mag = Math.hypot(dx, dy);
-      // Inside the deadzone the last heading stays put, so a finger sliding
-      // across the anchor cannot flip the pet around.
-      if (mag > 14 && !this.reverses(dx, -dy, mag)) {
-        x = dx;
-        y = -dy;
-        steering = true;
-      } else if (this.steering) {
-        hold = true;
-        steering = true;
-      }
-    } else if (this.fine && this.mouseValid && !this.keysOnly) {
+    } else if (stick.active && stick.steering) {
+      x = stick.dirX;
+      y = stick.dirY;
+      steering = true;
+    } else if (!stick.active && this.fine && this.mouseValid && !this.mouseDown && !this.keysOnly && !this.sawTouch) {
       const p = this.playerScreen();
       if (p) {
         const dx = this.mouseX - p.x;
@@ -123,45 +157,18 @@ export class Input {
         if (dx * dx + dy * dy > 16) steering = true;
       }
     }
-    if (steering && !hold) {
+    if (steering && (x !== 0 || y !== 0)) {
       this.desiredX = x;
       this.desiredY = y;
-    }
-    if (steering) {
       this.steering = true;
-    } else if (!this.active) {
+    } else if (!stick.active && !this.mouseDown) {
       this.steering = false;
+    } else if (stick.active) {
+      this.steering = true;
     }
   }
+}
 
-  /** A short drag through the anchor must not spin the target 180 degrees. */
-  private reverses(x: number, y: number, mag: number): boolean {
-    const prev = Math.hypot(this.desiredX, this.desiredY);
-    if (prev < 0.2 || mag >= 32) return false;
-    const dot = (this.desiredX / prev) * (x / mag) + (this.desiredY / prev) * (y / mag);
-    return dot < -0.35;
-  }
-
-  /** Knob sits along the drag, which is the world direction (screen up = north). */
-  private placeStick(): void {
-    const stick = this.stickEl;
-    const knob = this.knobEl;
-    if (!stick || !knob) return;
-    if (!this.active) {
-      stick.hidden = true;
-      return;
-    }
-    stick.hidden = false;
-    stick.style.left = `${this.originX}px`;
-    stick.style.top = `${this.originY}px`;
-    let dx = this.lastX - this.originX;
-    let dy = this.lastY - this.originY;
-    const mag = Math.hypot(dx, dy);
-    const cap = 34;
-    if (mag > cap) {
-      dx = (dx / mag) * cap;
-      dy = (dy / mag) * cap;
-    }
-    knob.style.transform = `translate(${dx}px, ${dy}px)`;
-  }
+function isControl(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest(CONTROL);
 }

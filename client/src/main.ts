@@ -46,6 +46,18 @@ async function main(): Promise<void> {
   ]);
   const renderer = new Renderer(territory, loaded.geos, loaded.material, perf, coin);
   renderer.warmup();
+  renderer.buildSheet();
+  if (params.get('sheet') === '1' && renderer.sheet) {
+    renderer.sheet.id = 'contact-sheet';
+    renderer.sheet.style.cssText =
+      'position:fixed;left:8px;right:8px;bottom:8px;width:calc(100% - 16px);height:auto;z-index:30;border-radius:18px;pointer-events:none;background:#fff';
+    document.body.appendChild(renderer.sheet);
+  }
+  if (params.get('hz120') === '1') {
+    window.requestAnimationFrame = (cb: FrameRequestCallback) =>
+      window.setTimeout(() => cb(performance.now()), 1000 / 120) as unknown as number;
+    window.cancelAnimationFrame = (id: number) => window.clearTimeout(id);
+  }
   hud.setPetLine(`Your pet · ${SPECIES_LABEL[species]} · Lv ${equippedPet(profile).level}`);
   hud.setPlayEnabled(true);
   const input = new Input(() => (renderer.selfScreen ? { x: renderer.selfSX, y: renderer.selfSY } : null));
