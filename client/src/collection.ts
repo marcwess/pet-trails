@@ -20,9 +20,10 @@ import { sfx } from './sfx.js';
 
 export interface CollectionHost {
   save(): void;
-  preview(species: number | null): void;
+  preview(species: number | null, level?: number): void;
   line(): void;
   portrait(species: number): string;
+  silhouette?(species: number): string;
 }
 
 /** Pets and Boxes screens. The profile stays in localStorage. */
@@ -93,7 +94,15 @@ export class Collection {
       }
     }
     must('pet-count').textContent = `Collected ${owned.size}/${SPECIES.length}`;
-    for (let speciesId = 0; speciesId < SPECIES.length; speciesId++) {
+    // Owned pets first (the equipped one leads), locked silhouettes after.
+    const order = SPECIES.map((_, i) => i).sort((a, b) => {
+      const pa = owned.get(a);
+      const pb = owned.get(b);
+      const ra = pa ? (pa.instanceId === equipped.instanceId ? 0 : 1) : 2;
+      const rb = pb ? (pb.instanceId === equipped.instanceId ? 0 : 1) : 2;
+      return ra - rb || a - b;
+    });
+    for (const speciesId of order) {
       const pet = owned.get(speciesId);
       const species = SPECIES[speciesId] ?? 'cat';
       const portrait = this.host.portrait(speciesId);
@@ -114,11 +123,12 @@ export class Collection {
         grid.appendChild(card);
         continue;
       }
+      const shade = this.host.silhouette?.(speciesId) ?? '';
       const locked = document.createElement('div');
       locked.className = 'pcard locked';
       locked.innerHTML =
         `<span class="portrait-wrap">` +
-        (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
+        (shade ? `<img class="portrait" alt="" src="${shade}" />` : `<i class="portrait"></i>`) +
         `<span class="lock-mark">?</span>` +
         `</span>` +
         `<b>${SPECIES_LABEL[species]}</b>` +
@@ -131,7 +141,7 @@ export class Collection {
     must('pet-grid').hidden = true;
     must('pet-detail').hidden = false;
     must('pets').classList.add('detailing');
-    this.host.preview(pet.species);
+    this.host.preview(pet.species, pet.level);
     const sheet = must('pet-sheet');
     const species = SPECIES[pet.species] ?? 'cat';
     sheet.replaceChildren();
@@ -141,11 +151,6 @@ export class Collection {
     rare.className = 'rare-name';
     rare.textContent = `${label(pet.rarity)} · Lv ${pet.level}`;
     rare.style.color = RARITY_COLOR[pet.rarity];
-    const blurb = document.createElement('p');
-    blurb.className = 'blurb';
-    const active = pet.actives[pet.equippedActive];
-    const passive = pet.passives[pet.equippedPassive];
-    blurb.textContent = `${ABILITY_BLURB[active]} ${ABILITY_BLURB[passive]}`;
     const boost = document.createElement('p');
     boost.className = 'boost';
     const pct = Math.round((levelPower(pet.level) - 1) * 100);
@@ -154,7 +159,7 @@ export class Collection {
     next.className = 'next-line';
     const names = unlockNames(pet.level);
     next.textContent = names.length > 0 ? names.join(' · ') : 'Next: Sparkle at 3';
-    sheet.append(title, rare, boost, next, blurb, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
+    sheet.append(title, rare, boost, next, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
     const equip = document.createElement('button');
     equip.type = 'button';
     equip.className = 'btn';
@@ -175,7 +180,13 @@ export class Collection {
     ids.forEach((id, index) => {
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = `${ABILITY_ICON[id]} ${ABILITY_LABEL[id]}`;
+      const name = document.createElement('span');
+      name.className = 'kit-name';
+      name.textContent = `${ABILITY_ICON[id]} ${ABILITY_LABEL[id]}`;
+      const what = document.createElement('small');
+      what.className = 'kit-what';
+      what.textContent = ABILITY_BLURB[id];
+      btn.append(name, what);
       const on = kind === 'active' ? pet.equippedActive === index : pet.equippedPassive === index;
       if (on) btn.classList.add('on');
       btn.addEventListener('click', () => {

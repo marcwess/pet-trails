@@ -138,6 +138,7 @@ export class Game {
   private parkedAt = 0;
   private hitLeft = 0;
   private previewSpecies: number | null = null;
+  private previewLevel = 1;
   private readonly collection: Collection;
   private boardAcc = 0;
   private shownKills = 0;
@@ -244,11 +245,13 @@ export class Game {
     this.hud.onPet(() => this.renderer.poke());
     this.collection = new Collection(profile, {
       save: () => saveProfile(this.profile),
-      preview: (species) => {
+      preview: (species, level) => {
         this.previewSpecies = species;
+        this.previewLevel = level ?? 1;
       },
       line: () => this.hud.setPetLine(this.petLabel()),
       portrait: (species) => this.renderer.portraitURLs[species] ?? '',
+      silhouette: (species) => this.renderer.silhouetteURLs[species] ?? '',
     });
     this.hud.setChip(this.net.mode);
     this.api = {
@@ -454,10 +457,30 @@ export class Game {
     }
     this.hud.showAbility(this.phase === 'playing');
     if (this.phase === 'playing') this.hud.setAbility(this.abilityIcon(), this.abilityLeft(), this.abilityTotal());
-    this.renderer.heroRecolor = this.previewSpecies === null ? recolorId(this.equipped().level) : 0;
+    this.renderer.heroRecolor = recolorId(this.previewSpecies === null ? this.equipped().level : this.previewLevel);
     const screen = this.collection.phase();
     this.renderer.stageKind =
       screen === 'detail' ? 'detail' : screen === 'reveal' || screen === 'burst' || screen === 'shake' ? 'reveal' : 'home';
+    if (screen === 'detail') {
+      const tt = document.querySelector('.turntable');
+      const r = tt ? tt.getBoundingClientRect() : null;
+      const vh = window.innerHeight || 1;
+      this.renderer.detailBox = r && r.height > 0 ? { cy: (r.top + r.bottom) / 2 / vh, h: r.height / vh } : null;
+    } else if (this.renderer.stageKind === 'reveal') {
+      // The pet stands in the band above the card (where the card will land while it is still hidden).
+      const card = document.getElementById('reveal-card');
+      const r = card && !card.hidden ? card.getBoundingClientRect() : null;
+      const vh = window.innerHeight || 1;
+      const bottom = r && r.height > 0 ? r.top / vh : 0.6;
+      const top = 0.06;
+      this.renderer.detailBox = bottom - top > 0.1 ? { cy: (top + bottom) / 2, h: bottom - top } : null;
+    } else this.renderer.detailBox = null;
+    if (this.phase === 'title' && screen !== 'detail') {
+      const slot = document.querySelector('.stage-slot');
+      const r = slot ? slot.getBoundingClientRect() : null;
+      const vh = window.innerHeight || 1;
+      this.renderer.homeBox = r && r.height > 0 ? { top: r.top / vh, bottom: r.bottom / vh } : null;
+    }
     if (this.heldLands && performance.now() >= this.heldUntil) {
       this.territory.applyEncoded(this.heldLands);
       this.heldLands = null;

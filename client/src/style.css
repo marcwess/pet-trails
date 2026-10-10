@@ -46,10 +46,11 @@ canvas {
 
 .chip {
   position: absolute;
-  top: calc(10px + env(safe-area-inset-top));
-  left: 12px;
-  width: 10px;
-  height: 10px;
+  top: calc(4px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: #9aa4b2;
   box-shadow: 0 0 0 3px rgba(20, 24, 34, 0.28);
@@ -265,7 +266,8 @@ canvas {
 
 .lb {
   position: absolute;
-  top: calc(28px + env(safe-area-inset-top));
+  /* Below the centered 'N left' pill so a narrow phone does not stack them. */
+  top: calc(50px + env(safe-area-inset-top));
   left: 10px;
   width: min(42vw, 188px);
   background: rgba(18, 22, 32, 0.72);
@@ -1240,18 +1242,15 @@ canvas {
   cursor: default;
 }
 .pcard.locked .portrait {
-  filter: brightness(0);
-  opacity: 0.72;
-  background: #1a2330;
+  background: #3a4a63;
 }
 .pcard.locked b { color: #f4f7fb; }
 .lock-mark {
   position: absolute;
-  left: 50%;
-  top: 46%;
-  transform: translate(-50%, -50%);
+  right: 12px;
+  top: 8px;
   font-family: 'Fredoka', system-ui, sans-serif;
-  font-size: 44px;
+  font-size: 26px;
   line-height: 1;
   color: #fff;
   text-shadow: 0 3px 0 rgba(0, 0, 0, 0.35);
@@ -1289,7 +1288,7 @@ canvas {
 @media (orientation: landscape) and (max-height: 500px) {
   .home {
     grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
-    grid-template-rows: auto auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto auto;
     align-items: center;
     column-gap: 12px;
     padding-top: 8px;
@@ -1298,12 +1297,12 @@ canvas {
   }
   .topbar { grid-column: 1 / -1; grid-row: 1; }
   .home .logo { grid-column: 2; grid-row: 2; justify-self: start; font-size: 26px; -webkit-text-stroke: 3px var(--outline); }
-  .stage-slot { grid-column: 1; grid-row: 1 / span 5; min-height: 0; }
+  .stage-slot { grid-column: 1; grid-row: 1 / span 6; min-height: 0; }
   .pet-tap { left: 2%; width: 46%; top: 8%; height: 84%; right: auto; }
   .nameplate { grid-column: 2; grid-row: 3; }
-  .reward-toast { grid-column: 2; grid-row: 3; }
-  .home .play-btn { grid-column: 2; grid-row: 4; }
-  .home-actions { grid-column: 2; grid-row: 5; }
+  .reward-toast { grid-column: 2; grid-row: 4; }
+  .home .play-btn { grid-column: 2; grid-row: 5; }
+  .home-actions { grid-column: 2; grid-row: 6; }
   .home .petline { grid-column: 2; grid-row: 3; }
   .nameplate { padding: 6px 10px; }
   .species-name { font-size: 20px; }
@@ -1313,3 +1312,8 @@ canvas {
   .action-label { font-size: 16px; }
   .left-pill { top: 8px; }
 }
+
+.kit-row button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 6px 8px; }
+.kit-row .kit-what { font-family: system-ui, sans-serif; font-size: 11.5px; font-weight: 600; line-height: 1.2; opacity: 0.78; }
+/* Keep Equip in reach on short screens; the kit list scrolls under it. */
+.pet-sheet > .btn { position: sticky; bottom: 0; margin-top: 10px; box-shadow: 0 -10px 14px #fffdf8; }

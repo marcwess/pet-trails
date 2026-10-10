@@ -95,6 +95,8 @@ vec3 petRgb(vec3 hsl) {
 }
 vec3 petToSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(0.454545)); }
 vec3 petToLinear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+// Hue moves the short way round the wheel, so pink goes to gold through orange, not green.
+float petHueTo(float h, float t, float k) { float d = fract(t - h + 0.5) - 0.5; return fract(h + d * k); }
 vec3 petRecolor(vec3 linear, float id) {
   int v = int(id + 0.5);
   // Only the four milestone swaps. Anything else, including a missing
@@ -105,8 +107,8 @@ vec3 petRecolor(vec3 linear, float id) {
   // Shadow used to force hue 0.75 and crush saturation in linear space,
   // which turned a pink pig into a flat gray. Keep the animal's hue.
   if (v == 1) { hsl.y = min(1.0, hsl.y * 0.9); hsl.z = clamp(hsl.z * 0.62, 0.16, 0.58); }
-  else if (v == 2) { hsl.x = mix(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.78, hsl.z * 1.08); }
-  else if (v == 3) { hsl.x = mix(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
+  else if (v == 2) { hsl.x = petHueTo(hsl.x, 0.12, 0.84); hsl.y = min(1.0, hsl.y + 0.2); hsl.z = min(0.78, hsl.z * 1.08); }
+  else if (v == 3) { hsl.x = petHueTo(hsl.x, 0.55, 0.8); hsl.y = min(1.0, hsl.y * 0.85 + 0.12); }
   else { hsl.x = fract(hsl.x + 0.45); hsl.y = 1.0; hsl.z = clamp(hsl.z * 1.15, 0.42, 0.72); }
   return petToLinear(petRgb(hsl));
 }
@@ -656,9 +658,16 @@ export class Renderer {
   heroRecolor = 0;
   /** Home, pet detail, or the box reveal. Each frames the pet differently. */
   stageKind: 'home' | 'detail' | 'reveal' = 'home';
+  /** Pet detail: the free band above the sheet, as viewport fractions (center y, height). */
+  detailBox: { cy: number; h: number } | null = null;
+  /** Home: the stage slot between the logo and the nameplate, as viewport fractions. */
+  homeBox: { top: number; bottom: number } | null = null;
+  private readonly probe = new Vector3();
   /** 1 right after a tap on the podium pet, then it decays. */
   wiggle = 0;
   portraitURLs: string[] = [];
+  /** Same framing as the portraits, as a flat dark shape on transparency (locked cards). */
+  silhouetteURLs: string[] = [];
   /** In-game lighting, one labeled cell per species. */
   sheet: HTMLCanvasElement | null = null;
   /** Unlit menu portraits, one labeled cell per species. */
@@ -1624,18 +1633,37 @@ export class Renderer {
       let camY = portrait ? 1.28 : 1.15;
       let camZ = portrait ? 6.55 : 6.7;
       let body = portrait ? 1.05 : 0.72;
+      let shiftY = 0;
       if (this.stageKind === 'detail') {
         lookX = 0;
         lookY = 0.62;
         camY = 1.22;
         camZ = 4.35;
         body = 0.78;
+        const box = this.detailBox;
+        if (box && box.h > 0.05) {
+          // Fit the pet (about 1.3 units with ears and podium) into the band above the
+          // sheet, then slide the projection so it is centered there instead of behind it.
+          const fit = 1.3 / Math.min(0.95, box.h * 0.85);
+          camZ = Math.min(10, Math.max(3.2, fit / (2 * Math.tan((20 * Math.PI) / 180))));
+          camY = 0.9;
+          lookY = 0.55;
+          shiftY = 0.5 - box.cy;
+        }
       } else if (this.stageKind === 'reveal') {
         lookX = 0;
         lookY = 0.7;
         camY = 1.28;
         camZ = 5.1;
         body = 0.72;
+        const box = this.detailBox;
+        if (box && box.h > 0.05) {
+          const fit = 1.3 / Math.min(0.95, box.h * 0.85);
+          camZ = Math.min(10, Math.max(3.6, fit / (2 * Math.tan((20 * Math.PI) / 180))));
+          camY = 0.9;
+          lookY = 0.55;
+          shiftY = 0.5 - box.cy;
+        }
       }
       const yaw = HOME_FACE + Math.sin(this.time * 0.7) * 0.08;
       const feetY = PODIUM_TOP - 0.24 - 0.02 + bounce * bounce * 0.03 + hop;
@@ -1650,11 +1678,31 @@ export class Renderer {
       this.camera.up.set(0, 1, 0);
       this.camera.position.set(lookX, camY, camZ);
       this.camera.lookAt(lookX, lookY, 0);
+      const slot = this.homeBox;
+      if (this.stageKind === 'home' && portrait && slot && slot.bottom - slot.top > 0.1) {
+        // Stand the podium on the nameplate whatever the slot height (short Safari
+        // viewport, reward line shown), and back off if the pet would not fit.
+        this.setShift(0);
+        this.camera.updateMatrixWorld();
+        const avail = (slot.bottom - slot.top) * 0.94;
+        let feet = (1 - this.probe.set(0, 0, 0).project(this.camera).y) / 2;
+        const head = (1 - this.probe.set(0, 1.6, 0).project(this.camera).y) / 2;
+        if (feet - head > avail) {
+          const k = (feet - head) / avail;
+          this.camera.position.set(lookX, lookY + (camY - lookY) * k, camZ * k);
+          this.camera.lookAt(lookX, lookY, 0);
+          this.camera.updateMatrixWorld();
+          feet = (1 - this.probe.set(0, 0, 0).project(this.camera).y) / 2;
+        }
+        shiftY = feet - (slot.bottom - 0.012);
+      }
+      this.setShift(shiftY);
       this.coins.count = 0;
       this.orbs.count = 0;
       this.loot.count = 0;
       this.selfScreen = false;
     } else {
+      this.setShift(0);
       this.ground.visible = true;
       this.land.visible = true;
       this.gridLines.visible = false;
@@ -2367,7 +2415,7 @@ export class Renderer {
     const mat = this.winDisc.material as MeshBasicMaterial;
     mat.color.setRGB(r / 255, g / 255, b / 255);
     mat.opacity = 0.94;
-    this.winDisc.scale.set(0.3, 1, 0.3);
+    this.winDisc.scale.set(0.3, 0.3, 1);
   }
 
   private stepWin(dt: number): void {
@@ -2376,7 +2424,7 @@ export class Renderer {
     const u = 1 - this.winLife / 1.35;
     const e = u * u * (3 - 2 * u);
     const s = 0.35 + e * 72;
-    this.winDisc.scale.set(s, 1, s);
+    this.winDisc.scale.set(s, s, 1);
     const mat = this.winDisc.material as MeshBasicMaterial;
     mat.opacity = this.winLife < 0.25 ? Math.max(0, this.winLife / 0.25) * 0.94 : 0.94;
     this.winDisc.visible = this.winLife > 0;
@@ -2394,6 +2442,20 @@ export class Renderer {
       blob.position.y = base + Math.sin(this.time * spin + i) * 0.16;
       blob.rotation.y += dt * spin;
     }
+  }
+
+  /** Vertical projection shift as a fraction of the viewport (positive moves the scene up). */
+  private shiftNow = 0;
+  private setShift(f: number): void {
+    if (Math.abs(f - this.shiftNow) < 1e-4) return;
+    this.shiftNow = f;
+    if (Math.abs(f) < 1e-4) this.camera.clearViewOffset();
+    else {
+      const h = 1000;
+      const w = Math.round(1000 * this.camera.aspect);
+      this.camera.setViewOffset(w, h, 0, f * h, w, h);
+    }
+    this.camera.updateProjectionMatrix();
   }
 
   private smoothHead(id: number, target: number, dt: number): number {
@@ -2420,6 +2482,7 @@ export class Renderer {
     this.sheetMenu = composeContact('Menus', menu, refs);
     this.sheet = composeContact('In game', game, refs);
     this.portraitURLs = menu.map((tile) => tile.toDataURL('image/png'));
+    this.silhouetteURLs = menu.map((tile) => silhouetteOf(tile));
   }
 
   private kenneySwatches(): Array<[number, number, number]> {
@@ -2966,4 +3029,41 @@ function makeInstances(geo: BufferGeometry, colorOrMat: number | MeshBasicMateri
   mesh.instanceMatrix.setUsage(DynamicDrawUsage);
   mesh.count = 0;
   return mesh;
+}
+
+/** Cut the pale portrait background away (flood from the edges) and flatten the pet to one dark tone. */
+function silhouetteOf(tile: HTMLCanvasElement): string {
+  const out = document.createElement('canvas');
+  const w = tile.width;
+  const h = tile.height;
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  if (!ctx) return '';
+  ctx.drawImage(tile, 0, 0);
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const bg = new Uint8Array(w * h);
+  const near = (k: number) => Math.abs(d[k * 4]! - 0xf4) + Math.abs(d[k * 4 + 1]! - 0xfb) + Math.abs(d[k * 4 + 2]! - 0xff) < 30;
+  const stack: number[] = [];
+  for (let x = 0; x < w; x++) stack.push(x, (h - 1) * w + x);
+  for (let y = 0; y < h; y++) stack.push(y * w, y * w + w - 1);
+  while (stack.length > 0) {
+    const k = stack.pop()!;
+    if (bg[k] || !near(k)) continue;
+    bg[k] = 1;
+    const x = k % w;
+    if (x > 0) stack.push(k - 1);
+    if (x < w - 1) stack.push(k + 1);
+    if (k >= w) stack.push(k - w);
+    if (k < w * (h - 1)) stack.push(k + w);
+  }
+  for (let k = 0; k < w * h; k++) {
+    d[k * 4] = 10;
+    d[k * 4 + 1] = 15;
+    d[k * 4 + 2] = 24;
+    d[k * 4 + 3] = bg[k] ? 0 : 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out.toDataURL('image/png');
 }
