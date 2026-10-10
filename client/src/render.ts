@@ -28,6 +28,8 @@ import {
   SRGBColorSpace,
   Scene,
   ShaderMaterial,
+  Shape,
+  ShapeGeometry,
   SphereGeometry,
   TorusGeometry,
   Vector2,
@@ -43,6 +45,11 @@ import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
 const WORLD = CONFIG.worldScale;
+/**
+ * Kenney pets face +Z, and placePet turns them by π/2 − heading.
+ * Heading ≈ 0.6 showed the back. π past that is a 3/4 front.
+ */
+const HOME_FACE = Math.PI + 0.55;
 /** Pale playable ground. Inside the blob this is the clear color, so it costs no fragments. */
 const FLOOR_COLOR = 0xe7edf3;
 /** Dark surround. Drawn only as the ring outside the blob. */
@@ -611,6 +618,10 @@ export class Renderer {
   private readonly shadows: InstancedMesh;
   private readonly bases: InstancedMesh;
   private readonly ring: Mesh;
+  private readonly pulse: Mesh;
+  private readonly nudge: Mesh;
+  /** Pulsing ring and arrow while the pet is parked at spawn. */
+  parkHint = false;
   private readonly platform: Mesh;
   private readonly stage: Group;
   private readonly podium: Mesh;
@@ -797,36 +808,49 @@ export class Renderer {
     for (let id = 0; id <= 16; id++) this.landParts.push(null);
     this.setBoundary(mapBlob(1, territory.gridW, territory.gridH));
 
-    const platformGeo = new CylinderGeometry(0.7, 0.82, 0.24, 40);
+    const foot = new Mesh(new CylinderGeometry(0.98, 1.08, 0.16, 40), new MeshLambertMaterial({ color: 0xffe4c4 }));
+    foot.position.y = 0.08;
+    const platformGeo = new CylinderGeometry(0.58, 0.74, 0.28, 40);
     this.platform = new Mesh(platformGeo, new MeshLambertMaterial({ color: 0xfff6e4 }));
-    this.platform.position.y = 0.12;
+    this.platform.position.y = 0.3;
     const podiumRing = new Mesh(
-      new TorusGeometry(0.76, 0.04, 10, 48),
+      new TorusGeometry(0.64, 0.045, 10, 48),
       new MeshBasicMaterial({ color: 0xffd23f, toneMapped: false }),
     );
     podiumRing.rotation.x = Math.PI / 2;
-    podiumRing.position.y = 0.25;
+    podiumRing.position.y = 0.45;
     this.podium = podiumRing;
-    // A vertical sky behind the pet. The old floor disc filled the lens with one blue blob.
+    const podiumShadow = new Mesh(
+      new CircleGeometry(1.25, 32),
+      new MeshBasicMaterial({ color: 0x6e88aa, transparent: true, opacity: 0.28, depthWrite: false, toneMapped: false }),
+    );
+    podiumShadow.rotation.x = -Math.PI / 2;
+    podiumShadow.position.y = 0.012;
+    const stageFloor = new Mesh(
+      new CircleGeometry(7.2, 48),
+      new MeshBasicMaterial({ color: 0xc5ebff, toneMapped: false }),
+    );
+    stageFloor.rotation.x = -Math.PI / 2;
+    stageFloor.position.set(0, -0.04, 0.8);
+    // A tall sky so the clear color never shows as a stray band under the pet.
     const backdrop = new Mesh(
-      new PlaneGeometry(18, 11),
+      new PlaneGeometry(16, 20),
       new MeshBasicMaterial({ map: titleBackdrop(), toneMapped: false, depthWrite: false }),
     );
-    backdrop.position.set(0, 2.35, -4.8);
+    backdrop.position.set(0, 1.5, -5.1);
     this.stage = new Group();
-    this.stage.add(backdrop, this.platform, this.podium);
+    this.stage.add(backdrop, stageFloor, podiumShadow, foot, this.platform, this.podium);
     this.scene.add(this.stage);
     this.decor = new Group();
     const decorMat = [0xff8ec8, 0xffd23f, 0x7ec8ff, 0xc9b6ff, 0xffb703, 0x3dde7a, 0xfff1c9];
+    // Stay inside the portrait frustum. |x| past ~1.3 is clipped at this depth.
     const spots: Array<[number, number, number, number]> = [
-      [-2.6, 3.1, -3.7, 0.38],
-      [2.7, 2.8, -3.9, 0.34],
-      [-3.15, 1.5, -3.4, 0.3],
-      [3.2, 1.7, -3.5, 0.36],
-      [0.15, 3.7, -4.3, 0.32],
-      [-1.7, 3.45, -4.15, 0.24],
-      [1.85, 3.5, -4.2, 0.26],
-      [2.9, 3.05, -3.6, 0.22],
+      [-1.02, 2.55, -3.7, 0.26],
+      [1.02, 2.25, -3.55, 0.22],
+      [-0.72, 3.35, -4.15, 0.2],
+      [0.82, 3.45, -4.2, 0.18],
+      [0.05, 3.85, -4.35, 0.16],
+      [-0.35, 1.7, -3.35, 0.14],
     ];
     for (let i = 0; i < spots.length; i++) {
       const [x, y, z, rad] = spots[i]!;
@@ -835,8 +859,10 @@ export class Renderer {
         new MeshBasicMaterial({ color: decorMat[i % decorMat.length]!, toneMapped: false }),
       );
       blob.position.set(x, y, z);
-      blob.userData.spin = 0.25 + (i % 5) * 0.08;
+      blob.userData.spin = 0.35 + (i % 4) * 0.12;
       blob.userData.base = y;
+      blob.userData.ox = x;
+      blob.userData.amp = 0.12 + (i % 3) * 0.04;
       this.decor.add(blob);
     }
     this.scene.add(this.decor);
@@ -929,6 +955,28 @@ export class Renderer {
     );
     this.ring.visible = false;
     this.scene.add(this.ring);
+    const pulseGeo = new RingGeometry(0.78, 1.05, 32);
+    pulseGeo.rotateX(-Math.PI / 2);
+    this.pulse = new Mesh(
+      pulseGeo,
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false }),
+    );
+    this.pulse.visible = false;
+    this.scene.add(this.pulse);
+    const arrow = new Shape();
+    arrow.moveTo(0.48, 0);
+    arrow.lineTo(-0.22, 0.2);
+    arrow.lineTo(-0.06, 0);
+    arrow.lineTo(-0.22, -0.2);
+    arrow.closePath();
+    const nudgeGeo = new ShapeGeometry(arrow);
+    nudgeGeo.rotateX(-Math.PI / 2);
+    this.nudge = new Mesh(
+      nudgeGeo,
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false, side: DoubleSide }),
+    );
+    this.nudge.visible = false;
+    this.scene.add(this.nudge);
 
     const flashGeo = new RingGeometry(0.7, 0.95, 36);
     flashGeo.rotateX(-Math.PI / 2);
@@ -1542,6 +1590,8 @@ export class Renderer {
       for (const wall of this.fenceMeshes) wall.visible = false;
       for (const ribbon of this.ribbonBatch.ribbons) ribbon.clear();
       this.ring.visible = false;
+      this.pulse.visible = false;
+      this.nudge.visible = false;
       this.frames.count = 0;
       this.glows.count = 0;
       this.shields.count = 0;
@@ -1554,38 +1604,38 @@ export class Renderer {
       this.paws.count = 0;
       this.podium.rotation.z = this.time * 0.35;
       const mesh = this.pets[hero];
-      const wave = Math.sin(this.time * 2.4);
       const wig = this.wiggle;
       this.wiggle = Math.max(0, this.wiggle - dt * 1.6);
       const hop = wig > 0 ? Math.sin(Math.min(1, wig) * Math.PI) * 0.42 : 0;
-      const squash = 1 + wave * 0.035 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
-      // Fixed north-up camera. The pet stays in the open band above the buttons.
+      const bounce = Math.abs(Math.sin(this.time * 3.2));
+      const squash = 1 + (1 - bounce) * 0.06 + (wig > 0 ? Math.sin(wig * 12) * 0.07 : 0);
+      // About 55% of a portrait width. The pet sits on the pedestal, face toward the camera.
       const portrait = this.camera.aspect < 0.95;
-      let lookX = portrait ? 0 : 1.65;
-      let lookY = portrait ? 0.38 : 0.78;
-      let camY = portrait ? 1.18 : 1.12;
-      let camZ = portrait ? 5.7 : 6.15;
-      let body = portrait ? 1.12 : 0.96;
+      let lookX = portrait ? 0 : 1.15;
+      let lookY = portrait ? 0.48 : 0.62;
+      let camY = portrait ? 1.28 : 1.15;
+      let camZ = portrait ? 6.55 : 6.7;
+      let body = portrait ? 1.05 : 0.72;
       if (this.stageKind === 'detail') {
         lookX = 0;
-        lookY = 0.15;
-        camY = 1.05;
-        camZ = 3.55;
-        body = 1.16;
+        lookY = 0.62;
+        camY = 1.22;
+        camZ = 4.35;
+        body = 0.78;
       } else if (this.stageKind === 'reveal') {
         lookX = 0;
-        lookY = 0.55;
-        camY = 1.2;
-        camZ = 4.4;
-        body = 1.16;
+        lookY = 0.7;
+        camY = 1.28;
+        camZ = 5.1;
+        body = 0.72;
       }
-      const yaw = 0.62 + Math.sin(this.time * 0.7) * 0.16;
+      const yaw = HOME_FACE + Math.sin(this.time * 0.7) * 0.1;
       if (mesh) {
-        this.placePet(mesh, 0, 0, 0.02 + wave * 0.03 + hop, 0, yaw + wig * 0.8, wig * 0.35, body, squash, this.heroRecolor);
+        this.placePet(mesh, 0, 0, 0.22 + bounce * bounce * 0.2 + hop, 0, yaw + wig * 0.5, wig * 0.28, body, squash, this.heroRecolor);
         mesh.count = 1;
         mesh.instanceMatrix.needsUpdate = true;
       }
-      this.place(this.shadows, 0, 0, 0.26, 0, 0, 0, 0.72);
+      this.place(this.shadows, 0, 0, 0.46, 0, 0, 0, 0.55);
       this.shadows.count = 1;
       this.shadows.instanceMatrix.needsUpdate = true;
       this.camera.up.set(0, 1, 0);
@@ -1733,10 +1783,37 @@ export class Renderer {
           this.holdZ = pet.z;
           this.ring.visible = true;
           this.ring.position.set(wx, 0.04, wz);
-          const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
-          this.ring.scale.set(ringScale, 1, ringScale);
           const col = PALETTE[(Math.max(1, pet.id) - 1) % PALETTE.length]!;
-          (this.ring.material as MeshBasicMaterial).color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
+          const ringMat = this.ring.material as MeshBasicMaterial;
+          ringMat.color.setRGB(col[0] / 255, col[1] / 255, col[2] / 255);
+          if (this.parkHint) {
+            const beat = 0.5 + 0.5 * Math.sin(this.time * 5.4);
+            const ringScale = 0.76 + beat * 0.46;
+            this.ring.scale.set(ringScale, 1, ringScale);
+            ringMat.opacity = 0.38 + beat * 0.55;
+            this.pulse.visible = true;
+            const wave = (this.time * 0.9) % 1;
+            const ps = 0.82 + wave * 1.2;
+            this.pulse.position.set(wx, 0.05, wz);
+            this.pulse.scale.set(ps, 1, ps);
+            const pulseMat = this.pulse.material as MeshBasicMaterial;
+            pulseMat.color.copy(ringMat.color);
+            pulseMat.opacity = (1 - wave) * 0.55;
+            this.nudge.visible = true;
+            const h = pet.h;
+            const dist = 1.12 + beat * 0.18;
+            this.nudge.position.set(wx + Math.cos(h) * dist, 0.08, wz + Math.sin(h) * dist);
+            this.nudge.rotation.y = -h;
+            this.nudge.scale.setScalar(0.92 + beat * 0.22);
+            const nudgeMat = this.nudge.material as MeshBasicMaterial;
+            nudgeMat.color.copy(ringMat.color);
+          } else {
+            const ringScale = pet.blink ? 0.9 + 0.18 * (0.5 + 0.5 * Math.sin(this.time * Math.PI * 16)) : 1;
+            this.ring.scale.set(ringScale, 1, ringScale);
+            ringMat.opacity = 0.9;
+            this.pulse.visible = false;
+            this.nudge.visible = false;
+          }
           const screen = this.project(pet.x, 0.7, pet.z);
           this.selfScreen = screen.ok;
           this.selfSX = screen.x;
@@ -1756,6 +1833,8 @@ export class Renderer {
       }
       if (!selfAlive) {
         this.ring.visible = false;
+        this.pulse.visible = false;
+        this.nudge.visible = false;
         this.selfScreen = false;
       }
 
@@ -2297,7 +2376,10 @@ export class Renderer {
       const blob = kids[i]!;
       const spin = typeof blob.userData.spin === 'number' ? blob.userData.spin : 0.4;
       const base = typeof blob.userData.base === 'number' ? blob.userData.base : 0.4;
-      blob.position.y = base + Math.sin(this.time * spin + i) * 0.2;
+      const amp = typeof blob.userData.amp === 'number' ? blob.userData.amp : 0.12;
+      const origin = typeof blob.userData.ox === 'number' ? blob.userData.ox : blob.position.x;
+      blob.position.x = origin + Math.sin(this.time * spin * 0.45 + i) * amp;
+      blob.position.y = base + Math.sin(this.time * spin + i) * 0.16;
       blob.rotation.y += dt * spin;
     }
   }
@@ -2420,9 +2502,9 @@ export class Renderer {
     for (const mesh of this.pets) mesh.material = mat;
     const size = 180;
     const rt = new WebGLRenderTarget(size, size);
-    this.camera.position.set(1.2, 0.92, 2.45);
+    this.camera.position.set(0.72, 0.78, 2.55);
     this.camera.up.set(0, 1, 0);
-    this.camera.lookAt(0, 0.62, 0);
+    this.camera.lookAt(0, 0.52, 0);
     this.camera.aspect = 1;
     this.camera.updateProjectionMatrix();
     this.renderer.setClearColor(0xf4fbff, 1);
@@ -2430,7 +2512,7 @@ export class Renderer {
     for (let i = 0; i < this.pets.length; i++) {
       for (const mesh of this.pets) mesh.count = 0;
       const mesh = this.pets[i]!;
-      this.placePet(mesh, 0, 0, 0, 0, 0.7, 0, 1.08, 1, 0);
+      this.placePet(mesh, 0, 0, 0, 0, HOME_FACE, 0, 1.08, 1, 0);
       mesh.count = 1;
       mesh.instanceMatrix.needsUpdate = true;
       this.renderer.setRenderTarget(rt);
@@ -2524,6 +2606,8 @@ export class Renderer {
       this.shadows.visible = false;
       this.bases.visible = false;
       this.ring.visible = false;
+      this.pulse.visible = false;
+      this.nudge.visible = false;
       this.flashRing.visible = false;
       this.claimRing.visible = false;
       this.paintRing.visible = false;
@@ -2750,12 +2834,20 @@ function titleBackdrop(): CanvasTexture {
   sky.addColorStop(1, '#ffe3bf');
   g.fillStyle = sky;
   g.fillRect(0, 0, 512, 512);
+  g.fillStyle = 'rgba(255,255,255,0.45)';
+  for (let y = 24; y < 512; y += 28) {
+    for (let x = (y / 28) % 2 === 0 ? 12 : 26; x < 512; x += 28) {
+      g.beginPath();
+      g.arc(x, y, 1.6, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
   // Soft color only in the corners. The middle stays clear so it cannot cover the pet.
   const blobs: Array<[number, number, string, number]> = [
-    [40, 48, '#ffffff', 70],
-    [470, 36, '#ffe56b', 64],
-    [28, 470, '#ff8ec8', 72],
-    [488, 460, '#7ec8ff', 60],
+    [70, 80, '#ffffff', 56],
+    [450, 70, '#ffe56b', 48],
+    [48, 450, '#ff8ec8', 52],
+    [470, 440, '#7ec8ff', 46],
   ];
   for (const [x, y, color, rad] of blobs) {
     const paint = g.createRadialGradient(x, y, 4, x, y, rad);

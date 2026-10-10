@@ -49,6 +49,9 @@ import { gfx } from './gfx.js';
 import type { Perf } from './perf.js';
 import type { Territory } from './territory.js';
 
+/** How long a seated pet waits at spawn before walking its facing direction. */
+const PARK_MS = 2500;
+
 type Phase = 'title' | 'playing' | 'dead';
 
 interface Ent {
@@ -131,7 +134,8 @@ export class Game {
   private serverTick = 0;
   private serverTickAt = 0;
   private serverAck = 0;
-  private steerUntil = 0;
+  /** When the pet was seated and parked. Auto-start fires PARK_MS later. */
+  private parkedAt = 0;
   private hitLeft = 0;
   private previewSpecies: number | null = null;
   private readonly collection: Collection;
@@ -171,7 +175,7 @@ export class Game {
   private predPrimed = false;
   /** False until the welcome for the round we just joined. Deltas before that belong to the previous room. */
   private joined = false;
-  /** True once the player has aimed. Until then we do not transmit the spawn heading. */
+  /** True once the player has aimed, or the park timer kicked the pet off. Until then we do not transmit the spawn heading. */
   private sentSteer = false;
   /** Last rendered own-pet position, in cells. Metrics and the trail both use this. */
   private shownX = 0;
@@ -346,7 +350,7 @@ export class Game {
     const mode = await this.net.whenSettled();
     this.hud.showTitle(false);
     this.hud.showHud(true);
-    this.steerUntil = performance.now() + 4500;
+    this.hud.showSteer();
     this.snapCam = true;
     if (mode === 'online') {
       this.offline = null;
@@ -387,6 +391,7 @@ export class Game {
     if (!player) return;
     this.joined = true;
     this.sentSteer = false;
+    this.parkedAt = performance.now();
     this.seq = 0;
     this.offline = sim;
     this.selfId = player.id;
@@ -422,10 +427,17 @@ export class Game {
     for (const ent of this.ents) if (ent.hop > 0) ent.hop = Math.max(0, ent.hop - dt);
     const self = this.ents[this.selfId];
     if (self) this.renderer.landPct = self.land / this.arenaArea;
+    const seated = this.phase === 'playing' && (this.offline !== null || this.joined);
+    if (this.phase === 'playing' && !this.sentSteer) this.input.claimHeld();
     this.input.sample();
+    if (seated && !this.sentSteer && (this.offline !== null || this.predPrimed) && performance.now() - this.parkedAt >= PARK_MS) {
+      this.kickoff();
+    }
+    const parked = seated && !this.sentSteer;
+    if (parked) this.hud.showSteer();
+    else if (this.phase === 'playing') this.hud.hideSteer();
     const stick = this.input.stick();
     this.hud.setStick(stick.x, stick.y, stick.dx, stick.dy, stick.on && this.phase === 'playing');
-    if ((this.input.steering || performance.now() > this.steerUntil) && this.phase === 'playing') this.hud.hideSteer();
     this.frameDt = dt;
     if (this.phase === 'playing') {
       if (this.offline) this.stepOffline(dt);
@@ -466,6 +478,7 @@ export class Game {
     const petCount = this.fillDraw();
     const view = this.phase === 'title' ? 'title' : this.phase === 'dead' ? 'dead' : 'play';
     const hero = this.previewSpecies ?? this.equipped().species;
+    this.renderer.parkHint = parked;
     this.renderer.update(frame || dt * 0.15, view, hero, this.drawPets, petCount, this.drawPickups, this.phase === 'title' ? 0 : this.pickupCount, this.snapCam && this.phase === 'playing');
     if (this.phase !== 'title') this.snapCam = false;
     if (gfx.cpu) this.hud.setLabels(this.renderer.labels);
@@ -692,9 +705,33 @@ export class Game {
     this.renderer.setBoundary(ring);
   }
 
+  private kickoff(): void {
+    const h = this.facing();
+    const x = Math.cos(h);
+    const y = Math.sin(h);
+    this.input.desiredX = x;
+    this.input.desiredY = y;
+    this.input.steering = true;
+    this.predDX = x;
+    this.predDY = y;
+    this.sentSteer = true;
+  }
+
+  private facing(): number {
+    if (this.offline) {
+      const player = this.offline.players[this.selfId];
+      if (player) return player.heading;
+    }
+    if (this.predPrimed) return this.predH;
+    const ent = this.ents[this.selfId];
+    if (ent && ent.used) return ent.h;
+    return 0;
+  }
+
   private onWelcome(msg: WelcomeMsg): void {
     this.joined = true;
     this.sentSteer = false;
+    this.parkedAt = performance.now();
     this.selfId = msg.id;
     this.seq = 0;
     this.serverAck = 0;

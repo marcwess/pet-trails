@@ -36,6 +36,10 @@ export class Player {
   trailX: Float64Array;
   trailY: Float64Array;
   trailLen = 0;
+  /** Cell key for each trail sample, so a cut test only looks near the segment. */
+  trailKey: Int32Array;
+  trailKeyed: Uint8Array;
+  readonly trailCells = new Map<number, number[]>();
   train: Uint8Array;
   trainLen = 0;
   aliveMs = 0;
@@ -73,6 +77,8 @@ export class Player {
     this.id = id;
     this.trailX = new Float64Array(maxTrail);
     this.trailY = new Float64Array(maxTrail);
+    this.trailKey = new Int32Array(maxTrail);
+    this.trailKeyed = new Uint8Array(maxTrail);
     this.train = new Uint8Array(maxTrain);
   }
 
@@ -83,6 +89,7 @@ export class Player {
     this.xp = 0;
     this.outside = false;
     this.trailLen = 0;
+    this.trailCells.clear();
     this.trainLen = 0;
     this.aliveMs = 0;
     this.deathReason = '';

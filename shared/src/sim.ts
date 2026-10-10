@@ -1,10 +1,10 @@
 import { DEFAULT_KIT, cooldownBase, cooldownOf, effectOf, rarityScale, speedMultiplier, type Kit } from './abilities.js';
 import { botWantsAbility, updateBot, type BotView } from './bots.js';
 import { BOT_NAMES, CONFIG, SPECIES, makeConfig, type GameConfig } from './config.js';
-import { LandBook, polylineNearSegment } from './land.js';
+import { LandBook, distPointSeg } from './land.js';
 import { integrateBody } from './motion.js';
 import { rollBotKit } from './profile.js';
-import { circleRing, mapBlob, spawnRadius } from './shape.js';
+import { circleRing, insideGrid, mapBlob, spawnRadius } from './shape.js';
 import { Player, type DeathReason } from './player.js';
 import { mulberry32, rngInt } from './rng.js';
 import type { SimEvent, SimStats } from './types.js';
@@ -30,6 +30,12 @@ const BOT_LEVELS = [1, 5, 8, 10, 12, 15, 18, 20];
 const LOCKSTEP_SLACK = 2;
 /** Ticks a human waits for its next input before the server moves it anyway. */
 const LOCKSTEP_WAIT = 6;
+/** Trail hash cell, in world cells. A cut only tests buckets the segment touches. */
+const TRAIL_CELL = 3;
+
+function trailKey(x: number, y: number): number {
+  return (Math.floor(x / TRAIL_CELL) + 512) * 1024 + (Math.floor(y / TRAIL_CELL) + 512);
+}
 
 export class Sim {
   readonly cfg: GameConfig;
@@ -49,6 +55,8 @@ export class Sim {
   private readonly usedNames = new Set<string>();
   private readonly freeNames: string[] = [];
   private readonly aliveBuf: Player[] = [];
+  private readonly moveCfg: GameConfig;
+  private readonly spawnLists = new Map<number, Array<{ x: number; y: number; dist: number }>>();
   private botView: BotView;
 
   constructor(over: Partial<GameConfig> = {}, seed = 1) {
@@ -68,6 +76,7 @@ export class Sim {
     for (let i = 0; i < PICKUP_POOL; i++) {
       this.pickups.push({ id: i + 1, kind: 0, x: 0, y: 0, active: false });
     }
+    this.moveCfg = { ...this.cfg };
     this.botView = {
       tick: 0,
       cfg: this.cfg,
@@ -139,7 +148,7 @@ export class Sim {
     if (p.bot) this.releaseBotName(p.name);
     p.alive = false;
     p.active = false;
-    p.trailLen = 0;
+    this.wipeTrail(p);
     p.land = 0;
     this.events.push({ e: 'leave', id });
   }
@@ -220,7 +229,7 @@ export class Sim {
       if (!home) return false;
       p.x = home.x;
       p.y = home.y;
-      p.trailLen = 0;
+      this.wipeTrail(p);
       p.outside = false;
     } else {
       return false;
@@ -376,7 +385,7 @@ export class Sim {
         const x0 = p.x;
         const y0 = p.y;
         const mul = this.speedMul(p);
-        integrateBody(p, dt, { ...this.cfg, speed: this.cfg.speed * mul, turnRate: this.cfg.turnRate * mul }, undefined, this.land.mapRing);
+        integrateBody(p, dt, this.motionCfg(mul), undefined, this.land.mapRing);
         if (!p.alive) break;
         this.followSegment(p, x0, y0, p.x, p.y);
       }
@@ -494,7 +503,7 @@ export class Sim {
     this.land.clear(id);
     const p = this.players[id];
     if (!p) return;
-    p.trailLen = 0;
+    this.wipeTrail(p);
     p.land = 0;
   }
 
@@ -529,7 +538,7 @@ export class Sim {
   debugSetTrail(id: number, cells: number[]): void {
     const p = this.players[id];
     if (!p) return;
-    p.trailLen = 0;
+    this.wipeTrail(p);
     const w = this.cfg.gridW;
     for (const i of cells) {
       this.pushTrail(p, (i % w) + 0.5, ((i / w) | 0) + 0.5, 0);
@@ -579,7 +588,7 @@ export class Sim {
     if (p.passiveId === 'headstart') size += effectOf(this.cfg.abilities.headStartExtra, p.rarity, this.cfg, p.level);
     const radius = spawnRadius(size);
     const spot = this.findSpawn(p.bot, radius);
-    this.land.unionPolygon(p.id, [circleRing(spot.x, spot.y, radius, 48)]);
+    this.land.placeInside(p.id, [circleRing(spot.x, spot.y, radius, 48)]);
     p.x = spot.x;
     p.y = spot.y;
     const mid = this.land.mapCenter();
@@ -642,31 +651,38 @@ export class Sim {
     wantDist: number,
     headMin: number,
   ): { x: number; y: number } | null {
-    const { gridW: w, gridH: h } = this.cfg;
     const step = Math.max(4, Math.floor(radius));
     let bestX = 0;
     let bestY = 0;
     let bestScore = -Infinity;
     let found = 0;
-    for (let y = step; y < h - step; y += step) {
-      for (let x = step; x < w - step; x += step) {
-        const room = this.land.fenceAt(x, y);
-        if (!room.inside || room.dist < radius + 0.8) continue;
-        if (!this.diskClear(x, y, radius + gap)) continue;
-        const head = this.nearestLiving(x, y);
-        if (head < headMin) continue;
-        const dist = Math.hypot(x - ax, y - ay);
-        const score = head * 0.2 - Math.abs(dist - wantDist) + this.rng() * 6;
-        found++;
-        if (score > bestScore) {
-          bestScore = score;
-          bestX = x;
-          bestY = y;
-        }
+    for (const cell of this.spawnCells(step)) {
+      const x = cell.x;
+      const y = cell.y;
+      if (cell.dist < radius + 0.8) continue;
+      if (!this.diskClear(x, y, radius + gap)) continue;
+      const head = this.nearestLiving(x, y);
+      if (head < headMin) continue;
+      const dist = Math.hypot(x - ax, y - ay);
+      const score = head * 0.2 - Math.abs(dist - wantDist) + this.rng() * 6;
+      found++;
+      if (score > bestScore) {
+        bestScore = score;
+        bestX = x;
+        bestY = y;
       }
     }
     if (found === 0) return null;
     return { x: bestX, y: bestY };
+  }
+
+  /** Map fence samples for one grid step. The blob does not move, so this is once per step. */
+  private spawnCells(step: number): Array<{ x: number; y: number; dist: number }> {
+    const cached = this.spawnLists.get(step);
+    if (cached) return cached;
+    const list = insideGrid(this.land.mapRing, step, this.cfg.gridW, this.cfg.gridH);
+    this.spawnLists.set(step, list);
+    return list;
   }
 
   private nearestLiving(x: number, y: number): number {
@@ -721,7 +737,7 @@ export class Sim {
     const radius = this.cfg.headRadius;
     for (const o of this.roster) {
       if (!o.active || !o.alive || o.id === p.id || o.trailLen === 0) continue;
-      if (polylineNearSegment(ax, ay, bx, by, o.trailX, o.trailY, 0, o.trailLen, radius)) {
+      if (this.trailNear(o, ax, ay, bx, by, radius)) {
         this.kill(o, p, 'trail');
       }
     }
@@ -733,7 +749,7 @@ export class Sim {
         const hit = this.boundaryPoint(p.id, ax, ay, bx, by, true);
         this.pushTrail(p, hit[0], hit[1], 0.04, true);
         if (p.trailLen >= 3) this.finishClaim(p);
-        else p.trailLen = 0;
+        else this.wipeTrail(p);
         if (!p.alive) return false;
       }
       p.outside = false;
@@ -776,6 +792,7 @@ export class Sim {
         if (force) {
           p.trailX[p.trailLen - 1] = x;
           p.trailY[p.trailLen - 1] = y;
+          this.bucketTrail(p, p.trailLen - 1);
         }
         return;
       }
@@ -783,7 +800,70 @@ export class Sim {
     if (p.trailLen >= p.trailX.length) return;
     p.trailX[p.trailLen] = x;
     p.trailY[p.trailLen] = y;
+    this.bucketTrail(p, p.trailLen);
     p.trailLen++;
+  }
+
+  private wipeTrail(p: Player): void {
+    p.trailLen = 0;
+    p.trailCells.clear();
+  }
+
+  /** Shared config for a speed multiplier. mul === 1 returns the room config. */
+  private motionCfg(mul: number): GameConfig {
+    if (mul === 1) return this.cfg;
+    this.moveCfg.speed = this.cfg.speed * mul;
+    this.moveCfg.turnRate = this.cfg.turnRate * mul;
+    return this.moveCfg;
+  }
+
+  private bucketTrail(p: Player, i: number): void {
+    const key = trailKey(p.trailX[i]!, p.trailY[i]!);
+    if (p.trailKeyed[i] === 1 && p.trailKey[i] === key) {
+      const same = p.trailCells.get(key);
+      if (same) {
+        for (let k = same.length - 1; k >= 0; k--) if (same[k] === i) return;
+      }
+    } else if (p.trailKeyed[i] === 1) {
+      const old = p.trailCells.get(p.trailKey[i]!);
+      if (old) {
+        const at = old.lastIndexOf(i);
+        if (at >= 0) old.splice(at, 1);
+      }
+    }
+    p.trailKey[i] = key;
+    p.trailKeyed[i] = 1;
+    let bucket = p.trailCells.get(key);
+    if (!bucket) {
+      bucket = [];
+      p.trailCells.set(key, bucket);
+    }
+    bucket.push(i);
+  }
+
+  /** True when a trail sample sits within `radius` of the segment. */
+  private trailNear(p: Player, ax: number, ay: number, bx: number, by: number, radius: number): boolean {
+    if (p.trailLen === 0) return false;
+    const minX = Math.min(ax, bx) - radius;
+    const maxX = Math.max(ax, bx) + radius;
+    const minY = Math.min(ay, by) - radius;
+    const maxY = Math.max(ay, by) + radius;
+    const x0 = Math.floor(minX / TRAIL_CELL);
+    const x1 = Math.floor(maxX / TRAIL_CELL);
+    const y0 = Math.floor(minY / TRAIL_CELL);
+    const y1 = Math.floor(maxY / TRAIL_CELL);
+    for (let cy = y0; cy <= y1; cy++) {
+      for (let cx = x0; cx <= x1; cx++) {
+        const bucket = p.trailCells.get((cx + 512) * 1024 + (cy + 512));
+        if (!bucket) continue;
+        for (let k = 0; k < bucket.length; k++) {
+          const i = bucket[k]!;
+          if (i >= p.trailLen) continue;
+          if (distPointSeg(p.trailX[i]!, p.trailY[i]!, ax, ay, bx, by) <= radius) return true;
+        }
+      }
+    }
+    return false;
   }
 
   private finishClaim(p: Player): void {
@@ -804,7 +884,7 @@ export class Sim {
         }
       }
       const n = this.land.commitClaim(p.id);
-      p.trailLen = 0;
+      this.wipeTrail(p);
       p.outside = false;
       p.land = this.land.areaOf(p.id);
       if (n > 0.5) {
@@ -814,7 +894,7 @@ export class Sim {
         this.events.push({ e: 'claim', id: p.id, n, x: p.x, y: p.y });
       }
     } else {
-      p.trailLen = 0;
+      this.wipeTrail(p);
       p.outside = false;
     }
     for (const v of victims) {
@@ -876,7 +956,7 @@ export class Sim {
     });
     if (credit && killer) this.land.takeAll(victim.id, killer.id);
     else this.land.clear(victim.id);
-    victim.trailLen = 0;
+    this.wipeTrail(victim);
     victim.land = 0;
     if (killer) killer.land = this.land.areaOf(killer.id);
     // While the room is still open a fallen bot comes back, so a player who joins
@@ -984,7 +1064,7 @@ export class Sim {
   private nearTrail(x: number, y: number, radius: number): boolean {
     for (const p of this.roster) {
       if (!p.active || p.trailLen === 0) continue;
-      if (polylineNearSegment(x, y, x, y, p.trailX, p.trailY, 0, p.trailLen, radius)) return true;
+      if (this.trailNear(p, x, y, x, y, radius)) return true;
     }
     return false;
   }

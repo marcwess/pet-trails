@@ -151,6 +151,55 @@ export function fenceQuery(ring: Loop, x: number, y: number): FenceHit {
 }
 
 /**
+ * Inside samples of a regular grid, with distance to the ring.
+ * One pass over the edges, so seating a room does not repeat a full fence query per cell.
+ */
+export function insideGrid(
+  ring: Loop,
+  step: number,
+  w: number,
+  h: number,
+): Array<{ x: number; y: number; dist: number }> {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let y = step; y < h - step; y += step) {
+    for (let x = step; x < w - step; x += step) {
+      xs.push(x);
+      ys.push(y);
+    }
+  }
+  const d2 = new Float64Array(xs.length);
+  d2.fill(Infinity);
+  const n = openLen(ring);
+  for (let i = 0; i < n; i++) {
+    const p = ring[i]!;
+    const q = ring[(i + 1) % n]!;
+    const dx = q[0] - p[0];
+    const dy = q[1] - p[1];
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-12) continue;
+    const inv = 1 / len2;
+    for (let k = 0; k < xs.length; k++) {
+      let t = ((xs[k]! - p[0]) * dx + (ys[k]! - p[1]) * dy) * inv;
+      if (t < 0) t = 0;
+      else if (t > 1) t = 1;
+      const px = p[0] + dx * t;
+      const py = p[1] + dy * t;
+      const ddx = xs[k]! - px;
+      const ddy = ys[k]! - py;
+      const dist2 = ddx * ddx + ddy * ddy;
+      if (dist2 < d2[k]!) d2[k] = dist2;
+    }
+  }
+  const out: Array<{ x: number; y: number; dist: number }> = [];
+  for (let k = 0; k < xs.length; k++) {
+    if (!pointInLoop(ring, xs[k]!, ys[k]!)) continue;
+    out.push({ x: xs[k]!, y: ys[k]!, dist: Math.sqrt(d2[k]!) });
+  }
+  return out;
+}
+
+/**
  * Keep a body inside the loop. A step through the fence is pulled back and
  * the outward part of the heading is dropped so the pet slides along the curve.
  */

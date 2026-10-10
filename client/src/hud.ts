@@ -48,8 +48,6 @@ export class Hud {
   private readonly petline = must('petline');
   private readonly petCardName = must('petcard-name');
   private readonly petCardFill = must('petcard-fill');
-  private readonly petCardUnlocks = must('petcard-unlocks');
-  private readonly petCardBoost = must('petcard-boost');
   private readonly levelUp = must('levelup');
   private readonly levelUpDetail = must('levelup-detail');
   private readonly playBtn = must('play') as HTMLButtonElement;
@@ -252,21 +250,7 @@ export class Hud {
     this.rarityPill.textContent = rarity.charAt(0).toUpperCase() + rarity.slice(1);
     this.rarityPill.style.background = RARITY_COLOR[rarity];
     this.petCardFill.style.width = `${Math.round(Math.max(0, Math.min(1, card.xp)) * 100)}%`;
-    this.petCardBoost.textContent = card.boost > 0 ? `Abilities +${card.boost}%` : 'Abilities +0%';
     this.showReward(card.reward);
-    this.petCardUnlocks.replaceChildren();
-    if (card.unlocks.length === 0) {
-      const chip = document.createElement('span');
-      chip.textContent = 'Next: Sparkle at 3';
-      chip.className = 'next';
-      this.petCardUnlocks.appendChild(chip);
-      return;
-    }
-    for (const name of card.unlocks) {
-      const chip = document.createElement('span');
-      chip.textContent = name;
-      this.petCardUnlocks.appendChild(chip);
-    }
   }
 
   setPlayEnabled(on: boolean): void {
@@ -279,6 +263,10 @@ export class Hud {
 
   showHud(on: boolean): void {
     this.hud.hidden = !on;
+  }
+
+  showSteer(): void {
+    this.steer.classList.remove('hide');
   }
 
   hideSteer(): void {

@@ -9,7 +9,9 @@ import {
   buyBox,
   equippedPet,
   kitOf,
+  levelPower,
   openBox,
+  unlockNames,
   type PetInstance,
   type Profile,
 } from '@pet-trails/shared';
@@ -89,17 +91,15 @@ export class Collection {
       card.className = 'pcard' + (pet.rarity === 'legendary' ? ' legendary' : '') + (pet.instanceId === equipped ? ' on' : '');
       card.style.borderColor = RARITY_COLOR[pet.rarity];
       const species = SPECIES[pet.species] ?? 'cat';
-      const active = pet.actives[pet.equippedActive];
-      const passive = pet.passives[pet.equippedPassive];
       const portrait = this.host.portrait(pet.species);
       card.classList.add(`rarity-${pet.rarity}`);
       card.innerHTML =
+        `<span class="portrait-wrap">` +
         (portrait ? `<img class="portrait" alt="" src="${portrait}" />` : `<i class="portrait"></i>`) +
+        `<span class="lv-badge">${pet.level}</span>` +
+        `</span>` +
         `<b>${SPECIES_LABEL[species]}</b>` +
-        `<span class="rare-name">${label(pet.rarity)}</span>` +
-        `<span class="lv">Lv ${pet.level}</span>` +
-        `<span class="kit">${ABILITY_ICON[active]} ${ABILITY_LABEL[active]} · ${ABILITY_ICON[passive]} ${ABILITY_LABEL[passive]}</span>` +
-        `<span class="blurb">${ABILITY_BLURB[active]}</span>`;
+        `<span class="rare-name">${label(pet.rarity)}</span>`;
       card.addEventListener('click', () => this.showDetail(pet));
       grid.appendChild(card);
     }
@@ -124,7 +124,15 @@ export class Collection {
     const active = pet.actives[pet.equippedActive];
     const passive = pet.passives[pet.equippedPassive];
     blurb.textContent = `${ABILITY_BLURB[active]} ${ABILITY_BLURB[passive]}`;
-    sheet.append(title, rare, blurb, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
+    const boost = document.createElement('p');
+    boost.className = 'boost';
+    const pct = Math.round((levelPower(pet.level) - 1) * 100);
+    boost.textContent = pct > 0 ? `Abilities +${pct}%` : 'Abilities +0%';
+    const next = document.createElement('p');
+    next.className = 'next-line';
+    const names = unlockNames(pet.level);
+    next.textContent = names.length > 0 ? names.join(' · ') : 'Next: Sparkle at 3';
+    sheet.append(title, rare, boost, next, blurb, this.pairRow(pet, 'active'), this.pairRow(pet, 'passive'));
     const equip = document.createElement('button');
     equip.type = 'button';
     equip.className = 'btn';

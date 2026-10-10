@@ -55,6 +55,31 @@ test('a control finger never becomes the stick', () => {
   assert.equal(steer.sample().pointerId, 8);
 });
 
+test('a held Play thumb becomes the steer when the seat is claimed', () => {
+  const steer = new Steer();
+  steer.down(3, 200, 700, true);
+  steer.move(3, 200, 660);
+  assert.equal(steer.sample().active, false);
+  steer.claimHeld();
+  const sample = steer.sample();
+  assert.equal(sample.pointerId, 3);
+  assert.equal(sample.originX, 200);
+  assert.equal(sample.originY, 700);
+  assert.ok(sample.steering);
+  assert.ok(sample.dirY > 0.9);
+});
+
+test('a thumb still on Play is armed and the next drag steers', () => {
+  const steer = new Steer();
+  steer.down(3, 180, 720, true);
+  steer.claimHeld();
+  assert.equal(steer.sample().active, true);
+  assert.equal(steer.sample().steering, false);
+  steer.move(3, 180, 660);
+  assert.equal(steer.sample().steering, true);
+  assert.ok(steer.sample().dirY > 0.9);
+});
+
 test('noteViewport does not drop the finger', () => {
   const steer = new Steer();
   steer.down(1, 12, 12, false);

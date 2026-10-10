@@ -45,6 +45,11 @@ export class Input {
     window.addEventListener('resize', () => this.steer.noteViewport());
   }
 
+  /** Promote a finger that is still down, including the Play thumb. */
+  claimHeld(): void {
+    this.steer.claimHeld();
+  }
+
   /** Anchor and drag, for the on-screen ring. */
   stick(): { x: number; y: number; dx: number; dy: number; on: boolean } {
     const s = this.steer.sample();
@@ -86,7 +91,10 @@ export class Input {
 
   private onPointerDown = (ev: PointerEvent) => {
     if (ev.pointerType === 'touch' || this.sawTouch) return;
-    if (isControl(ev.target)) return;
+    if (isControl(ev.target)) {
+      this.steer.down(ev.pointerId, ev.clientX, ev.clientY, true);
+      return;
+    }
     ev.preventDefault();
     this.mouseDown = true;
     this.mouseX = ev.clientX;
@@ -100,9 +108,9 @@ export class Input {
     this.mouseY = ev.clientY;
     this.mouseValid = true;
     if (ev.pointerType === 'touch' || this.sawTouch) return;
+    this.steer.move(ev.pointerId, ev.clientX, ev.clientY);
     if (!this.mouseDown) return;
     ev.preventDefault();
-    this.steer.move(ev.pointerId, ev.clientX, ev.clientY);
   };
 
   private onPointerUp = (ev: PointerEvent) => {

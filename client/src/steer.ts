@@ -25,7 +25,10 @@ export interface SteerSample {
 interface Finger {
   x: number;
   y: number;
-  /** Buttons, inputs, and links. They must not steer. */
+  /** Where the finger went down. A drag during the seat wait keeps this origin. */
+  ox: number;
+  oy: number;
+  /** Buttons, inputs, and links. They must not steer until the seat is confirmed. */
   control: boolean;
 }
 
@@ -42,10 +45,35 @@ export class Steer {
   private steering = false;
 
   down(id: number, x: number, y: number, control: boolean): void {
-    this.fingers.set(id, { x, y, control });
+    this.fingers.set(id, { x, y, ox: x, oy: y, control });
     if (control) return;
     if (this.active) return;
     this.capture(id, x, y);
+  }
+
+  /**
+   * The seat just confirmed and the stick is still free. A thumb that is
+   * still down — including the Play button — becomes the steer. The origin
+   * stays where the finger landed, so a drag during the wait is already a
+   * direction and a second touch is not required.
+   */
+  claimHeld(): void {
+    if (this.active) return;
+    let pick: { id: number; finger: Finger } | null = null;
+    for (const [id, finger] of this.fingers) {
+      if (!finger.control) {
+        pick = { id, finger };
+        break;
+      }
+      if (!pick) pick = { id, finger };
+    }
+    if (!pick) return;
+    pick.finger.control = false;
+    this.capture(pick.id, pick.finger.ox, pick.finger.oy);
+    this.x = pick.finger.x;
+    this.y = pick.finger.y;
+    this.slideAnchor();
+    this.aim();
   }
 
   move(id: number, x: number, y: number): void {

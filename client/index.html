@@ -16,42 +16,39 @@
       <div id="chip" class="chip wait" title="Connecting"></div>
       <section id="title" class="home">
         <header class="topbar">
+          <button id="name-btn" class="name-pill" type="button">You</button>
           <div class="currency coin" id="coin-chip"><span>coins</span><b id="coin-count">0</b></div>
-          <div class="currency gem"><span>gems</span><b id="gem-count">0</b></div>
         </header>
         <h1 class="logo">PET TRAILS</h1>
         <div class="stage-slot" aria-hidden="true"></div>
         <button id="pet-tap" class="pet-tap" type="button" aria-label="Wiggle pet"></button>
-        <div class="identity">
-          <button id="name-btn" class="name-pill" type="button">You</button>
+        <div class="nameplate">
+          <div id="petcard-name" class="species-name">Your pet</div>
           <div class="meta-row">
             <span id="rarity-pill" class="rarity-pill">Common</span>
             <span id="level-ring" class="level-ring" aria-label="Level">1</span>
             <div class="bar"><i id="petcard-fill"></i></div>
           </div>
-          <div id="petcard-name" class="species-name">Your pet</div>
-          <div id="petcard-boost">Abilities +0%</div>
-          <div id="petcard-unlocks" class="chips"></div>
         </div>
         <p id="petcard-reward" class="reward-toast" hidden></p>
         <button id="play" class="play-btn" type="button" disabled>PLAY</button>
         <div class="home-actions">
-          <button id="open-pets" class="action-btn" type="button">
+          <button id="open-pets" class="action-btn pets" type="button">
             <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
-              <ellipse cx="16" cy="22" rx="7" ry="5.4" fill="#ff7aa2"></ellipse>
-              <circle cx="8.2" cy="13" r="3.1" fill="#ff7aa2"></circle>
-              <circle cx="16" cy="9.2" r="3.1" fill="#ff7aa2"></circle>
-              <circle cx="23.8" cy="13" r="3.1" fill="#ff7aa2"></circle>
+              <ellipse cx="16" cy="22" rx="7" ry="5.4" fill="#fff"></ellipse>
+              <circle cx="8.2" cy="13" r="3.1" fill="#fff"></circle>
+              <circle cx="16" cy="9.2" r="3.1" fill="#fff"></circle>
+              <circle cx="23.8" cy="13" r="3.1" fill="#fff"></circle>
             </svg>
             <span class="action-label">Pets</span>
             <i id="pets-badge" class="dot" hidden></i>
           </button>
-          <button id="open-boxes" class="action-btn" type="button">
+          <button id="open-boxes" class="action-btn boxes" type="button">
             <svg class="ico" viewBox="0 0 32 32" aria-hidden="true">
-              <rect x="6" y="14" width="20" height="12" rx="3" fill="#ffb703"></rect>
-              <rect x="5" y="11" width="22" height="5" rx="2" fill="#ffe56a"></rect>
-              <rect x="14.2" y="11" width="3.6" height="15" fill="#fff"></rect>
-              <path d="M16 12c-2.6-5.2-7.4-3.4-5.6-.8 1.6 2.2 5.6.8 5.6.8s4-3 5.6-.8c1.8-2.6-3-4.4-5.6.8z" fill="#fff"></path>
+              <rect x="6" y="14" width="20" height="12" rx="3" fill="#fff"></rect>
+              <rect x="5" y="11" width="22" height="5" rx="2" fill="#fff6c8"></rect>
+              <rect x="14.2" y="11" width="3.6" height="15" fill="#ffd23f"></rect>
+              <path d="M16 12c-2.6-5.2-7.4-3.4-5.6-.8 1.6 2.2 5.6.8 5.6.8s4-3 5.6-.8c1.8-2.6-3-4.4-5.6.8z" fill="#ffd23f"></path>
             </svg>
             <span class="action-label">Boxes</span>
             <i id="box-badge" class="dot" hidden></i>
@@ -72,7 +69,7 @@
             <span id="you-train">0</span>
           </div>
         </div>
-        <div id="steer" class="steer">Drag anywhere to steer</div>
+        <div id="steer" class="steer hide">Drag anywhere to move</div>
         <button id="ability" class="ability" type="button" aria-label="Ability">
           <svg class="cd" viewBox="0 0 100 100" aria-hidden="true">
             <circle class="cd-track" cx="50" cy="50" r="44"></circle>
